@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+# Require approval for PRs from forks (first-time contributors)
+# https://docs.github.com/en/actions/managing-workflow-runs/approving-workflow-runs-from-public-forks
+
 jobs:
   lint:
     runs-on: ubuntu-latest
