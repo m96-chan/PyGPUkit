@@ -85,9 +85,9 @@ jobs:
           name: wheel-linux-py${{ matrix.python-version }}
           path: dist/*.whl
 
-  # Build CUDA wheels for Windows
+  # Build CUDA wheels for Windows (self-hosted runner with CUDA pre-installed)
   build-windows:
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, cuda]
     needs: test
     strategy:
       matrix:
@@ -100,12 +100,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: "12.4.0"
-          method: "network"
 
       - name: Install build dependencies
         run: |
