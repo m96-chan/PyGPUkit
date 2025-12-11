@@ -10,15 +10,19 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 find_package(CUDAToolkit REQUIRED)
 
 # Find Python and pybind11
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(pybind11 CONFIG REQUIRED)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
-# Set CUDA architectures for RTX 3090 Ti (SM 86)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+# Set default CUDA architectures if not specified
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+endif()
+
+message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # Build single pybind11 module with all sources
 pybind11_add_module(_pygpukit_native
@@ -51,7 +55,8 @@ set_target_properties(_pygpukit_native PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-# Install
+# Install the module to the correct location for scikit-build-core
 install(TARGETS _pygpukit_native
     LIBRARY DESTINATION pygpukit
+    RUNTIME DESTINATION pygpukit
 )

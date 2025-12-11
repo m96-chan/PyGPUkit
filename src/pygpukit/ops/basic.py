@@ -44,7 +44,7 @@ def add(a: GPUArray, b: GPUArray) -> GPUArray:
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        # Use native C++ CUDA kernel for real GPU
+        # Fast path: use native operations with zero-copy
         return _add_native(a, b)
     else:
         # CPU simulation
@@ -60,18 +60,20 @@ def _add_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
 
 
 def _add_native(a: GPUArray, b: GPUArray) -> GPUArray:
-    """Native C++ CUDA implementation of add."""
+    """Native C++ CUDA implementation of add (zero-copy)."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
 
-    # Convert Python GPUArray to native GPUArray and perform operation
-    a_native = native.from_numpy(a.to_numpy())
-    b_native = native.from_numpy(b.to_numpy())
+    # Get native arrays (zero-copy if already native)
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Perform operation on GPU
     c_native = native.add(a_native, b_native)
 
-    # Convert result back to Python GPUArray
-    return from_numpy(c_native.to_numpy())
+    # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
 
 
 def mul(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -107,18 +109,20 @@ def _mul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
 
 
 def _mul_native(a: GPUArray, b: GPUArray) -> GPUArray:
-    """Native C++ CUDA implementation of mul."""
+    """Native C++ CUDA implementation of mul (zero-copy)."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
 
-    # Convert Python GPUArray to native GPUArray and perform operation
-    a_native = native.from_numpy(a.to_numpy())
-    b_native = native.from_numpy(b.to_numpy())
+    # Get native arrays (zero-copy if already native)
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Perform operation on GPU
     c_native = native.mul(a_native, b_native)
 
-    # Convert result back to Python GPUArray
-    return from_numpy(c_native.to_numpy())
+    # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
 
 
 def matmul(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -164,15 +168,17 @@ def _matmul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
 
 
 def _matmul_native(a: GPUArray, b: GPUArray) -> GPUArray:
-    """Native C++ CUDA implementation of matmul."""
+    """Native C++ CUDA implementation of matmul (zero-copy)."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
 
-    # Convert Python GPUArray to native GPUArray and perform operation
-    a_native = native.from_numpy(a.to_numpy())
-    b_native = native.from_numpy(b.to_numpy())
+    # Get native arrays (zero-copy if already native)
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Perform operation on GPU
     c_native = native.matmul(a_native, b_native)
 
-    # Convert result back to Python GPUArray
-    return from_numpy(c_native.to_numpy())
+    # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
