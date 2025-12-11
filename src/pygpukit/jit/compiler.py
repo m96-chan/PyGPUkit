@@ -58,68 +58,29 @@ class JITKernel:
         """Compile the CUDA source code.
 
         For CPU simulation backend, we just mark as compiled.
-        For real CUDA, we would use NVRTC.
+        For native backend, we use C++ NVRTC via pybind11.
         """
-        from pygpukit.core.backend import CUDABackend, get_backend
+        from pygpukit.core.backend import NativeBackend, get_backend, has_native_module
 
         backend = get_backend()
 
-        if isinstance(backend, CUDABackend) and backend.is_available():
-            self._compile_nvrtc()
+        if isinstance(backend, NativeBackend) and backend.is_available():
+            self._compile_native()
         else:
             # CPU simulation - just mark as compiled
             self._is_compiled = True
             self._ptx = f"// Simulated PTX for {self._name}"
 
-    def _compile_nvrtc(self) -> None:
-        """Compile using NVRTC."""
-        try:
-            from cuda import cuda, nvrtc
+    def _compile_native(self) -> None:
+        """Compile using native C++ module (NVRTC)."""
+        from pygpukit.core.backend import get_native_module
 
-            # Create program
-            err, prog = nvrtc.nvrtcCreateProgram(
-                self._source.encode(), b"kernel.cu", 0, [], []
-            )
-            if err != nvrtc.nvrtcResult.NVRTC_SUCCESS:
-                raise RuntimeError(f"Failed to create program: {err}")
+        native = get_native_module()
 
-            # Compile with options
-            opts = [o.encode() for o in self._options]
-            err = nvrtc.nvrtcCompileProgram(prog, len(opts), opts)
-
-            if err != nvrtc.nvrtcResult.NVRTC_SUCCESS:
-                # Get compilation log
-                log_size = nvrtc.nvrtcGetProgramLogSize(prog)[1]
-                log = b" " * log_size
-                nvrtc.nvrtcGetProgramLog(prog, log)
-                nvrtc.nvrtcDestroyProgram(prog)
-                raise RuntimeError(f"Compilation failed: {log.decode()}")
-
-            # Get PTX
-            ptx_size = nvrtc.nvrtcGetPTXSize(prog)[1]
-            ptx = b" " * ptx_size
-            nvrtc.nvrtcGetPTX(prog, ptx)
-            nvrtc.nvrtcDestroyProgram(prog)
-
-            self._ptx = ptx.decode()
-
-            # Load module and get function
-            err, self._module = cuda.cuModuleLoadData(ptx)
-            if err != cuda.CUresult.CUDA_SUCCESS:
-                raise RuntimeError(f"Failed to load module: {err}")
-
-            err, self._kernel = cuda.cuModuleGetFunction(
-                self._module, self._name.encode()
-            )
-            if err != cuda.CUresult.CUDA_SUCCESS:
-                raise RuntimeError(f"Failed to get function: {err}")
-
-            self._is_compiled = True
-
-        except ImportError:
-            # Fall back to simulation
-            self._is_compiled = True
-            self._ptx = f"// Simulated PTX for {self._name}"
+        # Use native JITKernel which handles NVRTC compilation
+        self._kernel = native.JITKernel(self._source, self._name, self._options)
+        self._ptx = self._kernel.ptx
+        self._is_compiled = self._kernel.is_compiled
 
     @property
     def source(self) -> str:
@@ -167,44 +128,21 @@ class JITKernel:
             **kwargs: Additional kernel arguments.
         """
         from pygpukit.core.array import GPUArray
-        from pygpukit.core.backend import CUDABackend, get_backend
+        from pygpukit.core.backend import NativeBackend, get_backend
 
         backend = get_backend()
 
-        if not isinstance(backend, CUDABackend) or not backend.is_available():
+        if not isinstance(backend, NativeBackend) or not backend.is_available():
             # CPU simulation - do nothing (operations are simulated elsewhere)
             return
 
         if not self._is_compiled or self._kernel is None:
             raise RuntimeError("Kernel not compiled")
 
-        # Compute grid size if not provided
-        if grid_size is None:
-            for arg in args:
-                if isinstance(arg, GPUArray):
-                    grid_size = (arg.size + self._block_size - 1) // self._block_size
-                    break
-            if grid_size is None:
-                grid_size = 1
-
-        # Prepare arguments
-        # This is a simplified version - real implementation needs proper arg handling
-        from cuda import cuda
-
-        # Launch kernel
-        cuda.cuLaunchKernel(
-            self._kernel,
-            grid_size,
-            1,
-            1,  # grid dim
-            self._block_size,
-            1,
-            1,  # block dim
-            0,
-            None,  # shared mem, stream
-            args,
-            0,
-        )
+        # Native kernel handles launching via its own interface
+        # The native JITKernel.launch() method is used for kernel execution
+        # For now, operations are handled directly via native ops module
+        pass
 
     def __repr__(self) -> str:
         status = "compiled" if self._is_compiled else "not compiled"
