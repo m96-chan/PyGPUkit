@@ -1,9 +1,6 @@
 [build-system]
-requires = [
-    "scikit-build-core>=0.5.0",
-    "pybind11>=2.11.0",
-]
-build-backend = "scikit_build_core.build"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "pygpukit"
@@ -48,6 +45,25 @@ Homepage = "https://github.com/m96-chan/PyGPUkit"
 Repository = "https://github.com/m96-chan/PyGPUkit"
 Issues = "https://github.com/m96-chan/PyGPUkit/issues"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/pygpukit"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/native",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+exclude = [
+    "/native/build",
+    "*.pyd",
+    "*.so",
+]
+
+# Native module build configuration (for cibuildwheel in release.yml)
+# Use: pip install scikit-build-core pybind11 && python -m pip wheel . --no-build-isolation
 [tool.scikit-build]
 cmake.source-dir = "native"
 cmake.build-type = "Release"
@@ -56,7 +72,6 @@ wheel.install-dir = "pygpukit"
 sdist.include = ["native/*"]
 sdist.exclude = ["native/build/*"]
 
-# Build options for different platforms
 [tool.scikit-build.cmake.define]
 CMAKE_CUDA_ARCHITECTURES = "70;75;80;86;89;90"
 
