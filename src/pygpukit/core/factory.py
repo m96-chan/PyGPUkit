@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -203,7 +203,7 @@ def _from_numpy_native(array: np.ndarray) -> GPUArray:
     return GPUArray._wrap_native(native_array)
 
 
-def _to_native_dtype(dtype: DataType, native) -> any:
+def _to_native_dtype(dtype: DataType, native: Any) -> Any:
     """Convert Python DataType to native DataType."""
     from pygpukit.core.dtypes import float32, float64, int32, int64
 

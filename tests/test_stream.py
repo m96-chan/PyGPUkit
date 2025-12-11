@@ -1,6 +1,5 @@
 """Tests for Stream Manager."""
 
-
 from pygpukit.core.stream import Stream, StreamManager, StreamPriority, default_stream
 
 

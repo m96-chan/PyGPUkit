@@ -12,17 +12,13 @@ from pygpukit.core.factory import from_numpy
 def _validate_same_shape(a: GPUArray, b: GPUArray, op_name: str) -> None:
     """Validate that two arrays have the same shape."""
     if a.shape != b.shape:
-        raise ValueError(
-            f"{op_name} requires arrays of same shape, got {a.shape} and {b.shape}"
-        )
+        raise ValueError(f"{op_name} requires arrays of same shape, got {a.shape} and {b.shape}")
 
 
 def _validate_same_dtype(a: GPUArray, b: GPUArray, op_name: str) -> None:
     """Validate that two arrays have the same dtype."""
     if a.dtype != b.dtype:
-        raise ValueError(
-            f"{op_name} requires arrays of same dtype, got {a.dtype} and {b.dtype}"
-        )
+        raise ValueError(f"{op_name} requires arrays of same dtype, got {a.dtype} and {b.dtype}")
 
 
 def add(a: GPUArray, b: GPUArray) -> GPUArray:

@@ -5,11 +5,13 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from pygpukit.core.backend import get_backend, has_native_module
 from pygpukit.core.dtypes import DataType
 
 if TYPE_CHECKING:
-    import numpy as np
+    pass
 
 
 class GPUArray:
@@ -164,13 +166,12 @@ class GPUArray:
 
         # Fast path: use native array directly
         if self._native is not None:
-            return self._native.to_numpy()
+            result: np.ndarray = self._native.to_numpy()
+            return result
 
         # Slow path: CPU simulation backend
         backend = get_backend()
-        flat_array = backend.copy_device_to_host(
-            self._device_ptr, self.nbytes, self._dtype
-        )
+        flat_array = backend.copy_device_to_host(self._device_ptr, self.nbytes, self._dtype)
         return flat_array.reshape(self._shape)
 
     def __repr__(self) -> str:

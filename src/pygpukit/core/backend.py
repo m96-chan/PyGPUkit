@@ -21,11 +21,13 @@ if TYPE_CHECKING:
     from pygpukit.core.dtypes import DataType
 
 # Try to import native module
-_native_module = None
+_native_module: Any = None
 try:
-    import _pygpukit_native as _native_module
+    import _pygpukit_native  # type: ignore[import-not-found]
+
+    _native_module = _pygpukit_native
 except ImportError:
-    _native_module = None
+    pass
 
 
 @dataclass
@@ -74,9 +76,7 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def copy_device_to_host(
-        self, device_ptr: Any, size_bytes: int, dtype: DataType
-    ) -> np.ndarray:
+    def copy_device_to_host(self, device_ptr: Any, size_bytes: int, dtype: DataType) -> np.ndarray:
         """Copy data from device to host."""
         ...
 
@@ -126,7 +126,9 @@ class CPUSimulationBackend(Backend):
 
         return DeviceProperties(
             name="CPU Simulation",
-            total_memory=psutil.virtual_memory().total if hasattr(psutil, 'virtual_memory') else 8 * 1024**3,
+            total_memory=psutil.virtual_memory().total
+            if hasattr(psutil, "virtual_memory")
+            else 8 * 1024**3,
             compute_capability=None,
             multiprocessor_count=os.cpu_count() or 1,
             max_threads_per_block=1024,
@@ -153,16 +155,12 @@ class CPUSimulationBackend(Backend):
         host_bytes = host_data.tobytes()
         buffer[: len(host_bytes)] = list(host_bytes)
 
-    def copy_device_to_host(
-        self, device_ptr: int, size_bytes: int, dtype: DataType
-    ) -> np.ndarray:
+    def copy_device_to_host(self, device_ptr: int, size_bytes: int, dtype: DataType) -> np.ndarray:
         if device_ptr not in self._allocations:
             raise RuntimeError(f"Invalid device pointer: {device_ptr}")
         buffer = self._allocations[device_ptr]
         np_dtype = dtype.to_numpy_dtype()
-        result: np.ndarray = np.frombuffer(
-            buffer[:size_bytes].tobytes(), dtype=np_dtype
-        ).copy()
+        result: np.ndarray = np.frombuffer(buffer[:size_bytes].tobytes(), dtype=np_dtype).copy()
         return result
 
     def memset(self, device_ptr: int, value: int, size_bytes: int) -> None:
@@ -254,9 +252,7 @@ class NativeBackend(Backend):
         # Use GPUArray.copy_from_numpy() instead
         raise NotImplementedError("Use GPUArray.copy_from_numpy() instead")
 
-    def copy_device_to_host(
-        self, device_ptr: Any, size_bytes: int, dtype: DataType
-    ) -> np.ndarray:
+    def copy_device_to_host(self, device_ptr: Any, size_bytes: int, dtype: DataType) -> np.ndarray:
         if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
         # Use GPUArray.to_numpy() instead
@@ -277,9 +273,7 @@ class NativeBackend(Backend):
         if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
         stream_priority = (
-            self._native.StreamPriority.High
-            if priority < 0
-            else self._native.StreamPriority.Low
+            self._native.StreamPriority.High if priority < 0 else self._native.StreamPriority.Low
         )
         return self._native.Stream(stream_priority)
 
@@ -319,8 +313,7 @@ def get_native_module() -> Any:
     """Get the native C++ module (for direct access)."""
     if _native_module is None:
         raise RuntimeError(
-            "Native module not available. "
-            "Build with CMake or install pygpukit with CUDA support."
+            "Native module not available. Build with CMake or install pygpukit with CUDA support."
         )
     return _native_module
 

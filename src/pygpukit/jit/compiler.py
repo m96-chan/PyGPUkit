@@ -51,7 +51,7 @@ class JITKernel:
     def _find_kernel_in_source(self, source: str, func_name: str) -> bool:
         """Check if the kernel function exists in source."""
         # Look for __global__ void func_name patterns
-        pattern = rf'__global__\s+\w+\s+{re.escape(func_name)}\s*\('
+        pattern = rf"__global__\s+\w+\s+{re.escape(func_name)}\s*\("
         return bool(re.search(pattern, source))
 
     def _compile(self) -> None:
