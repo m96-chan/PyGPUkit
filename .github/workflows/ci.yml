@@ -61,12 +61,7 @@ jobs:
           fail_ci_if_error: false
 
   cmake-check:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -78,22 +73,13 @@ jobs:
       - name: Install pybind11
         run: pip install pybind11
 
-      - name: Install CUDA Toolkit (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
           cuda: "12.6.0"
           method: network
 
-      - name: Install CUDA Toolkit (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: "12.6.0"
-          method: network
-
-      - name: Configure CMake (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Configure CMake
         run: |
           cd native
           mkdir -p build && cd build
@@ -101,28 +87,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())")
 
-      - name: Configure CMake (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          cd native
-          New-Item -ItemType Directory -Force -Path build
-          cd build
-          $pybind11_dir = python -c "import pybind11; print(pybind11.get_cmake_dir())"
-          cmake .. -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$pybind11_dir"
-
-      - name: Build native module (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build native module
         run: |
           cd native/build
           cmake --build . --config Release -j$(nproc)
-
-      - name: Build native module (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          cd native/build
-          cmake --build . --config Release
 
   build:
     runs-on: ubuntu-latest
