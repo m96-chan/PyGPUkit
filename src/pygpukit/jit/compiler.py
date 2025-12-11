@@ -60,7 +60,7 @@ class JITKernel:
         For CPU simulation backend, we just mark as compiled.
         For native backend, we use C++ NVRTC via pybind11.
         """
-        from pygpukit.core.backend import NativeBackend, get_backend, has_native_module
+        from pygpukit.core.backend import NativeBackend, get_backend
 
         backend = get_backend()
 
@@ -127,7 +127,6 @@ class JITKernel:
             grid_size: Number of blocks. If None, computed from first array argument.
             **kwargs: Additional kernel arguments.
         """
-        from pygpukit.core.array import GPUArray
         from pygpukit.core.backend import NativeBackend, get_backend
 
         backend = get_backend()

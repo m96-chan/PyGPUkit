@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.backend import NativeBackend, get_backend, has_native_module
+from pygpukit.core.backend import NativeBackend, get_backend
 from pygpukit.core.dtypes import DataType
 
 if TYPE_CHECKING:
