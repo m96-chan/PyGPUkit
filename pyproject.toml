@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "pygpukit"
@@ -37,9 +37,8 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
-]
-cuda = [
-    "cuda-python>=12.0.0",
+    "psutil>=5.0.0",
+    "pre-commit>=3.0.0",
 ]
 
 [project.urls]
@@ -47,8 +46,62 @@ Homepage = "https://github.com/m96-chan/PyGPUkit"
 Repository = "https://github.com/m96-chan/PyGPUkit"
 Issues = "https://github.com/m96-chan/PyGPUkit/issues"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/pygpukit"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/native",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+exclude = [
+    "/native/build",
+    "*.pyd",
+    "*.so",
+]
+
+# Native module build configuration (for cibuildwheel in release.yml)
+# Use: pip install scikit-build-core pybind11 && python -m pip wheel . --no-build-isolation
+[tool.scikit-build]
+cmake.source-dir = "native"
+cmake.build-type = "Release"
+wheel.packages = ["src/pygpukit"]
+wheel.install-dir = "pygpukit"
+sdist.include = ["native/*"]
+sdist.exclude = ["native/build/*"]
+
+[tool.scikit-build.cmake.define]
+CMAKE_CUDA_ARCHITECTURES = "70;75;80;86;89;90"
+
+[tool.cibuildwheel]
+# Skip PyPy, 32-bit builds, and musllinux
+skip = ["pp*", "*-win32", "*-manylinux_i686", "*musllinux*"]
+
+# Only build for Linux and Windows (CUDA support)
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
+
+[tool.cibuildwheel.linux]
+# Use manylinux with CUDA
+manylinux-x86_64-image = "manylinux2014"
+before-all = [
+    # Install CUDA Toolkit
+    "yum install -y wget",
+    "wget https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda-repo-rhel7-12-4-local-12.4.0_550.54.14-1.x86_64.rpm",
+    "rpm -i cuda-repo-rhel7-12-4-local-12.4.0_550.54.14-1.x86_64.rpm",
+    "yum clean all",
+    "yum install -y cuda-toolkit-12-4",
+]
+environment = { PATH = "/usr/local/cuda-12.4/bin:$PATH", CUDA_HOME = "/usr/local/cuda-12.4" }
+
+[tool.cibuildwheel.windows]
+before-build = [
+    # CUDA should be pre-installed on the runner
+    "pip install pybind11",
+]
+environment = { CUDA_PATH = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

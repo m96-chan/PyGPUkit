@@ -34,9 +34,9 @@ def is_cuda_available() -> bool:
     Returns:
         True if CUDA is available, False otherwise.
     """
-    from pygpukit.core.backend import CUDABackend
+    from pygpukit.core.backend import NativeBackend
 
-    backend = CUDABackend()
+    backend = NativeBackend()
     return backend.is_available()
 
 

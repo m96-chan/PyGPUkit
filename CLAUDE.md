@@ -1,29 +1,143 @@
 # PyGPUkit - Claude Code Guidelines
 
-## Tech Stack (IMPORTANT)
+## GPU Backend Model (CRITICAL)
+
+### Mental Model for Code Generation
+
+```
+Python API →
+  pybind11 →
+    C++ backend →
+       CUDA Driver API (cu*)
+       CUDA Runtime API (cuda*)
+       NVRTC for JIT
+
+NO cuda-python
+NO external Python CUDA dependencies
+ALL GPU kernels compiled at runtime
+PTX → SASS handled by NVIDIA driver
+```
+
+### 1. PyGPUkit does NOT depend on cuda-python
+
+**Do NOT mention or require:**
+- ❌ `cuda-python`
+- ❌ `numba.cuda`
+- ❌ `cupy.cuda`
+- ❌ PyCUDA-style wrappers
+
+PyGPUkit uses its own C++ backend with CUDA Driver API / Runtime API / NVRTC.
+
+### 2. GPU Initialization (CUDA Driver & Runtime API only)
+
+GPU availability is detected via these C++ calls:
+- `cudaGetDeviceCount()`
+- `cudaDriverGetVersion()`
+- `cudaRuntimeGetVersion()`
+- `nvrtcVersion()`
+
+CPU fallback happens only if one of these fails.
+
+**NEVER claim:** "install cuda-python to enable GPU mode."
+
+### 3. NVRTC JIT for All Kernels
+
+PyGPUkit **MUST NOT** ship precompiled GPU kernels.
+
+All GPU kernels are:
+1. Stored as CUDA C source code (string literals)
+2. Compiled at runtime using NVRTC
+3. Loaded using CUDA Driver API (`cuModuleLoadData`, etc.)
+
+This design removes CUDA version dependency.
+
+### 4. API Preference Order
+
+1. **CUDA Driver API** (`cu*`) - Core of PyGPUkit
+2. **NVRTC** - Runtime compiler
+3. **CUDA Runtime API** (`cuda*`) - Convenience functions
+
+Driver API is the primary interface.
+
+### 5. CUDA Version Compatibility via PTX JIT
+
+**Assume:**
+- NVRTC generates PTX
+- NVIDIA driver compiles PTX to GPU machine code (SASS)
+- PyGPUkit itself is version-agnostic
+
+**NEVER** tie PyGPUkit to CUDA version numbers in error messages.
+
+### 6. GPU Code Generation Pipeline
+
+```
+source.cu (string)
+    ↓ NVRTC
+PTX
+    ↓ CUDA Driver API
+CUmodule
+    ↓
+CUfunction
+```
+
+- ❌ No precompiled cubin files
+- ❌ No static compilation
+- ❌ No nvcc step
+
+### 7. CPU Fallback = Fully Supported Backend
+
+When GPU is unavailable, PyGPUkit must:
+- Run scheduler in CPU simulation mode
+- Use NumPy as backend for GPUArray ops
+- Disable NVRTC
+- Still expose full API (no errors)
+
+**Do NOT** require CUDA Toolkit on macOS.
+
+### 8. Backend Loader Model
+
+Python loads a shared library:
+- Linux: `_pygpukit_native.cpython-3xx-x86_64-linux-gnu.so`
+- Windows: `_pygpukit_native.cp3xx-win_amd64.pyd`
+- macOS: CPU backend only
+
+The GPU backend is NOT a Python package like cuda-python.
+
+### 9. Correct Error Messages
+
+**NEVER generate:**
+- ❌ "Please install cuda-python"
+- ❌ "GPU mode requires the cuda-python package"
+- ❌ "CUDA is missing because no Python bindings are found"
+
+**Instead use:**
+- ✅ "CUDA driver not detected"
+- ✅ "NVRTC JIT compiler not available"
+- ✅ "No GPU devices found (cudaGetDeviceCount == 0)"
+- ✅ "Falling back to CPU simulation backend"
+
+---
+
+## Tech Stack
 
 PyGPUkit is a **Rust + C++ + Python** hybrid project.
 
 ```
 PyGPUkit/
 │
-├── python/        → Python API (NumPy-compatible, pybind11 bindings)
+├── src/pygpukit/  → Python API (NumPy-compatible)
 │
-├── core/
-│   ├── C++ (CUDA Runtime API)
-│   └── Rust backend (opt-in)
+├── native/
+│   ├── core/      → C++ (CUDA Runtime/Driver API)
+│   ├── jit/       → C++ (NVRTC)
+│   ├── ops/       → C++ (CUDA kernels)
+│   └── bindings/  → pybind11
 │
-├── memory/
-│   ├── Rust (LRU, pool allocator)
-│   └── Python shim
+├── rust/ (v0.2+)
+│   ├── memory/    → Rust (LRU, pool allocator)
+│   └── scheduler/ → Rust (state management)
 │
-├── scheduler/
-│   ├── Rust (state management)
-│   └── C++ (kernel launch wrappers)
-│
-└── jit/
-    ├── C++ (NVRTC)
-    └── Python wrappers
+└── examples/      → Demo scripts
 ```
 
 ### Language Responsibilities
@@ -31,12 +145,14 @@ PyGPUkit/
 | Component | Language | Reason |
 |-----------|----------|--------|
 | Python API | Python | NumPy-compatible user interface |
-| CUDA Runtime/Driver | C++ | Direct hardware access |
+| CUDA Driver/Runtime | C++ | Direct hardware access |
 | NVRTC JIT | C++ | Kernel compilation |
-| Memory Pool/LRU | Rust | Safe, fast memory management |
-| Scheduler State | Rust | Thread-safe state machine |
+| Memory Pool/LRU | Rust (v0.2) | Safe, fast memory management |
+| Scheduler State | Rust (v0.2) | Thread-safe state machine |
 | Kernel Launch | C++ | CUDA kernel dispatch |
-| Bindings | pybind11 + PyO3 | C++/Rust to Python |
+| Bindings | pybind11 | C++ to Python |
+
+---
 
 ## Critical Rules
 
@@ -44,47 +160,42 @@ PyGPUkit/
 
 1. **Do NOT** use or mention `cuda-python` - it is NOT a dependency
 2. **Do NOT** call CUDA APIs from Python directly
-3. **Do NOT** implement memory management in pure Python (use Rust)
-4. **Do NOT** implement scheduler state in pure Python (use Rust)
-5. **Do NOT** suggest pure-Python solutions for performance-critical code
+3. **Do NOT** implement memory management in pure Python (use Rust in v0.2)
+4. **Do NOT** ship precompiled CUDA kernels
+5. **Do NOT** require specific CUDA toolkit versions at runtime
 
 ### DO
 
-1. **DO** use C++ for all CUDA Runtime/Driver API calls
-2. **DO** use Rust for memory pool, LRU eviction, scheduler state
+1. **DO** use C++ for all CUDA Driver/Runtime API calls
+2. **DO** compile all kernels at runtime with NVRTC
 3. **DO** use pybind11 for C++ to Python bindings
-4. **DO** use PyO3/maturin for Rust to Python bindings
-5. **DO** keep Python layer thin - only API surface and NumPy interop
+4. **DO** keep Python layer thin - only API surface and NumPy interop
+5. **DO** support CPU fallback when GPU unavailable
 
-## GPU Detection
-
-GPU availability is detected via native C++ calls ONLY:
-- `cudaGetDeviceCount`
-- `cudaDriverGetVersion`
-- `cudaRuntimeGetVersion`
-- `nvrtcVersion`
-
-CPU fallback occurs ONLY when native backend fails to load or no GPU detected.
+---
 
 ## Build System
 
-- **C++**: CMake with CUDA toolkit
-- **Rust**: Cargo with `cxx` or PyO3
-- **Python**: setuptools/maturin hybrid build
-- **Bindings**: pybind11 (C++) + PyO3 (Rust)
+- **C++/CUDA**: CMake with CUDA toolkit
+- **Python**: scikit-build-core for CMake integration
+- **Rust** (v0.2+): Cargo with PyO3
+- **CI/CD**: cibuildwheel with CUDA
+
+---
 
 ## Current State (v0.1)
 
-- Python prototype with CPU simulation backend (for API design/testing)
-- Native C++/Rust backend NOT yet implemented
-- 73 tests pass using CPU simulation
-- Real GPU execution requires native backend implementation
+- ✅ Native C++ backend with CUDA Runtime/Driver API
+- ✅ NVRTC JIT compilation
+- ✅ pybind11 bindings
+- ✅ Zero-copy Python↔Native interop
+- ✅ CPU simulation fallback
+- ✅ 73 tests pass
+- ✅ Verified on RTX 3090 Ti (2152 GFLOPS matmul)
 
-## Next Steps for Native Backend
+## Next Steps (v0.2)
 
-1. Implement `core/` in C++ with CUDA Runtime API
-2. Implement `memory/` in Rust with LRU allocator
-3. Implement `jit/` in C++ with NVRTC
-4. Create pybind11 bindings for C++ components
-5. Create PyO3 bindings for Rust components
-6. Hybrid build with maturin + CMake
+1. Implement Rust memory pool with LRU eviction
+2. Implement Rust scheduler state machine
+3. Add tiled matmul with shared memory
+4. Add async memory transfers

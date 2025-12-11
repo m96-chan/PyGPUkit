@@ -5,24 +5,20 @@ from __future__ import annotations
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.backend import CUDABackend, get_backend
+from pygpukit.core.backend import NativeBackend, get_backend
 from pygpukit.core.factory import from_numpy
 
 
 def _validate_same_shape(a: GPUArray, b: GPUArray, op_name: str) -> None:
     """Validate that two arrays have the same shape."""
     if a.shape != b.shape:
-        raise ValueError(
-            f"{op_name} requires arrays of same shape, got {a.shape} and {b.shape}"
-        )
+        raise ValueError(f"{op_name} requires arrays of same shape, got {a.shape} and {b.shape}")
 
 
 def _validate_same_dtype(a: GPUArray, b: GPUArray, op_name: str) -> None:
     """Validate that two arrays have the same dtype."""
     if a.dtype != b.dtype:
-        raise ValueError(
-            f"{op_name} requires arrays of same dtype, got {a.dtype} and {b.dtype}"
-        )
+        raise ValueError(f"{op_name} requires arrays of same dtype, got {a.dtype} and {b.dtype}")
 
 
 def add(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -43,9 +39,9 @@ def add(a: GPUArray, b: GPUArray) -> GPUArray:
 
     backend = get_backend()
 
-    if isinstance(backend, CUDABackend) and backend.is_available():
-        # Use CUDA kernel for real GPU
-        return _add_cuda(a, b)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        # Fast path: use native operations with zero-copy
+        return _add_native(a, b)
     else:
         # CPU simulation
         return _add_cpu(a, b)
@@ -59,28 +55,21 @@ def _add_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
     return from_numpy(result_np)
 
 
-def _add_cuda(a: GPUArray, b: GPUArray) -> GPUArray:
-    """CUDA implementation of add."""
-    from pygpukit.core.factory import empty
-    from pygpukit.jit.compiler import jit
+def _add_native(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of add (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
 
-    kernel_src = '''
-    extern "C" __global__
-    void add_kernel(const float* a, const float* b, float* c, int n) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            c[idx] = a[idx] + b[idx];
-        }
-    }
-    '''
+    native = get_native_module()
 
-    kernel = jit(kernel_src, func="add_kernel")
-    c = empty(a.shape, dtype=a.dtype)
+    # Get native arrays (zero-copy if already native)
+    a_native = a._get_native()
+    b_native = b._get_native()
 
-    kernel(a.device_ptr, b.device_ptr, c.device_ptr, a.size)
-    get_backend().synchronize()
+    # Perform operation on GPU
+    c_native = native.add(a_native, b_native)
 
-    return c
+    # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
 
 
 def mul(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -101,8 +90,8 @@ def mul(a: GPUArray, b: GPUArray) -> GPUArray:
 
     backend = get_backend()
 
-    if isinstance(backend, CUDABackend) and backend.is_available():
-        return _mul_cuda(a, b)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _mul_native(a, b)
     else:
         return _mul_cpu(a, b)
 
@@ -115,28 +104,21 @@ def _mul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
     return from_numpy(result_np)
 
 
-def _mul_cuda(a: GPUArray, b: GPUArray) -> GPUArray:
-    """CUDA implementation of mul."""
-    from pygpukit.core.factory import empty
-    from pygpukit.jit.compiler import jit
+def _mul_native(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of mul (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
 
-    kernel_src = '''
-    extern "C" __global__
-    void mul_kernel(const float* a, const float* b, float* c, int n) {
-        int idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < n) {
-            c[idx] = a[idx] * b[idx];
-        }
-    }
-    '''
+    native = get_native_module()
 
-    kernel = jit(kernel_src, func="mul_kernel")
-    c = empty(a.shape, dtype=a.dtype)
+    # Get native arrays (zero-copy if already native)
+    a_native = a._get_native()
+    b_native = b._get_native()
 
-    kernel(a.device_ptr, b.device_ptr, c.device_ptr, a.size)
-    get_backend().synchronize()
+    # Perform operation on GPU
+    c_native = native.mul(a_native, b_native)
 
-    return c
+    # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
 
 
 def matmul(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -167,8 +149,8 @@ def matmul(a: GPUArray, b: GPUArray) -> GPUArray:
 
     backend = get_backend()
 
-    if isinstance(backend, CUDABackend) and backend.is_available():
-        return _matmul_cuda(a, b)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _matmul_native(a, b)
     else:
         return _matmul_cpu(a, b)
 
@@ -181,48 +163,18 @@ def _matmul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
     return from_numpy(result_np)
 
 
-def _matmul_cuda(a: GPUArray, b: GPUArray) -> GPUArray:
-    """CUDA implementation of matmul."""
-    from pygpukit.core.factory import empty
-    from pygpukit.jit.compiler import jit
+def _matmul_native(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of matmul (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
 
-    M, K = a.shape
-    _, N = b.shape
+    native = get_native_module()
 
-    kernel_src = '''
-    extern "C" __global__
-    void matmul_kernel(const float* A, const float* B, float* C,
-                       int M, int N, int K) {
-        int row = blockIdx.y * blockDim.y + threadIdx.y;
-        int col = blockIdx.x * blockDim.x + threadIdx.x;
+    # Get native arrays (zero-copy if already native)
+    a_native = a._get_native()
+    b_native = b._get_native()
 
-        if (row < M && col < N) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; k++) {
-                sum += A[row * K + k] * B[k * N + col];
-            }
-            C[row * N + col] = sum;
-        }
-    }
-    '''
+    # Perform operation on GPU
+    c_native = native.matmul(a_native, b_native)
 
-    kernel = jit(kernel_src, func="matmul_kernel")
-    c = empty((M, N), dtype=a.dtype)
-
-    # Launch with 2D grid
-    block_size = 16
-    grid_x = (N + block_size - 1) // block_size
-    grid_y = (M + block_size - 1) // block_size
-
-    kernel(
-        a.device_ptr,
-        b.device_ptr,
-        c.device_ptr,
-        M,
-        N,
-        K,
-        grid_size=(grid_x, grid_y),
-    )
-    get_backend().synchronize()
-
-    return c
+    # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)

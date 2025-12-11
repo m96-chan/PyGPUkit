@@ -1,0 +1,70 @@
+#pragma once
+
+#include "../core/types.hpp"
+#include "../core/stream.hpp"
+#include <cuda.h>
+#include <string>
+#include <vector>
+#include <memory>
+
+namespace pygpukit {
+
+// Forward declaration
+class JITKernel;
+
+// Kernel launch configuration
+struct LaunchConfig {
+    dim3 grid;
+    dim3 block;
+    size_t shared_mem;
+    cudaStream_t stream;
+
+    LaunchConfig()
+        : grid(1), block(256), shared_mem(0), stream(nullptr) {}
+
+    LaunchConfig(unsigned int grid_x, unsigned int block_x)
+        : grid(grid_x), block(block_x), shared_mem(0), stream(nullptr) {}
+
+    LaunchConfig(dim3 g, dim3 b, size_t smem = 0, cudaStream_t s = nullptr)
+        : grid(g), block(b), shared_mem(smem), stream(s) {}
+};
+
+// JIT-compiled CUDA kernel
+class JITKernel {
+public:
+    JITKernel(const std::string& source,
+              const std::string& func_name,
+              const std::vector<std::string>& options = {});
+    ~JITKernel();
+
+    // Disable copy
+    JITKernel(const JITKernel&) = delete;
+    JITKernel& operator=(const JITKernel&) = delete;
+
+    // Enable move
+    JITKernel(JITKernel&& other) noexcept;
+    JITKernel& operator=(JITKernel&& other) noexcept;
+
+    // Accessors
+    const std::string& name() const { return func_name_; }
+    const std::string& ptx() const { return ptx_; }
+    bool is_compiled() const { return function_ != nullptr; }
+
+    // Launch kernel with raw arguments
+    void launch(const LaunchConfig& config, void** args);
+
+    // Get suggested block size for this kernel
+    int get_suggested_block_size(size_t dynamic_smem = 0) const;
+
+private:
+    std::string source_;
+    std::string func_name_;
+    std::string ptx_;
+    CUmodule module_;
+    CUfunction function_;
+
+    void compile(const std::vector<std::string>& options);
+    void cleanup();
+};
+
+} // namespace pygpukit

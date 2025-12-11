@@ -3,6 +3,9 @@
 This module provides an abstraction layer that allows PyGPUkit to work
 with real CUDA hardware when available, or fall back to a CPU simulation
 for testing and development without GPU.
+
+IMPORTANT: PyGPUkit does NOT use cuda-python.
+GPU backend is C++ using CUDA Runtime/Driver API + NVRTC, exposed via pybind11.
 """
 
 from __future__ import annotations
@@ -16,6 +19,15 @@ import numpy as np
 
 if TYPE_CHECKING:
     from pygpukit.core.dtypes import DataType
+
+# Try to import native module
+_native_module: Any = None
+try:
+    import _pygpukit_native  # type: ignore[import-not-found]
+
+    _native_module = _pygpukit_native
+except ImportError:
+    pass
 
 
 @dataclass
@@ -64,9 +76,7 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def copy_device_to_host(
-        self, device_ptr: Any, size_bytes: int, dtype: DataType
-    ) -> np.ndarray:
+    def copy_device_to_host(self, device_ptr: Any, size_bytes: int, dtype: DataType) -> np.ndarray:
         """Copy data from device to host."""
         ...
 
@@ -116,7 +126,9 @@ class CPUSimulationBackend(Backend):
 
         return DeviceProperties(
             name="CPU Simulation",
-            total_memory=psutil.virtual_memory().total if hasattr(psutil, 'virtual_memory') else 8 * 1024**3,
+            total_memory=psutil.virtual_memory().total
+            if hasattr(psutil, "virtual_memory")
+            else 8 * 1024**3,
             compute_capability=None,
             multiprocessor_count=os.cpu_count() or 1,
             max_threads_per_block=1024,
@@ -143,16 +155,12 @@ class CPUSimulationBackend(Backend):
         host_bytes = host_data.tobytes()
         buffer[: len(host_bytes)] = list(host_bytes)
 
-    def copy_device_to_host(
-        self, device_ptr: int, size_bytes: int, dtype: DataType
-    ) -> np.ndarray:
+    def copy_device_to_host(self, device_ptr: int, size_bytes: int, dtype: DataType) -> np.ndarray:
         if device_ptr not in self._allocations:
             raise RuntimeError(f"Invalid device pointer: {device_ptr}")
         buffer = self._allocations[device_ptr]
         np_dtype = dtype.to_numpy_dtype()
-        result: np.ndarray = np.frombuffer(
-            buffer[:size_bytes].tobytes(), dtype=np_dtype
-        ).copy()
+        result: np.ndarray = np.frombuffer(buffer[:size_bytes].tobytes(), dtype=np_dtype).copy()
         return result
 
     def memset(self, device_ptr: int, value: int, size_bytes: int) -> None:
@@ -178,128 +186,105 @@ class CPUSimulationBackend(Backend):
         pass
 
 
-class CUDABackend(Backend):
-    """Real CUDA backend using cuda-python."""
+class NativeBackend(Backend):
+    """Real CUDA backend using native C++ module (pybind11).
+
+    This backend uses the C++ native module (_pygpukit_native) which
+    interfaces with CUDA Runtime/Driver API and NVRTC.
+    """
 
     def __init__(self) -> None:
+        self._native = _native_module
         self._cuda_available = False
-        self._cuda = None
-        self._cudart = None
         self._init_cuda()
 
     def _init_cuda(self) -> None:
-        """Initialize CUDA runtime."""
-        try:
-            from cuda import cuda, cudart
-
-            err = cuda.cuInit(0)
-            if err[0] == cuda.CUresult.CUDA_SUCCESS:
-                self._cuda_available = True
-                self._cuda = cuda
-                self._cudart = cudart
-        except ImportError:
+        """Initialize CUDA via native module."""
+        if self._native is None:
             self._cuda_available = False
+            return
+        try:
+            self._cuda_available = self._native.is_cuda_available()
         except Exception:
             self._cuda_available = False
-
-    def _check_error(self, result: tuple) -> Any:
-        """Check CUDA error and raise exception if failed."""
-        if result[0] != 0:
-            raise RuntimeError(f"CUDA error: {result[0]}")
-        return result[1] if len(result) > 1 else None
 
     def is_available(self) -> bool:
         return self._cuda_available
 
     def get_device_count(self) -> int:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             return 0
-        result = self._cudart.cudaGetDeviceCount()
-        count: int = self._check_error(result)
+        count: int = self._native.get_device_count()
         return count
 
     def get_device_properties(self, device_id: int = 0) -> DeviceProperties:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
 
-        props = self._check_error(self._cudart.cudaGetDeviceProperties(device_id))
+        props = self._native.get_device_properties(device_id)
         return DeviceProperties(
-            name=props.name.decode() if isinstance(props.name, bytes) else str(props.name),
-            total_memory=props.totalGlobalMem,
-            compute_capability=(props.major, props.minor),
-            multiprocessor_count=props.multiProcessorCount,
-            max_threads_per_block=props.maxThreadsPerBlock,
-            warp_size=props.warpSize,
+            name=props.name,
+            total_memory=props.total_memory,
+            compute_capability=(
+                props.compute_capability_major,
+                props.compute_capability_minor,
+            ),
+            multiprocessor_count=props.multiprocessor_count,
+            max_threads_per_block=props.max_threads_per_block,
+            warp_size=props.warp_size,
         )
 
     def allocate(self, size_bytes: int) -> Any:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
-        return self._check_error(self._cudart.cudaMalloc(size_bytes))
+        # Use GPUArray internally for memory management
+        raise NotImplementedError("Use GPUArray from native module directly")
 
     def free(self, ptr: Any) -> None:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             return
-        self._cudart.cudaFree(ptr)
+        # GPUArray handles its own memory via RAII
+        pass
 
     def copy_host_to_device(self, host_data: np.ndarray, device_ptr: Any) -> None:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
-        size = host_data.nbytes
-        self._check_error(
-            self._cudart.cudaMemcpy(
-                device_ptr,
-                host_data.ctypes.data,
-                size,
-                self._cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
-            )
-        )
+        # Use GPUArray.copy_from_numpy() instead
+        raise NotImplementedError("Use GPUArray.copy_from_numpy() instead")
 
-    def copy_device_to_host(
-        self, device_ptr: Any, size_bytes: int, dtype: DataType
-    ) -> np.ndarray:
-        if not self._cuda_available or self._cudart is None:
+    def copy_device_to_host(self, device_ptr: Any, size_bytes: int, dtype: DataType) -> np.ndarray:
+        if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
-        np_dtype = dtype.to_numpy_dtype()
-        host_array: np.ndarray = np.empty(size_bytes // np_dtype.itemsize, dtype=np_dtype)
-        self._check_error(
-            self._cudart.cudaMemcpy(
-                host_array.ctypes.data,
-                device_ptr,
-                size_bytes,
-                self._cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
-            )
-        )
-        return host_array
+        # Use GPUArray.to_numpy() instead
+        raise NotImplementedError("Use GPUArray.to_numpy() instead")
 
     def memset(self, device_ptr: Any, value: int, size_bytes: int) -> None:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
-        self._check_error(self._cudart.cudaMemset(device_ptr, value, size_bytes))
+        # Use GPUArray.fill_zeros() for zero initialization
+        raise NotImplementedError("Use GPUArray.fill_zeros() instead")
 
     def synchronize(self) -> None:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             return
-        self._check_error(self._cudart.cudaDeviceSynchronize())
+        self._native.device_synchronize()
 
     def create_stream(self, priority: int = 0) -> Any:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             raise RuntimeError("CUDA is not available")
-        return self._check_error(
-            self._cudart.cudaStreamCreateWithPriority(
-                self._cudart.cudaStreamNonBlocking, priority
-            )
+        stream_priority = (
+            self._native.StreamPriority.High if priority < 0 else self._native.StreamPriority.Low
         )
+        return self._native.Stream(stream_priority)
 
     def destroy_stream(self, stream: Any) -> None:
-        if not self._cuda_available or self._cudart is None:
-            return
-        self._cudart.cudaStreamDestroy(stream)
+        # Stream handles its own destruction via RAII
+        pass
 
     def stream_synchronize(self, stream: Any) -> None:
-        if not self._cuda_available or self._cudart is None:
+        if not self._cuda_available or self._native is None:
             return
-        self._check_error(self._cudart.cudaStreamSynchronize(stream))
+        stream.synchronize()
 
 
 # Global backend instance
@@ -310,13 +295,27 @@ def get_backend() -> Backend:
     """Get the current backend instance."""
     global _backend
     if _backend is None:
-        # Try CUDA first, fall back to CPU simulation
-        cuda_backend = CUDABackend()
-        if cuda_backend.is_available():
-            _backend = cuda_backend
+        # Try native C++ backend first, fall back to CPU simulation
+        native_backend = NativeBackend()
+        if native_backend.is_available():
+            _backend = native_backend
         else:
             _backend = CPUSimulationBackend()
     return _backend
+
+
+def has_native_module() -> bool:
+    """Check if the native C++ module is available."""
+    return _native_module is not None
+
+
+def get_native_module() -> Any:
+    """Get the native C++ module (for direct access)."""
+    if _native_module is None:
+        raise RuntimeError(
+            "Native module not available. Build with CMake or install pygpukit with CUDA support."
+        )
+    return _native_module
 
 
 def set_backend(backend: Backend) -> None:
