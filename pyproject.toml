@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pygpukit"
+name = "PyGPUkit"
 version = "0.1.0"
 description = "A lightweight GPU runtime for Python with NVRTC JIT compilation and NumPy-like API"
 readme = "README.md"
