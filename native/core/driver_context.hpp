@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <mutex>
+#include <vector>
 
 namespace pygpukit {
 namespace driver {
