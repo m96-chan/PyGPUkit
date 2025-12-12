@@ -14,20 +14,10 @@
 #include <string>
 #include <mutex>
 #include <vector>
+#include "driver_api.hpp"
 
 namespace pygpukit {
 namespace driver {
-
-/**
- * Check CUDA Driver API result and throw on error
- */
-inline void check_driver_error(CUresult result, const char* msg) {
-    if (result != CUDA_SUCCESS) {
-        const char* error_str = nullptr;
-        cuGetErrorString(result, &error_str);
-        throw std::runtime_error(std::string(msg) + ": " + (error_str ? error_str : "unknown error"));
-    }
-}
 
 /**
  * Singleton context manager for CUDA Driver API
