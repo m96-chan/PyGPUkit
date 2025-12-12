@@ -1,6 +1,6 @@
 """PyGPUkit - A lightweight GPU runtime for Python."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from pygpukit.core.array import GPUArray
 from pygpukit.core.device import DeviceInfo, get_device_info, is_cuda_available

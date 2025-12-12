@@ -1,34 +1,69 @@
 
 # PyGPUkit — Lightweight GPU Runtime for Python
-*A minimal, modular GPU runtime with NVRTC JIT compilation, GPU scheduling, and a clean NumPy-like API.*
+*A minimal, modular GPU runtime with Rust-powered scheduler, NVRTC JIT compilation, and a clean NumPy-like API.*
+
+[![PyPI version](https://badge.fury.io/py/PyGPUkit.svg)](https://badge.fury.io/py/PyGPUkit)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
-## 🚀 Overview
+## Overview
 **PyGPUkit** is a lightweight GPU runtime for Python that provides:
+- **Rust-powered scheduler** with admission control, QoS, and resource partitioning
 - NVRTC-based JIT kernel compilation
 - A NumPy-like `GPUArray` type
-- Kubernetes-inspired GPU scheduler (bandwidth + memory guarantees)
+- Kubernetes-inspired GPU scheduling (bandwidth + memory guarantees)
 - Extensible operator set (add/mul/matmul, custom kernels)
 - Minimal dependencies and embeddable runtime
 
-PyGPUkit aims to be the “micro-runtime for GPU computing”: small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
+PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
 
 ---
 
-## ✨ Features
-- ⚡ **Lightweight** — no PyTorch/CuPy overhead
-- 🧩 **Modular** — runtime / memory / scheduler / JIT / ops
-- 📦 **GPUArray** with NumPy interop
-- 🛠 **NVRTC JIT** for CUDA kernels
-- 🎼 **Advanced Scheduler** with memory & bandwidth guarantees
-- 🔌 Optional Triton backend (planned)
-- 🧪 Test-friendly runtime
+## v0.2 Features (NEW)
+
+### Core Infrastructure (Rust)
+| Feature | Description |
+|---------|-------------|
+| **Memory Pool** | LRU eviction, size-class free lists |
+| **Scheduler** | Priority queue, memory reservation |
+| **Transfer Engine** | Separate H2D/D2H streams, priority |
+| **Kernel Dispatch** | Per-stream limits, lifecycle tracking |
+
+### Advanced Features (Rust)
+| Feature | Description |
+|---------|-------------|
+| **Admission Control** | Deterministic admission, quota enforcement |
+| **QoS Policy** | Guaranteed/Burstable/BestEffort tiers |
+| **Kernel Pacing** | Bandwidth-based throttling per stream |
+| **Micro-Slicing** | Kernel splitting, round-robin fairness |
+| **Pinned Memory** | Page-locked host memory with pooling |
+| **Kernel Cache** | PTX caching, LRU eviction, TTL |
+| **GPU Partitioning** | Resource isolation, multi-tenant support |
+| **Tiled Matmul** | Shared memory + double buffering |
+
+### Performance (RTX 3090 Ti)
+| Matrix Size | Performance | vs NumPy |
+|-------------|-------------|----------|
+| 512x512 | 1262 GFLOPS | 11.6x |
+| 1024x1024 | 1350 GFLOPS | 2.2x |
+| 2048x2048 | 4417 GFLOPS | 6.1x |
+| 4096x4096 | **6555 GFLOPS** | 7.9x |
 
 ---
 
-## 🔧 Installation
-(Available after first PyPI release)
+## Features
+- **Lightweight** — no PyTorch/CuPy overhead
+- **Modular** — runtime / memory / scheduler / JIT / ops
+- **Rust Backend** — memory pool, scheduler, dispatch in Rust
+- **GPUArray** with NumPy interop
+- **NVRTC JIT** for CUDA kernels
+- **Advanced Scheduler** with memory & bandwidth guarantees
+- **106 Rust tests** for core components
+
+---
+
+## Installation
 
 ```bash
 pip install pygpukit
@@ -43,7 +78,7 @@ pip install -e .
 ```
 
 Requirements:
-- Python 3.9+
+- Python 3.10+
 - CUDA 11+
 - NVRTC available
 - NVIDIA GPU
@@ -55,7 +90,7 @@ Requirements:
 
 ---
 
-## 🧭 Project Goals
+## Project Goals
 1. Provide the smallest usable GPU runtime for Python
 2. Expose GPU scheduling (bandwidth, memory, partitioning)
 3. Make writing custom GPU kernels easy
@@ -63,7 +98,7 @@ Requirements:
 
 ---
 
-## 📚 Usage Examples
+## Usage Examples
 
 ### Allocate Arrays
 ```python
@@ -79,7 +114,7 @@ z = gp.add(x, y)
 w = gp.matmul(x, y)
 ```
 
-### CPU ↔ GPU Transfer
+### CPU <-> GPU Transfer
 ```python
 arr = z.to_numpy()
 garr = gp.from_numpy(arr)
@@ -99,9 +134,28 @@ kernel = gp.jit(src, func="scale")
 kernel(x, factor=0.5, n=x.size)
 ```
 
+### Rust Scheduler (v0.2)
+```python
+import _pygpukit_rust as rust
+
+# Memory Pool with LRU eviction
+pool = rust.MemoryPool(quota=100 * 1024 * 1024, enable_eviction=True)
+block = pool.allocate(4096)
+
+# QoS-aware task scheduling
+evaluator = rust.QosPolicyEvaluator(total_memory=8*1024**3, total_bandwidth=1.0)
+task = rust.QosTaskMeta.guaranteed("task-1", "Critical Task", 256*1024*1024)
+result = evaluator.evaluate(task)
+
+# GPU Partitioning
+manager = rust.PartitionManager(rust.PartitionConfig(total_memory=8*1024**3))
+manager.create_partition("inference", "Inference",
+    rust.PartitionLimits().memory(4*1024**3).compute(0.5))
+```
+
 ---
 
-# 🎼 Scheduler — Kubernetes‑Inspired GPU Orchestration
+# Scheduler — Kubernetes-Inspired GPU Orchestration
 
 PyGPUkit includes an experimental scheduler that treats a single GPU as a **multi-tenant compute node**, similar to how Kubernetes orchestrates CPU workloads. The goal is to provide **resource isolation, guarantees, and fair sharing** across multiple GPU tasks.
 
@@ -112,8 +166,8 @@ PyGPUkit includes an experimental scheduler that treats a single GPU as a **mult
 ## **1. GPU Memory Reservation**
 Tasks may request a guaranteed block of GPU memory.
 
-- Hard guarantees → task is rejected if memory cannot be allocated
-- Soft guarantees → best‑effort allocation
+- Hard guarantees -> task is rejected if memory cannot be allocated
+- Soft guarantees -> best-effort allocation
 - Overcommit strategies (evict to host when pressure is high)
 - Reclaim policies (LRU GPUArray eviction)
 
@@ -133,8 +187,8 @@ Tasks may request a specific percentage of GPU compute bandwidth.
 Bandwidth control is implemented via:
 - Stream priority
 - Kernel pacing (launch intervals)
-- Micro‑slicing large kernels
-- Cooperative time‑quantized scheduling
+- Micro-slicing large kernels
+- Cooperative time-quantized scheduling
 - Persistent dispatcher kernels (planned)
 
 **Example:**
@@ -148,7 +202,7 @@ task = scheduler.submit(
 ---
 
 ## **3. Logical GPU Partitioning**
-PyGPUkit implements **software‑defined GPU slicing**, similar in spirit to Kubernetes device plugin resource partitioning.
+PyGPUkit implements **software-defined GPU slicing**, similar in spirit to Kubernetes device plugin resource partitioning.
 
 Slices may define:
 - Memory quota
@@ -157,8 +211,8 @@ Slices may define:
 - Isolation level
 
 Useful for:
-- Multi‑tenant inference servers
-- Real‑time audio/DSP workloads
+- Multi-tenant inference servers
+- Real-time audio/DSP workloads
 - Background/foreground GPU task separation
 
 ---
@@ -217,66 +271,75 @@ stats = scheduler.stats(task_id)
 ---
 
 ## **7. Soft Isolation Model**
-While not OS‑level isolation, each GPU task is provided:
+While not OS-level isolation, each GPU task is provided:
 
 - Dedicated stream groups
 - Guaranteed memory pools
 - Kernel pacing to enforce bandwidth
 - Optional sandboxed GPUArray region
 
-This provides practical multi‑tenant safety without MIG/MPS.
+This provides practical multi-tenant safety without MIG/MPS.
 
 ---
 
-# 🏗 Proposed Directory Structure
+# Project Structure
 ```
 PyGPUkit/
-  core/         # NVRTC wrapper, device info
-  memory/       # GPUArray, allocators
-  scheduler/    # orchestration, partitioning, throttling
-  ops/          # built-in kernels
-  jit/          # JIT compiler + cache
-  python/       # high-level Python API
-  examples/
-  tests/
+  src/pygpukit/    # Python API (NumPy-compatible)
+  native/          # C++ backend (CUDA Driver/Runtime/NVRTC)
+  rust/            # Rust backend (memory pool, scheduler, dispatch)
+    pygpukit-core/   # Pure Rust core logic
+    pygpukit-python/ # PyO3 bindings
+  examples/        # Demo scripts
+  tests/           # Test suite
 ```
 
 ---
 
-## 🧪 Roadmap
+## Roadmap
 
-### **v0.1 (MVP)**
-- GPUArray
-- NVRTC JIT
-- add/mul/matmul ops
-- Basic stream manager
-- Packaging + wheels
+### **v0.1 (Released)**
+- [x] GPUArray
+- [x] NVRTC JIT
+- [x] add/mul/matmul ops
+- [x] Basic stream manager
+- [x] Packaging + wheels
 
-### **v0.2**
-- Scheduler (memory + bandwidth guarantees)
-- Kernel cache
-- NumPy interop
-- Benchmarks
+### **v0.2 (Released)**
+- [x] Rust Memory Pool (LRU, size-class)
+- [x] Rust Scheduler (priority, memory reservation)
+- [x] Rust Transfer Engine (async H2D/D2H)
+- [x] Rust Kernel Dispatch Controller
+- [x] Admission Control
+- [x] QoS Policy Framework (Guaranteed/Burstable/BestEffort)
+- [x] Kernel Pacing Engine
+- [x] Micro-Slicing Framework
+- [x] Pinned Memory Support
+- [x] Kernel Cache (PTX caching)
+- [x] GPU Partitioning
+- [x] Tiled Matmul (shared memory)
+- [x] 106 Rust tests
 
-### **v0.3**
-- Triton optional backend
-- Advanced ops (softmax, layernorm)
-- Inference‑oriented plugin system
+### **v0.3 (Planned)**
+- [ ] Triton optional backend
+- [ ] Advanced ops (softmax, layernorm)
+- [ ] Inference-oriented plugin system
+- [ ] MPS/MIG integration
 
 ---
 
-## 🤝 Contributing
+## Contributing
 Contributions and discussions are welcome!
 Please open Issues for feature requests, bugs, or design proposals.
 
 ---
 
-## 📄 License
+## License
 MIT License
 
 ---
 
-## ⭐ Acknowledgements
+## Acknowledgements
 Inspired by:
 - CUDA Runtime
 - NVRTC
