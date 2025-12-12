@@ -43,10 +43,15 @@ pip install -e .
 ```
 
 Requirements:
-- Python 3.9+  
-- CUDA 11+  
-- NVRTC available  
-- NVIDIA GPU  
+- Python 3.9+
+- CUDA 11+
+- NVRTC available
+- NVIDIA GPU
+
+**Supported GPUs:**
+- RTX 30XX series (Ampere) and above
+- Performance tuning is optimized for GPUs with large L2 cache (6MB+)
+- Older GPUs (RTX 20XX, GTX 10XX, etc.) are NOT tuned and may have suboptimal performance
 
 ---
 
