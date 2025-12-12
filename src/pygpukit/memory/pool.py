@@ -375,8 +375,12 @@ class MemoryPool:
         """
         if not block.on_gpu:
             if block.host_data is not None:
-                return block.host_data.view(dtype)
-            return np.zeros(block.size // np.dtype(dtype).itemsize, dtype=dtype)
+                result: np.ndarray = block.host_data.view(dtype)
+                return result
+            zeros_result: np.ndarray = np.zeros(
+                block.size // np.dtype(dtype).itemsize, dtype=dtype
+            )
+            return zeros_result
 
         backend = self._get_backend()
         try:
@@ -392,13 +396,17 @@ class MemoryPool:
             else:
                 from pygpukit.core.dtypes import float32 as dt
 
-            result = backend.copy_device_to_host(block.device_ptr, block.size, dt)
-            return result
+            result_data: np.ndarray = backend.copy_device_to_host(block.device_ptr, block.size, dt)
+            return result_data
         except Exception:
             # CPU simulation
             if block.host_data is not None:
-                return block.host_data.view(dtype)
-            return np.zeros(block.size // np.dtype(dtype).itemsize, dtype=dtype)
+                fallback: np.ndarray = block.host_data.view(dtype)
+                return fallback
+            fallback_zeros: np.ndarray = np.zeros(
+                block.size // np.dtype(dtype).itemsize, dtype=dtype
+            )
+            return fallback_zeros
 
     def stats(self) -> dict[str, Any]:
         """Get memory pool statistics.
