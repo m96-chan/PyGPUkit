@@ -6,8 +6,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+# Driver-Only Mode option
+# When enabled, removes cudart dependency and uses CUDA Driver API only
+option(PYGPUKIT_DRIVER_ONLY "Build in driver-only mode (no cudart dependency)" OFF)
+
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
+
+if(PYGPUKIT_DRIVER_ONLY)
+    message(STATUS "Building in DRIVER-ONLY mode (no cudart dependency)")
+    add_compile_definitions(PYGPUKIT_DRIVER_ONLY=1)
+else()
+    message(STATUS "Building with CUDA Runtime API (cudart)")
+endif()
 
 # Find Python and pybind11
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
@@ -50,11 +61,20 @@ pybind11_add_module(_pygpukit_native
     bindings/ops_bindings.cpp
 )
 
-target_link_libraries(_pygpukit_native PRIVATE
-    CUDA::cudart
-    CUDA::cuda_driver
-    CUDA::nvrtc
-)
+if(PYGPUKIT_DRIVER_ONLY)
+    # Driver-only: Link only cuda_driver and nvrtc (no cudart)
+    target_link_libraries(_pygpukit_native PRIVATE
+        CUDA::cuda_driver
+        CUDA::nvrtc
+    )
+else()
+    # Standard: Link cudart, cuda_driver, and nvrtc
+    target_link_libraries(_pygpukit_native PRIVATE
+        CUDA::cudart
+        CUDA::cuda_driver
+        CUDA::nvrtc
+    )
+endif()
 
 set_target_properties(_pygpukit_native PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON

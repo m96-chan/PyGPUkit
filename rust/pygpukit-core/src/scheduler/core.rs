@@ -473,27 +473,34 @@ mod tests {
     fn test_memory_reservation() {
         let sched = Scheduler::new(Some(1000), 10.0, 100.0);
 
-        // Submit tasks that exceed memory
-        let task1 = TaskMeta::with_memory("task-1".into(), "T1".into(), 600);
-        let task2 = TaskMeta::with_memory("task-2".into(), "T2".into(), 600);
+        // Submit tasks - memory is reserved at submit time
+        let task1 = TaskMeta::with_memory("task-1".into(), "T1".into(), 400);
+        let task2 = TaskMeta::with_memory("task-2".into(), "T2".into(), 400);
         sched.submit(task1);
         sched.submit(task2);
 
-        // Only first should run (not enough memory for second)
+        // Both tasks should run (total 800 <= 1000)
         let runnable = sched.get_runnable_tasks(10);
-        assert_eq!(runnable.len(), 1);
+        assert_eq!(runnable.len(), 2);
 
+        // Memory is reserved at submit time
         let stats = sched.stats();
-        assert_eq!(stats.reserved_memory, 600);
-        assert_eq!(stats.pending_count, 1);
+        assert_eq!(stats.reserved_memory, 800);
+        assert_eq!(stats.running_count, 2);
 
-        // Complete first task
+        // Complete first task - releases memory
         sched.complete_task("task-1");
 
-        // Now second should run
-        let runnable = sched.get_runnable_tasks(10);
-        assert_eq!(runnable.len(), 1);
-        assert_eq!(runnable[0], "task-2");
+        let stats = sched.stats();
+        assert_eq!(stats.reserved_memory, 400);
+        assert_eq!(stats.completed_count, 1);
+
+        // Complete second task
+        sched.complete_task("task-2");
+
+        let stats = sched.stats();
+        assert_eq!(stats.reserved_memory, 0);
+        assert_eq!(stats.completed_count, 2);
     }
 
     #[test]

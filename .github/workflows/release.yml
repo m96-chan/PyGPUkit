@@ -189,6 +189,47 @@ jobs:
           name: wheel-windows-py312
           path: dist/*.whl
 
+  # Test Driver-Only Mode on Windows (GPU required)
+  test-driver-only-windows:
+    runs-on: [self-hosted, Windows, X64, cuda]
+    needs: [build-windows]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        shell: pwsh
+        run: |
+          pyenv install 3.12 --skip-existing
+          pyenv local 3.12
+          python --version
+
+      - name: Clean previous builds
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install build scikit-build-core pybind11 ninja cmake pytest numpy
+
+      - name: Build Driver-Only Mode
+        shell: pwsh
+        run: |
+          python -m build --wheel -C cmake.define.PYGPUKIT_DRIVER_ONLY=ON
+        env:
+          CMAKE_CUDA_ARCHITECTURES: "86"
+
+      - name: Install and Test Driver-Only wheel
+        shell: pwsh
+        run: |
+          pip install dist/*.whl --force-reinstall
+          python -c "import pygpukit; print('CUDA available:', pygpukit.is_cuda_available())"
+          pytest tests/ -v --tb=short
+
   # Publish to TestPyPI first
   publish-testpypi:
     runs-on: ubuntu-latest

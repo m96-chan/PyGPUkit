@@ -1,7 +1,77 @@
 #include "memory.hpp"
-#include <cuda_runtime.h>
 #include <numeric>
 #include <cstring>
+
+#ifdef PYGPUKIT_DRIVER_ONLY
+// Driver-only mode: Use CUDA Driver API
+#include "driver_context.hpp"
+#include "driver_api.hpp"
+
+namespace pygpukit {
+
+namespace {
+
+void check_driver_error(CUresult result, const char* msg) {
+    if (result != CUDA_SUCCESS) {
+        const char* error_str = nullptr;
+        cuGetErrorString(result, &error_str);
+        throw CudaError(std::string(msg) + ": " + (error_str ? error_str : "unknown error"));
+    }
+}
+
+} // anonymous namespace
+
+DevicePtr device_malloc(size_t size_bytes) {
+    // Ensure context is initialized
+    driver::DriverContext::instance().set_current();
+
+    CUdeviceptr dptr = 0;
+    check_driver_error(cuMemAlloc(&dptr, size_bytes), "Failed to allocate device memory");
+    return reinterpret_cast<void*>(dptr);
+}
+
+void device_free(DevicePtr ptr) {
+    if (ptr != nullptr) {
+        cuMemFree(reinterpret_cast<CUdeviceptr>(ptr));
+    }
+}
+
+void memcpy_host_to_device(DevicePtr dst, const void* src, size_t size_bytes) {
+    check_driver_error(
+        cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(dst), src, size_bytes),
+        "Failed to copy host to device"
+    );
+}
+
+void memcpy_device_to_host(void* dst, DevicePtr src, size_t size_bytes) {
+    check_driver_error(
+        cuMemcpyDtoH(dst, reinterpret_cast<CUdeviceptr>(src), size_bytes),
+        "Failed to copy device to host"
+    );
+}
+
+void memcpy_device_to_device(DevicePtr dst, DevicePtr src, size_t size_bytes) {
+    check_driver_error(
+        cuMemcpyDtoD(reinterpret_cast<CUdeviceptr>(dst), reinterpret_cast<CUdeviceptr>(src), size_bytes),
+        "Failed to copy device to device"
+    );
+}
+
+void device_memset(DevicePtr ptr, int value, size_t size_bytes) {
+    // cuMemsetD8 sets each byte to the value
+    check_driver_error(
+        cuMemsetD8(reinterpret_cast<CUdeviceptr>(ptr), static_cast<unsigned char>(value), size_bytes),
+        "Failed to memset device memory"
+    );
+}
+
+void get_memory_info(size_t* free_bytes, size_t* total_bytes) {
+    check_driver_error(cuMemGetInfo(free_bytes, total_bytes), "Failed to get memory info");
+}
+
+#else
+// Standard mode: Use CUDA Runtime API
+#include <cuda_runtime.h>
 
 namespace pygpukit {
 
@@ -52,6 +122,8 @@ void get_memory_info(size_t* free_bytes, size_t* total_bytes) {
     cudaError_t err = cudaMemGetInfo(free_bytes, total_bytes);
     check_cuda_error(err, "Failed to get memory info");
 }
+
+#endif // PYGPUKIT_DRIVER_ONLY
 
 // GPUArray implementation
 

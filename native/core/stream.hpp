@@ -1,7 +1,15 @@
 #pragma once
 
 #include "types.hpp"
+
+#ifdef PYGPUKIT_DRIVER_ONLY
+#include <cuda.h>
+// CUstream and cudaStream_t are the same underlying type
+using StreamHandle = CUstream;
+#else
 #include <cuda_runtime.h>
+using StreamHandle = cudaStream_t;
+#endif
 
 namespace pygpukit {
 
@@ -29,13 +37,13 @@ public:
     void synchronize();
 
     // Get raw CUDA stream handle
-    cudaStream_t handle() const { return stream_; }
+    StreamHandle handle() const { return stream_; }
 
     // Get priority
     StreamPriority priority() const { return priority_; }
 
 private:
-    cudaStream_t stream_;
+    StreamHandle stream_;
     StreamPriority priority_;
 };
 
