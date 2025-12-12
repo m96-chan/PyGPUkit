@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 use pygpukit_core::transfer::{
     AsyncTransferEngine, TransferOp, TransferState, TransferStats, TransferType, StreamType,
+    PinnedMemoryManager, PinnedPoolConfig, PinnedBlock, PinnedStats, PinnedError,
 };
 
 /// Python wrapper for TransferType enum
@@ -448,6 +449,315 @@ impl PyAsyncTransferEngine {
     }
 }
 
+// =============================================================================
+// Pinned Memory Types
+// =============================================================================
+
+/// Pinned memory pool configuration for Python
+#[pyclass(name = "PinnedPoolConfig")]
+#[derive(Clone)]
+pub struct PyPinnedPoolConfig {
+    inner: PinnedPoolConfig,
+}
+
+#[pymethods]
+impl PyPinnedPoolConfig {
+    #[new]
+    #[pyo3(signature = (max_size=1073741824, enable_pooling=true, alignment=256))]
+    fn new(max_size: usize, enable_pooling: bool, alignment: usize) -> Self {
+        Self {
+            inner: PinnedPoolConfig {
+                max_size,
+                enable_pooling,
+                alignment,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[getter]
+    fn max_size(&self) -> usize {
+        self.inner.max_size
+    }
+
+    #[getter]
+    fn enable_pooling(&self) -> bool {
+        self.inner.enable_pooling
+    }
+
+    #[getter]
+    fn alignment(&self) -> usize {
+        self.inner.alignment
+    }
+
+    /// Get size class for a given size
+    fn get_size_class(&self, size: usize) -> usize {
+        self.inner.get_size_class(size)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PinnedPoolConfig(max_size={}, pooling={}, alignment={})",
+            self.inner.max_size, self.inner.enable_pooling, self.inner.alignment
+        )
+    }
+}
+
+/// Pinned memory block for Python
+#[pyclass(name = "PinnedBlock")]
+#[derive(Clone)]
+pub struct PyPinnedBlock {
+    inner: PinnedBlock,
+}
+
+#[pymethods]
+impl PyPinnedBlock {
+    #[getter]
+    fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    #[getter]
+    fn host_ptr(&self) -> u64 {
+        self.inner.host_ptr
+    }
+
+    #[getter]
+    fn size(&self) -> usize {
+        self.inner.size
+    }
+
+    #[getter]
+    fn in_use(&self) -> bool {
+        self.inner.in_use
+    }
+
+    #[getter]
+    fn task_id(&self) -> Option<String> {
+        self.inner.task_id.clone()
+    }
+
+    #[getter]
+    fn allocated_at(&self) -> f64 {
+        self.inner.allocated_at
+    }
+
+    #[getter]
+    fn last_access(&self) -> f64 {
+        self.inner.last_access
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PinnedBlock(id={}, size={}, in_use={})",
+            self.inner.id, self.inner.size, self.inner.in_use
+        )
+    }
+}
+
+/// Pinned memory statistics for Python
+#[pyclass(name = "PinnedStats")]
+#[derive(Clone)]
+pub struct PyPinnedStats {
+    inner: PinnedStats,
+}
+
+#[pymethods]
+impl PyPinnedStats {
+    #[getter]
+    fn total_allocated(&self) -> usize {
+        self.inner.total_allocated
+    }
+
+    #[getter]
+    fn current_used(&self) -> usize {
+        self.inner.current_used
+    }
+
+    #[getter]
+    fn peak_used(&self) -> usize {
+        self.inner.peak_used
+    }
+
+    #[getter]
+    fn total_allocations(&self) -> usize {
+        self.inner.total_allocations
+    }
+
+    #[getter]
+    fn total_frees(&self) -> usize {
+        self.inner.total_frees
+    }
+
+    #[getter]
+    fn pool_hits(&self) -> usize {
+        self.inner.pool_hits
+    }
+
+    #[getter]
+    fn pool_misses(&self) -> usize {
+        self.inner.pool_misses
+    }
+
+    #[getter]
+    fn pool_size(&self) -> usize {
+        self.inner.pool_size
+    }
+
+    #[getter]
+    fn pooled_blocks(&self) -> usize {
+        self.inner.pooled_blocks
+    }
+
+    /// Pool hit rate (0.0 - 1.0)
+    fn hit_rate(&self) -> f64 {
+        let total = self.inner.pool_hits + self.inner.pool_misses;
+        if total > 0 {
+            self.inner.pool_hits as f64 / total as f64
+        } else {
+            0.0
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PinnedStats(used={}/{}, hit_rate={:.1}%)",
+            self.inner.current_used, self.inner.peak_used,
+            self.hit_rate() * 100.0
+        )
+    }
+}
+
+/// Pinned memory manager for Python
+///
+/// Manages page-locked (pinned) host memory for faster
+/// CPU-GPU transfers with optional pooling for reuse.
+#[pyclass(name = "PinnedMemoryManager")]
+pub struct PyPinnedMemoryManager {
+    inner: PinnedMemoryManager,
+}
+
+#[pymethods]
+impl PyPinnedMemoryManager {
+    #[new]
+    #[pyo3(signature = (config=None))]
+    fn new(config: Option<PyPinnedPoolConfig>) -> Self {
+        let cfg = config.map(|c| c.inner).unwrap_or_default();
+        Self {
+            inner: PinnedMemoryManager::new(cfg),
+        }
+    }
+
+    /// Create with max size
+    #[staticmethod]
+    fn with_max_size(max_size: usize) -> Self {
+        Self {
+            inner: PinnedMemoryManager::with_max_size(max_size),
+        }
+    }
+
+    /// Check if allocation would succeed
+    fn can_allocate(&self, size: usize) -> bool {
+        self.inner.can_allocate(size)
+    }
+
+    /// Allocate pinned memory
+    ///
+    /// Returns (id, size_class, reused) tuple.
+    /// If reused=False, caller must perform cudaHostAlloc
+    /// and then call register().
+    fn allocate(&mut self, size: usize) -> PyResult<(u64, usize, bool)> {
+        self.inner.allocate(size).map_err(|e| {
+            pyo3::exceptions::PyMemoryError::new_err(e.to_string())
+        })
+    }
+
+    /// Register an allocated block
+    ///
+    /// Call this after cudaHostAlloc succeeds with the actual pointer.
+    fn register(&mut self, id: u64, host_ptr: u64, size: usize) {
+        self.inner.register(id, host_ptr, size);
+    }
+
+    /// Free a pinned block
+    ///
+    /// Returns (should_free, host_ptr) tuple.
+    /// If should_free=True, caller should call cudaFreeHost.
+    fn free(&mut self, id: u64) -> PyResult<(bool, u64)> {
+        self.inner.free(id).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(e.to_string())
+        })
+    }
+
+    /// Associate a block with a task
+    fn associate_task(&mut self, id: u64, task_id: String) -> PyResult<()> {
+        self.inner.associate_task(id, task_id).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(e.to_string())
+        })
+    }
+
+    /// Get a block by ID
+    fn get(&self, id: u64) -> Option<PyPinnedBlock> {
+        self.inner.get(id).map(|b| PyPinnedBlock { inner: b.clone() })
+    }
+
+    /// Touch a block to update access time
+    fn touch(&mut self, id: u64) -> PyResult<()> {
+        self.inner.touch(id).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(e.to_string())
+        })
+    }
+
+    /// Get blocks for a task
+    fn get_blocks_for_task(&self, task_id: &str) -> Vec<PyPinnedBlock> {
+        self.inner.get_blocks_for_task(task_id)
+            .into_iter()
+            .map(|b| PyPinnedBlock { inner: b.clone() })
+            .collect()
+    }
+
+    /// Free all blocks for a task
+    ///
+    /// Returns list of (should_free, host_ptr) tuples.
+    fn free_task_blocks(&mut self, task_id: &str) -> Vec<(bool, u64)> {
+        self.inner.free_task_blocks(task_id)
+    }
+
+    /// Get statistics
+    fn stats(&self) -> PyPinnedStats {
+        PyPinnedStats {
+            inner: self.inner.stats(),
+        }
+    }
+
+    /// Clear the pool (free all pooled blocks)
+    ///
+    /// Returns list of host pointers to free.
+    fn clear_pool(&mut self) -> Vec<u64> {
+        self.inner.clear_pool()
+    }
+
+    /// Clear all state
+    ///
+    /// Returns list of all host pointers to free.
+    fn clear(&mut self) -> Vec<u64> {
+        self.inner.clear()
+    }
+
+    /// Get number of active blocks
+    fn active_count(&self) -> usize {
+        self.inner.active_count()
+    }
+
+    fn __repr__(&self) -> String {
+        let stats = self.inner.stats();
+        format!(
+            "PinnedMemoryManager(active={}, used={} bytes)",
+            self.inner.active_count(), stats.current_used
+        )
+    }
+}
+
 /// Register transfer module
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTransferType>()?;
@@ -456,5 +766,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTransferOp>()?;
     m.add_class::<PyTransferStats>()?;
     m.add_class::<PyAsyncTransferEngine>()?;
+    // Pinned memory
+    m.add_class::<PyPinnedPoolConfig>()?;
+    m.add_class::<PyPinnedBlock>()?;
+    m.add_class::<PyPinnedStats>()?;
+    m.add_class::<PyPinnedMemoryManager>()?;
     Ok(())
 }

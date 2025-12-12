@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use crate::scheduler::task::{TaskMeta, TaskState, TaskStats};
+use crate::scheduler::admission::{AdmissionController, AdmissionConfig, AdmissionDecision};
 
 /// Scheduler statistics
 #[derive(Debug, Clone, Default)]
@@ -46,6 +47,8 @@ struct SchedulerInner {
     total_wait_time: f64,
     total_exec_time: f64,
     completed_count: usize,
+    /// Admission controller
+    admission: AdmissionController,
 }
 
 /// Thread-safe task scheduler with bandwidth pacing.
@@ -81,6 +84,11 @@ impl Scheduler {
     /// * `sched_tick_ms` - Scheduling tick interval in milliseconds
     /// * `window_ms` - Bandwidth pacing window in milliseconds
     pub fn new(total_memory: Option<usize>, sched_tick_ms: f64, window_ms: f64) -> Self {
+        let admission_config = match total_memory {
+            Some(mem) => AdmissionConfig::with_memory(mem),
+            None => AdmissionConfig::default(),
+        };
+
         Self {
             total_memory,
             sched_tick_ms,
@@ -93,8 +101,52 @@ impl Scheduler {
                 total_wait_time: 0.0,
                 total_exec_time: 0.0,
                 completed_count: 0,
+                admission: AdmissionController::new(admission_config),
             }),
         }
+    }
+
+    /// Evaluate admission for a task without submitting it.
+    ///
+    /// This performs a dry-run admission check to determine if
+    /// a task would be admitted, queued, or rejected.
+    pub fn evaluate_admission(&self, task: &TaskMeta) -> AdmissionDecision {
+        let inner = self.inner.read();
+        inner.admission.evaluate(task)
+    }
+
+    /// Admit a task through the admission control pipeline.
+    ///
+    /// Returns an AdmissionDecision indicating whether the task
+    /// was admitted, queued for best-effort, or rejected.
+    ///
+    /// If admitted or queued, the task is automatically submitted.
+    pub fn admit(&self, task: TaskMeta) -> AdmissionDecision {
+        let mut inner = self.inner.write();
+        let decision = inner.admission.admit(&task);
+
+        match &decision {
+            AdmissionDecision::Admit { reserved_memory, .. } => {
+                // Task admitted - add to scheduler
+                let task_id = task.id.clone();
+                inner.pending_queue.push_back(task_id.clone());
+                inner.reserved_memory += reserved_memory;
+                inner.tasks.insert(task_id, task);
+            }
+            AdmissionDecision::Queue { .. } => {
+                // Task queued for best-effort - still add to scheduler
+                let task_id = task.id.clone();
+                let memory = task.memory_estimate;
+                inner.pending_queue.push_back(task_id.clone());
+                inner.reserved_memory += memory;
+                inner.tasks.insert(task_id, task);
+            }
+            AdmissionDecision::Reject { .. } => {
+                // Task rejected - do not add
+            }
+        }
+
+        decision
     }
 
     /// Submit a task for scheduling.
@@ -379,6 +431,12 @@ impl Scheduler {
         inner.total_wait_time = 0.0;
         inner.total_exec_time = 0.0;
         inner.completed_count = 0;
+        inner.admission.reset();
+    }
+
+    /// Get admission control statistics.
+    pub fn admission_stats(&self) -> crate::scheduler::admission::AdmissionStats {
+        self.inner.read().admission.stats()
     }
 
     /// Get scheduling tick interval.
