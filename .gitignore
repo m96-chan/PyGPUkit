@@ -143,3 +143,4 @@ Thumbs.db
 # Project specific
 *.ptx
 *.cubin
+test_install/
