@@ -1,5 +1,108 @@
 # PyGPUkit - Claude Code Guidelines
 
+---
+
+## IMPORTANT IMPLEMENTATION DIRECTIVES FOR PyGPUkit (MANDATORY)
+
+You **MUST** preserve and prioritize all Rust-based components.
+You are **NOT** allowed to delete, simplify, or replace Rust modules with Python equivalents.
+
+### Required Rust Components (MUST NOT be removed)
+
+1. **Rust memory pool** (with LRU eviction)
+2. **Rust GPU scheduler state machine**
+3. **Rust-side async GPU memory transfer engine**
+4. **Rust-side kernel dispatch controller**
+
+### Architecture Principle
+
+```
+Python (High-level orchestration only)
+    ↓
+Rust (Core scheduling, memory management, GPU coordination)
+    ↓
+C++ (CUDA Driver/Runtime API, NVRTC, kernel launch)
+```
+
+**Python is ONLY a high-level orchestration layer.**
+The core scheduling, memory management, GPU coordination, and performance-critical components **MUST** remain implemented in Rust.
+
+### Prohibited Actions
+
+- ❌ **DO NOT** convert Rust features to Python, Cython, Numba, or pure CUDA kernels
+- ❌ **DO NOT** delete Rust tasks from roadmap
+- ❌ **DO NOT** mark Rust tasks as "implemented in Python"
+- ❌ **DO NOT** simplify architecture by removing Rust layer
+
+### If Rust tasks were removed, RESTORE them:
+
+- "Implement Rust memory pool with LRU eviction"
+- "Implement Rust scheduler state machine"
+- "Add async memory transfers (Rust-side)"
+- "Add kernel dispatch controller (Rust-side)"
+
+**Rust is the authoritative implementation for all performance-critical subsystems.**
+
+---
+
+## PyGPUkit Rust Architecture Specification (MANDATORY)
+
+You **MUST** follow the directory structure below exactly.
+Do **NOT** delete, merge, or simplify these modules.
+Python is only the binding layer; the Rust crates contain the authoritative logic.
+
+```
+rust/
+├── Cargo.toml                               # Workspace root
+├── pygpukit-core/                           # Pure Rust GPU runtime
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── memory/
+│       │   ├── mod.rs
+│       │   ├── block.rs                     # GPU memory block representation
+│       │   ├── pool.rs                      # MemoryPool with LRU eviction
+│       │   └── size_class.rs                # Size-class allocator
+│       └── scheduler/
+│           ├── mod.rs
+│           ├── task.rs                      # TaskState, QoS Policies, Metadata
+│           └── core.rs                      # Scheduler state machine (Rust)
+└── pygpukit-python/
+    ├── Cargo.toml
+    ├── pyproject.toml                       # Maturin configuration
+    └── src/
+        ├── lib.rs                           # Exposes _pygpukit_rust to Python
+        ├── memory.rs                        # PyO3 bindings for MemoryPool
+        └── scheduler.rs                     # PyO3 bindings for Scheduler
+```
+
+### Architecture Rules (Non-Negotiable)
+
+1. **pygpukit-core is the authoritative runtime.**
+   - MemoryPool, Scheduler, Task, LRU, SizeClass MUST be implemented here.
+   - Python MUST NOT reimplement these concepts.
+
+2. **All GPU memory management MUST live in:**
+   `rust/pygpukit-core/src/memory/`
+
+3. **All scheduling logic MUST live in:**
+   `rust/pygpukit-core/src/scheduler/`
+
+4. **Python bindings MUST be thin wrappers only.**
+   - No logic duplication
+   - No scheduler in Python
+   - No memory pool in Python
+
+5. **When adding new features, always add them to Rust first.**
+   Then expose via PyO3.
+
+6. **Never remove:**
+   - `block.rs`
+   - `pool.rs`
+   - `size_class.rs`
+
+---
+
 ## GPU Backend Model (CRITICAL)
 
 ### Mental Model for Code Generation
@@ -195,6 +298,112 @@ PyGPUkit/
 
 ---
 
+## Kernel Optimization Directives (CRITICAL)
+
+**Target GPU architectures:** Ampere (SM 80–86), Ada (SM 89), Hopper (SM 90)
+**Architectures below SM80 are officially unsupported.**
+
+### 1. Kernel Design Philosophy
+
+**DO NOT** use classic shared-memory tiling as the main optimization.
+On Ampere, L2 is large and fast; naive or warp-level kernels outperform tiled kernels.
+
+**Prefer:**
+- L2-friendly memory access patterns
+- Coalesced loads (`ld.global.cs`)
+- Warp-level primitives (shuffle, reduce)
+- Tensor-core paths when possible (`wmma`, `mma.sync`)
+- Asynchronous copy (`cp.async`) for global→shared prefetch
+
+**Avoid:**
+- Unnecessary `__syncthreads()`
+- Complex shared-memory patterns designed for Pascal/Turing
+- Block sizes > 256 unless occupancy analysis explicitly shows benefit
+
+### 2. Kernel Autoselection Rules
+
+```cpp
+int sm = device_sm_major * 10 + device_sm_minor;
+
+if (sm >= 90) {
+    // Hopper/Ada
+    use_mma_sync_kernels();
+} else if (sm >= 80) {
+    // Ampere (A100, 3090, 3080)
+    use_ampere_optimized_kernels();
+} else {
+    throw std::runtime_error("PyGPUkit requires SM >= 80 (Ampere)");
+}
+```
+
+**No fallback kernels for older GPUs.**
+
+### 3. MatMul Optimization Directives
+
+For Ampere, implement two variants:
+- **A. L2-optimized naive kernel** (fast for fp32)
+- **B. Warp-level MMA kernel** (tensor core)
+
+Block sizes:
+```cpp
+blockDim = (16, 16) or (32, 8)
+grid = ceil((M,N)/block)
+```
+
+**Do NOT** increase blockDim to 32×32 unless profiler proves faster.
+
+**Prefer:**
+- `__ldg()` or modern `ld.global.cs` patterns
+- Avoid shared-memory tiles except for mma kernels
+
+**Enable Tensor Core fast paths for:**
+- FP16
+- BF16
+- TF32 (Ampere only)
+
+For mma kernels:
+```
+mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32
+```
+
+### 4. Memory Access Optimization Rules
+
+- Align pointers to 128 bytes where possible
+- Ensure loads are coalesced across warps
+- Prefer `float4` / `half8` vectorized loads
+- Avoid bank conflicts in shared memory (power of 2 strides)
+- Use register blocking aggressively (Ampere has huge register file)
+
+### 5. Remove Legacy Code
+
+**DELETE or AVOID:**
+- Pascal/Turing shared-memory kernels
+- 32×32 tiled kernels
+- Any kernel heavily relying on `__syncthreads()` inside inner loops
+- SM60–75 fallback paths
+- Shared-memory based matmul unless using mma
+
+### 6. Benchmark Expectations (Target)
+
+| GPU | FP32 naive-opt | FP32 MMA | Notes |
+|-----|---------------|----------|-------|
+| RTX 3090 | 2.1–2.3 TFLOPS | 9+ TFLOPS | TF32 or FP16 |
+| A100 | 5.5+ TFLOPS | 156 TFLOPS | tensor cores |
+
+If performance regresses from naive baseline, re-profile.
+
+### 7. CMake Compilation Flags
+
+```cmake
+-arch=sm_80
+--expt-relaxed-constexpr
+--use_fast_math
+```
+
+For portability: allow runtime switch to sm_89, sm_90.
+
+---
+
 ## Build System
 
 - **C++/CUDA**: CMake with CUDA toolkit
@@ -230,7 +439,17 @@ PyGPUkit/
 
 ## Next Steps (v0.2)
 
-1. Implement Rust memory pool with LRU eviction
-2. Implement Rust scheduler state machine
-3. Add tiled matmul with shared memory
-4. Add async memory transfers
+### Rust Components (MANDATORY - DO NOT REPLACE WITH PYTHON)
+1. ✅ Implement Rust memory pool with LRU eviction - DONE (27 tests pass)
+2. ✅ Implement Rust GPU scheduler state machine - DONE (with memory reservation, dependencies)
+3. Add Rust-side async memory transfer engine
+4. Add Rust-side kernel dispatch controller
+
+### CUDA/C++ Components
+5. ✅ Add L2-optimized naive matmul kernel (target: 2.1-2.3 TFLOPS) - DONE: 2.2 TFLOPS
+6. ✅ Add SM >= 80 runtime check (reject older GPUs)
+7. Add Tensor Core MMA kernel for FP16/TF32
+
+### Python Components (Orchestration Only)
+8. Python API wrappers for Rust scheduler (thin wrappers only)
+9. Python API wrappers for Rust memory pool (thin wrappers only)

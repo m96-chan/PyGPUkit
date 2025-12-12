@@ -76,4 +76,25 @@ void device_synchronize() {
     check_cuda_error(err, "Failed to synchronize device");
 }
 
+int get_sm_version(int device_id) {
+    cudaDeviceProp props;
+    cudaError_t err = cudaGetDeviceProperties(&props, device_id);
+    check_cuda_error(err, "Failed to get device properties");
+    return props.major * 10 + props.minor;
+}
+
+void validate_compute_capability(int device_id) {
+    int sm = get_sm_version(device_id);
+    if (sm < 80) {
+        cudaDeviceProp props;
+        cudaGetDeviceProperties(&props, device_id);
+        throw std::runtime_error(
+            "PyGPUkit requires SM >= 80 (Ampere or newer). "
+            "Found: " + std::string(props.name) + " with SM " +
+            std::to_string(props.major) + "." + std::to_string(props.minor) +
+            ". Older GPUs (Pascal, Turing, etc.) are not supported."
+        );
+    }
+}
+
 } // namespace pygpukit

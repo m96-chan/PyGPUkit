@@ -6,24 +6,24 @@
 
 ## 🚀 Overview
 **PyGPUkit** is a lightweight GPU runtime for Python that provides:
-- NVRTC-based JIT kernel compilation  
-- A NumPy-like `GPUArray` type  
-- Kubernetes-inspired GPU scheduler (bandwidth + memory guarantees)  
-- Extensible operator set (add/mul/matmul, custom kernels)  
-- Minimal dependencies and embeddable runtime  
+- NVRTC-based JIT kernel compilation
+- A NumPy-like `GPUArray` type
+- Kubernetes-inspired GPU scheduler (bandwidth + memory guarantees)
+- Extensible operator set (add/mul/matmul, custom kernels)
+- Minimal dependencies and embeddable runtime
 
 PyGPUkit aims to be the “micro-runtime for GPU computing”: small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
 
 ---
 
 ## ✨ Features
-- ⚡ **Lightweight** — no PyTorch/CuPy overhead  
-- 🧩 **Modular** — runtime / memory / scheduler / JIT / ops  
-- 📦 **GPUArray** with NumPy interop  
-- 🛠 **NVRTC JIT** for CUDA kernels  
-- 🎼 **Advanced Scheduler** with memory & bandwidth guarantees  
-- 🔌 Optional Triton backend (planned)  
-- 🧪 Test-friendly runtime  
+- ⚡ **Lightweight** — no PyTorch/CuPy overhead
+- 🧩 **Modular** — runtime / memory / scheduler / JIT / ops
+- 📦 **GPUArray** with NumPy interop
+- 🛠 **NVRTC JIT** for CUDA kernels
+- 🎼 **Advanced Scheduler** with memory & bandwidth guarantees
+- 🔌 Optional Triton backend (planned)
+- 🧪 Test-friendly runtime
 
 ---
 
@@ -43,18 +43,23 @@ pip install -e .
 ```
 
 Requirements:
-- Python 3.9+  
-- CUDA 11+  
-- NVRTC available  
-- NVIDIA GPU  
+- Python 3.9+
+- CUDA 11+
+- NVRTC available
+- NVIDIA GPU
+
+**Supported GPUs:**
+- RTX 30XX series (Ampere) and above
+- Performance tuning is optimized for GPUs with large L2 cache (6MB+)
+- Older GPUs (RTX 20XX, GTX 10XX, etc.) are NOT tuned and may have suboptimal performance
 
 ---
 
 ## 🧭 Project Goals
-1. Provide the smallest usable GPU runtime for Python  
-2. Expose GPU scheduling (bandwidth, memory, partitioning)  
-3. Make writing custom GPU kernels easy  
-4. Serve as a building block for inference engines, DSP systems, and real-time workloads  
+1. Provide the smallest usable GPU runtime for Python
+2. Expose GPU scheduling (bandwidth, memory, partitioning)
+3. Make writing custom GPU kernels easy
+4. Serve as a building block for inference engines, DSP systems, and real-time workloads
 
 ---
 
@@ -107,9 +112,9 @@ PyGPUkit includes an experimental scheduler that treats a single GPU as a **mult
 ## **1. GPU Memory Reservation**
 Tasks may request a guaranteed block of GPU memory.
 
-- Hard guarantees → task is rejected if memory cannot be allocated  
-- Soft guarantees → best‑effort allocation  
-- Overcommit strategies (evict to host when pressure is high)  
+- Hard guarantees → task is rejected if memory cannot be allocated
+- Soft guarantees → best‑effort allocation
+- Overcommit strategies (evict to host when pressure is high)
 - Reclaim policies (LRU GPUArray eviction)
 
 **Example:**
@@ -126,11 +131,11 @@ task = scheduler.submit(
 Tasks may request a specific percentage of GPU compute bandwidth.
 
 Bandwidth control is implemented via:
-- Stream priority  
-- Kernel pacing (launch intervals)  
-- Micro‑slicing large kernels  
-- Cooperative time‑quantized scheduling  
-- Persistent dispatcher kernels (planned)  
+- Stream priority
+- Kernel pacing (launch intervals)
+- Micro‑slicing large kernels
+- Cooperative time‑quantized scheduling
+- Persistent dispatcher kernels (planned)
 
 **Example:**
 ```python
@@ -146,27 +151,27 @@ task = scheduler.submit(
 PyGPUkit implements **software‑defined GPU slicing**, similar in spirit to Kubernetes device plugin resource partitioning.
 
 Slices may define:
-- Memory quota  
-- Bandwidth share  
-- Stream priority band  
-- Isolation level  
+- Memory quota
+- Bandwidth share
+- Stream priority band
+- Isolation level
 
 Useful for:
-- Multi‑tenant inference servers  
-- Real‑time audio/DSP workloads  
-- Background/foreground GPU task separation  
+- Multi‑tenant inference servers
+- Real‑time audio/DSP workloads
+- Background/foreground GPU task separation
 
 ---
 
 ## **4. Scheduling Policies**
 The scheduler supports multiple policies:
 
-- **Guaranteed** — exclusive reservation, strict QoS  
-- **Burstable** — partial guarantees, opportunistic bandwidth  
-- **BestEffort** — uses leftover GPU cycles  
-- **Priority scheduling**  
-- **Deadline scheduling** (planned)  
-- **Weighted fair sharing**  
+- **Guaranteed** — exclusive reservation, strict QoS
+- **Burstable** — partial guarantees, opportunistic bandwidth
+- **BestEffort** — uses leftover GPU cycles
+- **Priority scheduling**
+- **Deadline scheduling** (planned)
+- **Weighted fair sharing**
 
 **Example:**
 ```python
@@ -183,14 +188,14 @@ task = scheduler.submit(
 ## **5. Admission Control**
 Before executing a task, the scheduler performs:
 
-- Resource validation  
-- Quota check  
-- QoS matching  
-- Scheduling feasibility  
+- Resource validation
+- Quota check
+- QoS matching
+- Scheduling feasibility
 
 Results in:
-- **admitted**  
-- **queued**  
+- **admitted**
+- **queued**
 - **rejected**
 
 ---
@@ -198,11 +203,11 @@ Results in:
 ## **6. Monitoring & Introspection**
 PyGPUkit exposes live metrics:
 
-- Memory usage per task  
-- SM occupancy and GPU utilization  
-- Throttling / pacing logs  
-- Queue position / execution state  
-- Reclaim/eviction count  
+- Memory usage per task
+- SM occupancy and GPU utilization
+- Throttling / pacing logs
+- Queue position / execution state
+- Reclaim/eviction count
 
 **Example:**
 ```python
@@ -214,10 +219,10 @@ stats = scheduler.stats(task_id)
 ## **7. Soft Isolation Model**
 While not OS‑level isolation, each GPU task is provided:
 
-- Dedicated stream groups  
-- Guaranteed memory pools  
-- Kernel pacing to enforce bandwidth  
-- Optional sandboxed GPUArray region  
+- Dedicated stream groups
+- Guaranteed memory pools
+- Kernel pacing to enforce bandwidth
+- Optional sandboxed GPUArray region
 
 This provides practical multi‑tenant safety without MIG/MPS.
 
@@ -241,27 +246,27 @@ PyGPUkit/
 ## 🧪 Roadmap
 
 ### **v0.1 (MVP)**
-- GPUArray  
-- NVRTC JIT  
-- add/mul/matmul ops  
-- Basic stream manager  
-- Packaging + wheels  
+- GPUArray
+- NVRTC JIT
+- add/mul/matmul ops
+- Basic stream manager
+- Packaging + wheels
 
 ### **v0.2**
-- Scheduler (memory + bandwidth guarantees)  
-- Kernel cache  
-- NumPy interop  
-- Benchmarks  
+- Scheduler (memory + bandwidth guarantees)
+- Kernel cache
+- NumPy interop
+- Benchmarks
 
 ### **v0.3**
-- Triton optional backend  
-- Advanced ops (softmax, layernorm)  
-- Inference‑oriented plugin system  
+- Triton optional backend
+- Advanced ops (softmax, layernorm)
+- Inference‑oriented plugin system
 
 ---
 
 ## 🤝 Contributing
-Contributions and discussions are welcome!  
+Contributions and discussions are welcome!
 Please open Issues for feature requests, bugs, or design proposals.
 
 ---
@@ -273,10 +278,10 @@ MIT License
 
 ## ⭐ Acknowledgements
 Inspired by:
-- CUDA Runtime  
-- NVRTC  
-- PyCUDA  
-- CuPy  
-- Triton  
+- CUDA Runtime
+- NVRTC
+- PyCUDA
+- CuPy
+- Triton
 
 PyGPUkit aims to fill the gap for a tiny, embeddable GPU runtime for Python.

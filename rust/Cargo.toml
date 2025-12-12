@@ -1,0 +1,16 @@
+[workspace]
+members = ["pygpukit-core", "pygpukit-python"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/m96-chan/PyGPUkit"
+
+[workspace.dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"
+parking_lot = "0.12"
+indexmap = "2.7"
+uuid = { version = "1.11", features = ["v4"] }

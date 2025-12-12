@@ -1,0 +1,17 @@
+[package]
+name = "pygpukit-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 Python bindings for PyGPUkit Rust core"
+
+[lib]
+name = "_pygpukit_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pygpukit-core = { path = "../pygpukit-core" }
+pyo3.workspace = true
+numpy.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true

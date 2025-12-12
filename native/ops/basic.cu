@@ -209,37 +209,68 @@ GPUArray mul(const GPUArray& a, const GPUArray& b) {
 }
 
 // ============================================================================
-// Matmul kernels (naive implementation, can be optimized with tiling)
+// Matmul kernels - Ampere Optimized (SM >= 80)
+// ============================================================================
+//
+// Optimization Strategy for Ampere (RTX 30XX, A100) and newer:
+// - L2-friendly memory access patterns (large L2 cache: 6MB on 3090 Ti)
+// - Use __ldg() for read-only texture cache path
+// - Avoid shared memory tiling (L2 cache handles it better)
+// - No __syncthreads() overhead
+// - Use __restrict__ for compiler optimization
+//
+// Target Performance:
+// - RTX 3090: 2.1-2.3 TFLOPS (FP32 naive)
+// - For higher performance, use Tensor Cores (MMA kernels) or cuBLAS
+//
+// Legacy tiled kernels are REMOVED per optimization directives.
 // ============================================================================
 
-__global__ void matmul_f32_kernel(
-    const float* A, const float* B, float* C,
+#define BLOCK_SIZE 16
+
+// L2-optimized matmul kernel for FP32 (Ampere+)
+// Uses __ldg() for read-only cache and __restrict__ for aliasing hints
+__global__ void matmul_f32_l2opt_kernel(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
     size_t M, size_t N, size_t K
 ) {
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+    const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < M && col < N) {
         float sum = 0.0f;
+
+        // Use __ldg() for read-only loads through texture cache
+        // This leverages L2 cache more efficiently on Ampere
+        #pragma unroll 4
         for (size_t k = 0; k < K; ++k) {
-            sum += A[row * K + k] * B[k * N + col];
+            sum += __ldg(&A[row * K + k]) * __ldg(&B[k * N + col]);
         }
+
         C[row * N + col] = sum;
     }
 }
 
-__global__ void matmul_f64_kernel(
-    const double* A, const double* B, double* C,
+// L2-optimized matmul kernel for FP64 (Ampere+)
+__global__ void matmul_f64_l2opt_kernel(
+    const double* __restrict__ A,
+    const double* __restrict__ B,
+    double* __restrict__ C,
     size_t M, size_t N, size_t K
 ) {
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+    const size_t col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < M && col < N) {
         double sum = 0.0;
+
+        #pragma unroll 4
         for (size_t k = 0; k < K; ++k) {
-            sum += A[row * K + k] * B[k * N + col];
+            sum += __ldg(&A[row * K + k]) * __ldg(&B[k * N + col]);
         }
+
         C[row * N + col] = sum;
     }
 }
@@ -256,22 +287,23 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
-    dim3 block_size(16, 16);
+    // L2-optimized kernel for Ampere+ (SM >= 80)
+    dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
     dim3 grid_size(
-        (N + block_size.x - 1) / block_size.x,
-        (M + block_size.y - 1) / block_size.y
+        (N + BLOCK_SIZE - 1) / BLOCK_SIZE,
+        (M + BLOCK_SIZE - 1) / BLOCK_SIZE
     );
 
     switch (a.dtype()) {
         case DataType::Float32:
-            matmul_f32_kernel<<<grid_size, block_size>>>(
+            matmul_f32_l2opt_kernel<<<grid_size, block_size>>>(
                 static_cast<const float*>(a.data()),
                 static_cast<const float*>(b.data()),
                 static_cast<float*>(c.data()),
                 M, N, K);
             break;
         case DataType::Float64:
-            matmul_f64_kernel<<<grid_size, block_size>>>(
+            matmul_f64_l2opt_kernel<<<grid_size, block_size>>>(
                 static_cast<const double*>(a.data()),
                 static_cast<const double*>(b.data()),
                 static_cast<double*>(c.data()),

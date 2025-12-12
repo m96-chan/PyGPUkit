@@ -1,11 +1,12 @@
 """Memory Pool implementation for PyGPUkit.
 
 This module provides a memory pool to reduce cudaMalloc/cudaFree overhead.
-Currently implemented in Python; v0.2+ will migrate to Rust for performance.
+v0.2+ uses Rust backend for high-performance allocation tracking.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -15,6 +16,19 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
+    pass
+
+# Check if Rust backend should be used
+_USE_RUST = os.environ.get("PYGPUKIT_USE_RUST", "1").lower() in ("1", "true", "yes")
+
+# Try to import Rust backend
+_RUST_AVAILABLE = False
+_rust_module: Any = None
+try:
+    import _pygpukit_rust._pygpukit_rust as _rust_module  # noqa: F811
+
+    _RUST_AVAILABLE = True
+except ImportError:
     pass
 
 
@@ -58,10 +72,14 @@ class MemoryPool:
     - LRU eviction policy for memory reuse
     - Thread-safe allocation/deallocation
     - Optional eviction to host memory
+    - Rust backend for high-performance allocation tracking (v0.2+)
 
     Attributes:
         quota: Maximum memory this pool can use (bytes)
         enable_eviction: Whether to enable eviction to host memory
+
+    Environment Variables:
+        PYGPUKIT_USE_RUST: Set to "0" to disable Rust backend (default: "1")
     """
 
     # Size classes for block allocation (powers of 2)
@@ -90,25 +108,37 @@ class MemoryPool:
         self._enable_eviction = enable_eviction
         self._lock = threading.RLock()
 
-        # Active allocations: block_id -> MemoryBlock
-        self._active: dict[int, MemoryBlock] = {}
+        # Use Rust backend if available and enabled
+        self._use_rust = _USE_RUST and _RUST_AVAILABLE
+        self._rust_pool = None
+        if self._use_rust:
+            self._rust_pool = _rust_module.MemoryPool(quota, enable_eviction)
 
-        # Free lists by size class: size -> [MemoryBlock, ...]
-        self._free_lists: dict[int, list[MemoryBlock]] = {
-            size: [] for size in self.SIZE_CLASSES
-        }
+        # Python-side storage for MemoryBlock objects (needed for device_ptr, host_data)
+        # Maps block_id -> MemoryBlock
+        self._blocks: dict[int, MemoryBlock] = {}
 
-        # LRU tracking: block_id -> MemoryBlock (ordered by access time)
-        self._lru: OrderedDict[int, MemoryBlock] = OrderedDict()
+        # Pure Python fallback storage (only used when Rust is disabled)
+        if not self._use_rust:
+            # Active allocations: block_id -> MemoryBlock
+            self._active: dict[int, MemoryBlock] = {}
 
-        # Statistics
-        self._next_id = 0
-        self._used = 0
-        self._cached = 0  # Memory in free lists
-        self._allocation_count = 0
-        self._reuse_count = 0
-        self._eviction_count = 0
-        self._cudamalloc_count = 0
+            # Free lists by size class: size -> [MemoryBlock, ...]
+            self._free_lists: dict[int, list[MemoryBlock]] = {
+                size: [] for size in self.SIZE_CLASSES
+            }
+
+            # LRU tracking: block_id -> MemoryBlock (ordered by access time)
+            self._lru: OrderedDict[int, MemoryBlock] = OrderedDict()
+
+            # Statistics
+            self._next_id = 0
+            self._used = 0
+            self._cached = 0  # Memory in free lists
+            self._allocation_count = 0
+            self._reuse_count = 0
+            self._eviction_count = 0
+            self._cudamalloc_count = 0
 
         # Backend reference
         self._backend: Any = None
@@ -117,29 +147,38 @@ class MemoryPool:
         """Get the backend for CUDA operations."""
         if self._backend is None:
             from pygpukit.core.backend import get_backend
+
             self._backend = get_backend()
         return self._backend
 
     @property
     def quota(self) -> int:
         """Maximum memory this pool can use."""
+        if self._use_rust:
+            return self._rust_pool.quota
         return self._quota
 
     @property
     def used(self) -> int:
         """Currently used memory (active allocations)."""
         with self._lock:
+            if self._use_rust:
+                return self._rust_pool.used
             return self._used
 
     @property
     def cached(self) -> int:
         """Memory in free lists (available for reuse)."""
         with self._lock:
+            if self._use_rust:
+                return self._rust_pool.cached
             return self._cached
 
     @property
     def available(self) -> int:
         """Available memory (quota - used)."""
+        if self._use_rust:
+            return self._rust_pool.available
         return self._quota - self._used
 
     def _get_size_class(self, size: int) -> int:
@@ -162,6 +201,47 @@ class MemoryPool:
         Raises:
             MemoryError: If allocation exceeds quota and eviction is disabled
         """
+        if self._use_rust:
+            return self._allocate_rust(size)
+        return self._allocate_python(size)
+
+    def _allocate_rust(self, size: int) -> MemoryBlock:
+        """Allocate using Rust backend."""
+        with self._lock:
+            try:
+                block_id = self._rust_pool.allocate(size)
+            except RuntimeError as e:
+                raise MemoryError(str(e)) from e
+
+            # Get block info from Rust
+            rust_block = self._rust_pool.get_block(block_id)
+            actual_size = rust_block.size if rust_block else size
+
+            # Allocate actual CUDA memory
+            backend = self._get_backend()
+            try:
+                device_ptr = backend.allocate(actual_size)
+            except Exception:
+                device_ptr = block_id  # CPU simulation fallback
+
+            # Update Rust with device pointer
+            self._rust_pool.set_device_ptr(
+                block_id, device_ptr if isinstance(device_ptr, int) else block_id
+            )
+
+            # Create Python MemoryBlock
+            block = MemoryBlock(
+                id=block_id,
+                size=actual_size,
+                device_ptr=device_ptr,
+                on_gpu=True,
+                on_host=False,
+            )
+            self._blocks[block_id] = block
+            return block
+
+    def _allocate_python(self, size: int) -> MemoryBlock:
+        """Allocate using pure Python backend."""
         size_class = self._get_size_class(size)
 
         with self._lock:
@@ -226,6 +306,20 @@ class MemoryPool:
         Args:
             block: The block to free
         """
+        if self._use_rust:
+            self._free_rust(block)
+        else:
+            self._free_python(block)
+
+    def _free_rust(self, block: MemoryBlock) -> None:
+        """Free using Rust backend."""
+        with self._lock:
+            # Tell Rust to return block to free list
+            self._rust_pool.free(block.id)
+            # Keep Python block for potential reuse (device_ptr still valid)
+
+    def _free_python(self, block: MemoryBlock) -> None:
+        """Free using pure Python backend."""
         with self._lock:
             if block.id not in self._active:
                 return
@@ -251,7 +345,9 @@ class MemoryPool:
         """
         with self._lock:
             block.touch()
-            if block.id in self._lru:
+            if self._use_rust:
+                self._rust_pool.touch(block.id)
+            elif block.id in self._lru:
                 self._lru.move_to_end(block.id)
 
     def _evict_lru(self, needed: int) -> None:
@@ -287,9 +383,8 @@ class MemoryPool:
             try:
                 # Read data from GPU
                 from pygpukit.core.dtypes import float32
-                host_data = backend.copy_device_to_host(
-                    block.device_ptr, block.size, float32
-                )
+
+                host_data = backend.copy_device_to_host(block.device_ptr, block.size, float32)
                 block.host_data = host_data
             except Exception:
                 # For CPU simulation, data is already on host
@@ -304,11 +399,15 @@ class MemoryPool:
             block.on_gpu = False
             block.on_host = True
             block.device_ptr = None
-            self._eviction_count += 1
 
-            # Update memory tracking
-            if block.id in self._active:
-                self._used -= block.size
+            # Update tracking
+            if self._use_rust:
+                self._rust_pool.evict(block.id)
+            else:
+                self._eviction_count += 1
+                # Update memory tracking
+                if block.id in self._active:
+                    self._used -= block.size
 
     def restore(self, block: MemoryBlock) -> None:
         """Restore an evicted block to GPU memory.
@@ -340,8 +439,13 @@ class MemoryPool:
             block.on_host = False
             block.host_data = None
 
-            # Update memory tracking
-            if block.id in self._active:
+            # Update tracking
+            if self._use_rust:
+                self._rust_pool.restore(block.id)
+                self._rust_pool.set_device_ptr(
+                    block.id, device_ptr if isinstance(device_ptr, int) else block.id
+                )
+            elif block.id in self._active:
                 self._used += block.size
 
     def write(self, block: MemoryBlock, data: np.ndarray) -> None:
@@ -377,9 +481,7 @@ class MemoryPool:
             if block.host_data is not None:
                 result: np.ndarray = block.host_data.view(dtype)
                 return result
-            zeros_result: np.ndarray = np.zeros(
-                block.size // np.dtype(dtype).itemsize, dtype=dtype
-            )
+            zeros_result: np.ndarray = np.zeros(block.size // np.dtype(dtype).itemsize, dtype=dtype)
             return zeros_result
 
         backend = self._get_backend()
@@ -415,6 +517,20 @@ class MemoryPool:
             Dictionary with statistics
         """
         with self._lock:
+            if self._use_rust:
+                rust_stats = self._rust_pool.stats()
+                return {
+                    "quota": rust_stats.quota,
+                    "used": rust_stats.used,
+                    "cached": rust_stats.cached,
+                    "available": rust_stats.available,
+                    "allocation_count": rust_stats.allocation_count,
+                    "reuse_count": rust_stats.reuse_count,
+                    "eviction_count": rust_stats.eviction_count,
+                    "cudamalloc_count": rust_stats.cudamalloc_count,
+                    "active_blocks": rust_stats.active_blocks,
+                    "free_blocks": rust_stats.free_blocks,
+                }
             return {
                 "quota": self._quota,
                 "used": self._used,
@@ -433,26 +549,37 @@ class MemoryPool:
         with self._lock:
             backend = self._get_backend()
 
-            # Free all active blocks
-            for block in self._active.values():
-                if block.on_gpu and block.device_ptr is not None:
-                    try:
-                        backend.free(block.device_ptr)
-                    except Exception:
-                        pass
-
-            # Free all cached blocks
-            for free_list in self._free_lists.values():
-                for block in free_list:
+            if self._use_rust:
+                # Free all Python-side blocks
+                for block in self._blocks.values():
+                    if block.on_gpu and block.device_ptr is not None:
+                        try:
+                            backend.free(block.device_ptr)
+                        except Exception:
+                            pass
+                self._blocks.clear()
+                self._rust_pool.clear()
+            else:
+                # Free all active blocks
+                for block in self._active.values():
                     if block.on_gpu and block.device_ptr is not None:
                         try:
                             backend.free(block.device_ptr)
                         except Exception:
                             pass
 
-            self._active.clear()
-            self._lru.clear()
-            for fl in self._free_lists.values():
-                fl.clear()
-            self._used = 0
-            self._cached = 0
+                # Free all cached blocks
+                for free_list in self._free_lists.values():
+                    for block in free_list:
+                        if block.on_gpu and block.device_ptr is not None:
+                            try:
+                                backend.free(block.device_ptr)
+                            except Exception:
+                                pass
+
+                self._active.clear()
+                self._lru.clear()
+                for fl in self._free_lists.values():
+                    fl.clear()
+                self._used = 0
+                self._cached = 0

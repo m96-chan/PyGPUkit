@@ -48,6 +48,7 @@ def main() -> None:
     log("Initializing PyGPUkit backend...")
 
     from pygpukit.core.backend import get_backend
+
     backend = get_backend()
 
     log(f"Backend type: {backend.__class__.__name__}")
@@ -88,13 +89,13 @@ def main() -> None:
     pool = MemoryPool(quota=pool_size, enable_eviction=True)
     set_default_pool(pool)
 
-    log(f"Memory Pool initialized")
+    log("Memory Pool initialized")
     log(f"  Quota: {pool.quota / (1024**3):.2f} GB")
     log(f"  Used: {pool.used / (1024**3):.4f} GB")
     log(f"  Cached: {pool.cached / (1024**3):.4f} GB")
-    log(f"  Eviction: ENABLED")
+    log("  Eviction: ENABLED")
 
-    print(f"""
+    print("""
     Size Classes:
     ┌────────────┬─────────────┬───────────┐
     │  Class     │  Size       │  Blocks   │
@@ -113,11 +114,11 @@ def main() -> None:
     # =========================================================================
     separator("PHASE 3: Scheduler Initialization")
 
-    from pygpukit.scheduler import Scheduler, TaskPolicy, TaskState
+    from pygpukit.scheduler import Scheduler, TaskPolicy
 
     scheduler = Scheduler(
-        sched_tick_ms=1.0,      # 1ms tick
-        window_ms=10.0,         # 10ms scheduling window
+        sched_tick_ms=1.0,  # 1ms tick
+        window_ms=10.0,  # 10ms scheduling window
         total_memory=pool_size,
     )
 
@@ -138,6 +139,7 @@ def main() -> None:
 
     def make_workload(name: str, flops: int, duration_ms: float):
         """Create a simulated GPU workload."""
+
         def workload():
             start = time.time()
             execution_log.append((name, "START", start))
@@ -147,6 +149,7 @@ def main() -> None:
             end = time.time()
             execution_log.append((name, "END", end))
             log(f"[KERNEL] {name}: Completed in {(end-start)*1000:.2f} ms", "EXEC")
+
         return workload
 
     # Submit multiple tasks with different characteristics
@@ -197,7 +200,7 @@ def main() -> None:
     log(f"Pending: {global_stats['pending_count']}")
     log(f"Reserved memory: {global_stats['reserved_memory'] / (1024**2):.0f} MB")
 
-    avail_mem = pool_size - global_stats['reserved_memory']
+    avail_mem = pool_size - global_stats["reserved_memory"]
     avail_pct = avail_mem / pool_size * 100
 
     print(f"""
@@ -221,14 +224,23 @@ def main() -> None:
     log("Analyzing admission decisions...")
 
     # Simulate admission logic
-    guaranteed_tasks = [(tid, name) for tid, name in task_ids
-                        if scheduler.get_task(tid).policy == TaskPolicy.GUARANTEED]
-    burstable_tasks = [(tid, name) for tid, name in task_ids
-                       if scheduler.get_task(tid).policy == TaskPolicy.BURSTABLE]
-    besteffort_tasks = [(tid, name) for tid, name in task_ids
-                        if scheduler.get_task(tid).policy == TaskPolicy.BEST_EFFORT]
+    guaranteed_tasks = [
+        (tid, name)
+        for tid, name in task_ids
+        if scheduler.get_task(tid).policy == TaskPolicy.GUARANTEED
+    ]
+    burstable_tasks = [
+        (tid, name)
+        for tid, name in task_ids
+        if scheduler.get_task(tid).policy == TaskPolicy.BURSTABLE
+    ]
+    besteffort_tasks = [
+        (tid, name)
+        for tid, name in task_ids
+        if scheduler.get_task(tid).policy == TaskPolicy.BEST_EFFORT
+    ]
 
-    print(f"""
+    print("""
     Admission Decision Matrix:
     ┌────────────────────┬────────────┬──────────┬─────────────────────────────┐
     │  Task              │  Policy    │  Decision│  Reason                     │
@@ -274,7 +286,10 @@ def main() -> None:
             blocks.append((name, block))
             stats = pool.stats()
             log(f"  Block ID: {block.id}, Size class: {block.size // (1024*1024)} MB", "ALLOC")
-            log(f"  Pool used: {stats['used'] // (1024**2)} MB, Cached: {stats['cached'] // (1024**2)} MB", "ALLOC")
+            log(
+                f"  Pool used: {stats['used'] // (1024**2)} MB, Cached: {stats['cached'] // (1024**2)} MB",
+                "ALLOC",
+            )
         except MemoryError as e:
             log(f"  FAILED: {e}", "ERROR")
 
@@ -286,7 +301,10 @@ def main() -> None:
     pool.free(block_to_free)
     stats = pool.stats()
     log(f"Block {block_to_free.id} returned to free list", "FREE")
-    log(f"Pool used: {stats['used'] // (1024**2)} MB, Cached: {stats['cached'] // (1024**2)} MB", "FREE")
+    log(
+        f"Pool used: {stats['used'] // (1024**2)} MB, Cached: {stats['cached'] // (1024**2)} MB",
+        "FREE",
+    )
 
     separator()
     log("Allocating new block (should reuse from free list)...")
@@ -354,7 +372,9 @@ def main() -> None:
         # Log progress every 50 iterations
         if iteration % 50 == 0:
             elapsed = (time.time() - start_time) * 1000
-            log(f"Tick {iteration}: {scheduler.completed_count}/{len(task_ids)} tasks complete, elapsed: {elapsed:.1f}ms")
+            log(
+                f"Tick {iteration}: {scheduler.completed_count}/{len(task_ids)} tasks complete, elapsed: {elapsed:.1f}ms"
+            )
 
     end_time = time.time()
     total_time = (end_time - start_time) * 1000
@@ -389,7 +409,9 @@ def main() -> None:
 
     for tid, name in task_ids:
         stats = scheduler.stats(tid)
-        print(f"    │  {name:<18}│  {stats['state'].upper():<8}│  {stats['execution_count']:>10}│  {stats['pacing_delay_count']:>14}│")
+        print(
+            f"    │  {name:<18}│  {stats['state'].upper():<8}│  {stats['execution_count']:>10}│  {stats['pacing_delay_count']:>14}│"
+        )
 
     print("""    └────────────────────┴──────────┴────────────┴────────────────┘
 

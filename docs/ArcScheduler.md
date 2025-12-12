@@ -136,10 +136,10 @@ If allocation fails → reject task.
 
 Simulate overcommit using:
 
-1. Track all GPUArray memory blocks  
-2. Store last-access timestamps  
-3. Evict unused blocks to pinned host memory  
-4. Reload on demand  
+1. Track all GPUArray memory blocks
+2. Store last-access timestamps
+3. Evict unused blocks to pinned host memory
+4. Reload on demand
 
 Eviction pseudo‑code:
 
@@ -260,16 +260,16 @@ Used for runtime optimization or autoscaling.
 ## 11. LLM Pitfalls (Things NOT allowed)
 
 ### ❌ Do NOT assume:
-- SM partition APIs exist  
-- Kernel preemption is possible  
-- Unlimited stream priorities  
-- GPU-side scheduling without persistent kernels  
-- cudaMalloc can be intercepted per task  
+- SM partition APIs exist
+- Kernel preemption is possible
+- Unlimited stream priorities
+- GPU-side scheduling without persistent kernels
+- cudaMalloc can be intercepted per task
 
 ### ❌ Do NOT generate kernels with:
-- unbounded loops  
-- internal synchronization across entire grid  
-- no opportunities to micro‑slice  
+- unbounded loops
+- internal synchronization across entire grid
+- no opportunities to micro‑slice
 
 ---
 
@@ -293,7 +293,7 @@ The scheduler orchestrates:
 
 ## 13. Summary for LLM Implementers
 
-PyGPUkit Scheduler =  
+PyGPUkit Scheduler =
 **A software-emulated, Kubernetes-like GPU scheduler built entirely via micro-slicing, pacing, stream priority, and memory pools.**
 
 There is:

@@ -5,18 +5,18 @@ import sys
 import time
 
 # Add CUDA DLLs to PATH
-cuda_path = os.environ.get('CUDA_PATH', r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4')
-cuda_bin = os.path.join(cuda_path, 'bin')
-if cuda_bin not in os.environ['PATH']:
-    os.environ['PATH'] = cuda_bin + os.pathsep + os.environ['PATH']
-if hasattr(os, 'add_dll_directory'):
+cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4")
+cuda_bin = os.path.join(cuda_path, "bin")
+if cuda_bin not in os.environ["PATH"]:
+    os.environ["PATH"] = cuda_bin + os.pathsep + os.environ["PATH"]
+if hasattr(os, "add_dll_directory"):
     os.add_dll_directory(cuda_bin)
 
 # Add package path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src', 'pygpukit'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src", "pygpukit"))
 
-import numpy as np
+import numpy as np  # noqa: E402
 
 print("=" * 70)
 print("PyGPUkit v0.1 Optimized Demo - Zero-copy GPU Operations")
@@ -24,7 +24,7 @@ print("=" * 70)
 
 try:
     import pygpukit as pgk
-    from pygpukit.core.backend import has_native_module, get_backend, NativeBackend
+    from pygpukit.core.backend import NativeBackend, get_backend, has_native_module
 
     backend = get_backend()
     is_native = isinstance(backend, NativeBackend) and backend.is_available()
@@ -34,6 +34,7 @@ try:
 
     if is_native:
         import _pygpukit_native as native
+
         props = native.get_device_properties(0)
         print(f"GPU: {props.name}")
         print(f"Memory: {props.total_memory / 1024**3:.1f} GB")

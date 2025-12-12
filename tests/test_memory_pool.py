@@ -124,7 +124,7 @@ class TestMemoryPoolLRU:
         # Verify data integrity - read same size as written
         result = pool.read(block, dtype=np.float32)
         # Compare only the portion we wrote
-        np.testing.assert_array_equal(result[:len(test_data)], test_data)
+        np.testing.assert_array_equal(result[: len(test_data)], test_data)
 
 
 class TestMemoryPoolIntegration:

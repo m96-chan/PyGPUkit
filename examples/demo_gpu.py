@@ -5,19 +5,19 @@ import sys
 import time
 
 # Add CUDA DLLs to PATH
-cuda_path = os.environ.get('CUDA_PATH', r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4')
-cuda_bin = os.path.join(cuda_path, 'bin')
-if cuda_bin not in os.environ['PATH']:
-    os.environ['PATH'] = cuda_bin + os.pathsep + os.environ['PATH']
+cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4")
+cuda_bin = os.path.join(cuda_path, "bin")
+if cuda_bin not in os.environ["PATH"]:
+    os.environ["PATH"] = cuda_bin + os.pathsep + os.environ["PATH"]
 
 # Add DLL directory for Python 3.8+
-if hasattr(os, 'add_dll_directory'):
+if hasattr(os, "add_dll_directory"):
     os.add_dll_directory(cuda_bin)
 
 # Add native module path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src', 'pygpukit'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src", "pygpukit"))
 
-import numpy as np
+import numpy as np  # noqa: E402
 
 print("=" * 60)
 print("PyGPUkit v0.1 GPU Demo - RTX 3090 Ti")
@@ -26,7 +26,8 @@ print("=" * 60)
 # Try to import native module directly
 try:
     import _pygpukit_native as native
-    print(f"\n[OK] Native module loaded!")
+
+    print("\n[OK] Native module loaded!")
     print(f"     CUDA available: {native.is_cuda_available()}")
 
     if native.is_cuda_available():
@@ -34,7 +35,9 @@ try:
         props = native.get_device_properties(0)
         print(f"     Device name: {props.name}")
         print(f"     Total memory: {props.total_memory / 1024**3:.1f} GB")
-        print(f"     Compute capability: {props.compute_capability_major}.{props.compute_capability_minor}")
+        print(
+            f"     Compute capability: {props.compute_capability_major}.{props.compute_capability_minor}"
+        )
         print(f"     SM count: {props.multiprocessor_count}")
 
         # NVRTC version
@@ -119,7 +122,7 @@ try:
 
         # Test 4: JIT Kernel
         print("\n4. JIT Compilation (custom CUDA kernel)")
-        kernel_src = '''
+        kernel_src = """
         extern "C" __global__
         void scale_add(float* x, float scale, float offset, int n) {
             int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -127,7 +130,7 @@ try:
                 x[idx] = x[idx] * scale + offset;
             }
         }
-        '''
+        """
 
         start = time.perf_counter()
         kernel = native.JITKernel(kernel_src, "scale_add")
@@ -178,7 +181,7 @@ except ImportError as e:
     print("\nFalling back to CPU simulation mode...")
 
     # Import PyGPUkit with CPU backend
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
     import pygpukit as pgk
 
     print(f"\nPyGPUkit version: {pgk.__version__}")

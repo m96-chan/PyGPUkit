@@ -5,6 +5,7 @@ This module provides a Kubernetes-style GPU task scheduler with:
 - Memory/bandwidth reservation
 - Scheduling loop with pacing
 - Task state management
+- Rust backend for high-performance scheduling (v0.2+)
 
 Note: CUDA does not provide native scheduling features. Everything is
 implemented via host-side scheduling and kernel structuring.
@@ -12,6 +13,7 @@ implemented via host-side scheduling and kernel structuring.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -21,6 +23,19 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
+    pass
+
+# Check if Rust backend should be used
+_USE_RUST = os.environ.get("PYGPUKIT_USE_RUST", "1").lower() in ("1", "true", "yes")
+
+# Try to import Rust backend
+_RUST_AVAILABLE = False
+_rust_module: Any = None
+try:
+    import _pygpukit_rust._pygpukit_rust as _rust_module  # noqa: F811
+
+    _RUST_AVAILABLE = True
+except ImportError:
     pass
 
 
@@ -86,11 +101,15 @@ class Scheduler:
     - Bandwidth pacing (time-based throttling)
     - FIFO task execution
     - Thread-safe operations
+    - Rust backend for high-performance scheduling (v0.2+)
 
     Attributes:
         sched_tick_ms: Scheduler tick interval in milliseconds
         window_ms: Scheduling window for bandwidth calculation
         total_memory: Total GPU memory available for scheduling
+
+    Environment Variables:
+        PYGPUKIT_USE_RUST: Set to "0" to disable Rust backend (default: "1")
     """
 
     def __init__(
@@ -112,36 +131,57 @@ class Scheduler:
 
         self._lock = threading.RLock()
 
-        # Task storage
-        self._tasks: dict[str, Task] = {}
-        self._pending_queue: deque[str] = deque()
+        # Use Rust backend if available and enabled
+        self._use_rust = _USE_RUST and _RUST_AVAILABLE
+        self._rust_scheduler = None
+        if self._use_rust:
+            self._rust_scheduler = _rust_module.Scheduler(total_memory, sched_tick_ms, window_ms)
 
-        # Resource tracking
-        self._reserved_memory = 0
-        self._completed_count = 0
+        # Python-side storage for callable functions (Rust doesn't store closures)
+        # Maps task_id -> callable
+        self._task_functions: dict[str, Callable[[], Any]] = {}
+
+        # Task storage (Python Task objects with all metadata)
+        self._tasks: dict[str, Task] = {}
+
+        # Pure Python fallback storage (only used when Rust is disabled)
+        if not self._use_rust:
+            self._pending_queue: deque[str] = deque()
+
+            # Resource tracking
+            self._reserved_memory = 0
+            self._completed_count = 0
 
     @property
     def task_count(self) -> int:
         """Total number of tasks."""
         with self._lock:
+            if self._use_rust:
+                return self._rust_scheduler.stats().total_submitted
             return len(self._tasks)
 
     @property
     def completed_count(self) -> int:
         """Number of completed tasks."""
         with self._lock:
+            if self._use_rust:
+                return self._rust_scheduler.stats().completed_count
             return self._completed_count
 
     @property
     def reserved_memory(self) -> int:
         """Currently reserved memory in bytes."""
         with self._lock:
+            if self._use_rust:
+                return self._rust_scheduler.stats().reserved_memory
             return self._reserved_memory
 
     @property
     def available_memory(self) -> int:
         """Available memory in bytes."""
         with self._lock:
+            if self._use_rust:
+                return self._rust_scheduler.stats().available_memory
             if self._total_memory is None:
                 return 0
             return self._total_memory - self._reserved_memory
@@ -180,13 +220,38 @@ class Scheduler:
             policy=policy,
         )
 
+        if self._use_rust:
+            return self._submit_rust(task)
+        return self._submit_python(task)
+
+    def _submit_rust(self, task: Task) -> str:
+        """Submit task using Rust backend."""
+        with self._lock:
+            # Create Rust TaskMeta
+            rust_task = _rust_module.TaskMeta(
+                task.id,
+                f"Task-{task.id}",
+                task.memory or 0,
+            )
+
+            # Submit to Rust scheduler
+            self._rust_scheduler.submit(rust_task)
+
+            # Store function on Python side
+            self._task_functions[task.id] = task.fn
+            self._tasks[task.id] = task
+
+        return task.id
+
+    def _submit_python(self, task: Task) -> str:
+        """Submit task using pure Python backend."""
         with self._lock:
             self._tasks[task.id] = task
             self._pending_queue.append(task.id)
 
             # Reserve memory
-            if memory is not None:
-                self._reserved_memory += memory
+            if task.memory is not None:
+                self._reserved_memory += task.memory
 
         return task.id
 
@@ -208,6 +273,27 @@ class Scheduler:
         This method should be called repeatedly in the main loop.
         It processes pending tasks respecting pacing constraints.
         """
+        if self._use_rust:
+            self._step_rust()
+        else:
+            self._step_python()
+
+    def _step_rust(self) -> None:
+        """Execute scheduler tick using Rust backend."""
+        with self._lock:
+            # Get runnable tasks from Rust
+            runnable_ids = self._rust_scheduler.get_runnable_tasks(10)
+
+            # Start tasks in Rust
+            for task_id in runnable_ids:
+                self._rust_scheduler.start_task(task_id)
+
+        # Execute tasks outside the lock
+        for task_id in runnable_ids:
+            self._execute_task_rust(task_id)
+
+    def _step_python(self) -> None:
+        """Execute scheduler tick using pure Python backend."""
         now = time.time()
 
         with self._lock:
@@ -261,8 +347,35 @@ class Scheduler:
 
         return True
 
+    def _execute_task_rust(self, task_id: str) -> None:
+        """Execute a task using Rust backend.
+
+        Args:
+            task_id: ID of the task to execute
+        """
+        fn = self._task_functions.get(task_id)
+        task = self._tasks.get(task_id)
+
+        if fn is None or task is None:
+            return
+
+        try:
+            task.touch()
+            fn()
+            task.execution_count += 1
+
+            # Mark as completed in Rust
+            with self._lock:
+                self._rust_scheduler.complete_task(task_id)
+                task.state = TaskState.COMPLETED
+
+        except Exception as e:
+            with self._lock:
+                self._rust_scheduler.fail_task(task_id, str(e))
+                task.state = TaskState.FAILED
+
     def _execute_task(self, task: Task) -> None:
-        """Execute a task's function.
+        """Execute a task's function (pure Python backend).
 
         Args:
             task: Task to execute
@@ -301,6 +414,31 @@ class Scheduler:
             Dictionary with task statistics
         """
         with self._lock:
+            if self._use_rust:
+                rust_stats = self._rust_scheduler.task_stats(task_id)
+                if rust_stats is None:
+                    return {}
+                task = self._tasks.get(task_id)
+                # Convert Rust state to lowercase string
+                state = rust_stats.state
+                if hasattr(state, "name"):
+                    state_str = state.name.lower()
+                else:
+                    # Handle PyTaskState enum (e.g., TaskState.Completed -> "completed")
+                    state_str = str(state).split(".")[-1].lower()
+                return {
+                    "id": rust_stats.id,
+                    "state": state_str,
+                    "memory": task.memory if task else rust_stats.memory_used,
+                    "bandwidth": task.bandwidth if task else None,
+                    "policy": task.policy.name.lower() if task else "best_effort",
+                    "execution_count": task.execution_count if task else 0,
+                    "pacing_delay_count": task.pacing_delay_count if task else 0,
+                    "last_launch": task.last_launch if task else 0.0,
+                    "wait_time": rust_stats.wait_time,
+                    "exec_time": rust_stats.exec_time,
+                }
+
             task = self._tasks.get(task_id)
             if task is None:
                 return {}
@@ -323,15 +461,26 @@ class Scheduler:
             Dictionary with scheduler statistics
         """
         with self._lock:
-            pending = sum(
-                1 for t in self._tasks.values() if t.state == TaskState.PENDING
-            )
-            running = sum(
-                1 for t in self._tasks.values() if t.state == TaskState.RUNNING
-            )
-            completed = sum(
-                1 for t in self._tasks.values() if t.state == TaskState.COMPLETED
-            )
+            if self._use_rust:
+                rust_stats = self._rust_scheduler.stats()
+                return {
+                    "task_count": rust_stats.total_submitted,
+                    "pending_count": rust_stats.pending_count,
+                    "running_count": rust_stats.running_count,
+                    "completed_count": rust_stats.completed_count,
+                    "failed_count": rust_stats.failed_count,
+                    "reserved_memory": rust_stats.reserved_memory,
+                    "available_memory": rust_stats.available_memory,
+                    "total_memory": self._total_memory,
+                    "sched_tick_ms": self._sched_tick_ms,
+                    "window_ms": self._window_ms,
+                    "avg_wait_time": rust_stats.avg_wait_time,
+                    "avg_exec_time": rust_stats.avg_exec_time,
+                }
+
+            pending = sum(1 for t in self._tasks.values() if t.state == TaskState.PENDING)
+            running = sum(1 for t in self._tasks.values() if t.state == TaskState.RUNNING)
+            completed = sum(1 for t in self._tasks.values() if t.state == TaskState.COMPLETED)
 
             return {
                 "task_count": len(self._tasks),
