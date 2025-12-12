@@ -3,11 +3,11 @@ PyGPUkit Stress Test Script for v0.2.1
 Tests Rust backend components under sustained load.
 Default: 5 minutes runtime.
 """
-import time
+import argparse
 import random
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import argparse
 
 # Skip if Rust module not available
 try:
@@ -81,14 +81,14 @@ def stress_memory_pool(stats: StressTestStats, duration_sec: float):
                 pool.free(b.id)
                 stats.inc("memory")
 
-        except Exception as e:
+        except Exception:
             stats.inc_error()
 
     # Cleanup
     for b in blocks:
         try:
             pool.free(b.id)
-        except:
+        except Exception:
             pass
 
 
@@ -120,7 +120,7 @@ def stress_scheduler(stats: StressTestStats, duration_sec: float):
                     scheduler.complete_task(tid)
                     stats.inc("scheduler")
 
-        except Exception as e:
+        except Exception:
             stats.inc_error()
 
 
@@ -154,7 +154,7 @@ def stress_admission_controller(stats: StressTestStats, duration_sec: float):
                 controller.release(release_id)
                 stats.inc("admission")
 
-        except Exception as e:
+        except Exception:
             stats.inc_error()
 
 
@@ -203,7 +203,7 @@ def stress_qos_evaluator(stats: StressTestStats, duration_sec: float):
                 evaluator.release(qos_class, mem, bw)
                 stats.inc("qos")
 
-        except Exception as e:
+        except Exception:
             stats.inc_error()
 
 
@@ -237,7 +237,7 @@ def stress_partition_manager(stats: StressTestStats, duration_sec: float):
                     manager.assign_task(task_id, pid)
                     task_counter += 1
                     stats.inc("partition")
-                except:
+                except Exception:
                     pass  # Partition might not exist
 
             elif action == "stats":
@@ -249,10 +249,10 @@ def stress_partition_manager(stats: StressTestStats, duration_sec: float):
                 try:
                     manager.delete_partition(pid)
                     stats.inc("partition")
-                except:
+                except Exception:
                     pass
 
-        except Exception as e:
+        except Exception:
             stats.inc_error()
 
 
@@ -261,7 +261,7 @@ def run_stress_test(duration_minutes: float = 5.0, workers: int = 4):
     duration_sec = duration_minutes * 60
     stats = StressTestStats()
 
-    print(f"Starting PyGPUkit Stress Test")
+    print("Starting PyGPUkit Stress Test")
     print(f"Duration: {duration_minutes} minutes")
     print(f"Workers per component: {workers}")
     print("-" * 50)

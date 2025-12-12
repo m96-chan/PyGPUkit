@@ -158,9 +158,9 @@ class TestQoSPolicySpec:
         burstable = rust.QosTaskMeta.burstable("b1", "Burstable", 512 * 1024 * 1024, 1.5)
         best_effort = rust.QosTaskMeta.best_effort("be1", "BestEffort")
 
-        eval_g = evaluator.evaluate(guaranteed)
-        eval_b = evaluator.evaluate(burstable)
-        eval_be = evaluator.evaluate(best_effort)
+        _eval_g = evaluator.evaluate(guaranteed)
+        _eval_b = evaluator.evaluate(burstable)
+        _eval_be = evaluator.evaluate(best_effort)
 
         # Guaranteed should have highest effective priority
         assert guaranteed.effective_priority() > burstable.effective_priority()
