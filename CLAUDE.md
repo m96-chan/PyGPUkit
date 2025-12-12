@@ -1,5 +1,50 @@
 # PyGPUkit - Claude Code Guidelines
 
+---
+
+## IMPORTANT IMPLEMENTATION DIRECTIVES FOR PyGPUkit (MANDATORY)
+
+You **MUST** preserve and prioritize all Rust-based components.
+You are **NOT** allowed to delete, simplify, or replace Rust modules with Python equivalents.
+
+### Required Rust Components (MUST NOT be removed)
+
+1. **Rust memory pool** (with LRU eviction)
+2. **Rust GPU scheduler state machine**
+3. **Rust-side async GPU memory transfer engine**
+4. **Rust-side kernel dispatch controller**
+
+### Architecture Principle
+
+```
+Python (High-level orchestration only)
+    ↓
+Rust (Core scheduling, memory management, GPU coordination)
+    ↓
+C++ (CUDA Driver/Runtime API, NVRTC, kernel launch)
+```
+
+**Python is ONLY a high-level orchestration layer.**
+The core scheduling, memory management, GPU coordination, and performance-critical components **MUST** remain implemented in Rust.
+
+### Prohibited Actions
+
+- ❌ **DO NOT** convert Rust features to Python, Cython, Numba, or pure CUDA kernels
+- ❌ **DO NOT** delete Rust tasks from roadmap
+- ❌ **DO NOT** mark Rust tasks as "implemented in Python"
+- ❌ **DO NOT** simplify architecture by removing Rust layer
+
+### If Rust tasks were removed, RESTORE them:
+
+- "Implement Rust memory pool with LRU eviction"
+- "Implement Rust scheduler state machine"
+- "Add async memory transfers (Rust-side)"
+- "Add kernel dispatch controller (Rust-side)"
+
+**Rust is the authoritative implementation for all performance-critical subsystems.**
+
+---
+
 ## GPU Backend Model (CRITICAL)
 
 ### Mental Model for Code Generation
@@ -336,9 +381,17 @@ For portability: allow runtime switch to sm_89, sm_90.
 
 ## Next Steps (v0.2)
 
-1. ✅ Implement Python memory pool with LRU eviction
-2. ✅ Implement Python scheduler state machine
-3. Add L2-optimized naive matmul kernel (target: 2.1-2.3 TFLOPS)
-4. Add SM >= 80 runtime check (reject older GPUs)
-5. Add Tensor Core MMA kernel for FP16/TF32
-6. Add async memory transfers
+### Rust Components (MANDATORY - DO NOT REPLACE WITH PYTHON)
+1. Implement Rust memory pool with LRU eviction
+2. Implement Rust GPU scheduler state machine
+3. Add Rust-side async memory transfer engine
+4. Add Rust-side kernel dispatch controller
+
+### CUDA/C++ Components
+5. ✅ Add L2-optimized naive matmul kernel (target: 2.1-2.3 TFLOPS) - DONE: 2.2 TFLOPS
+6. ✅ Add SM >= 80 runtime check (reject older GPUs)
+7. Add Tensor Core MMA kernel for FP16/TF32
+
+### Python Components (Orchestration Only)
+8. Python API wrappers for Rust scheduler
+9. Python API wrappers for Rust memory pool
