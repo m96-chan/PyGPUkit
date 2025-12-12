@@ -3,8 +3,10 @@
 use pyo3::prelude::*;
 use pygpukit_core::transfer::{
     AsyncTransferEngine, TransferOp, TransferState, TransferStats, TransferType, StreamType,
-    PinnedMemoryManager, PinnedPoolConfig, PinnedBlock, PinnedStats, PinnedError,
+    PinnedMemoryManager, PinnedPoolConfig, PinnedBlock, PinnedStats,
 };
+
+use crate::errors::pinned_error_to_py;
 
 /// Python wrapper for TransferType enum
 #[pyclass(name = "TransferType")]
@@ -667,9 +669,7 @@ impl PyPinnedMemoryManager {
     /// If reused=False, caller must perform cudaHostAlloc
     /// and then call register().
     fn allocate(&mut self, size: usize) -> PyResult<(u64, usize, bool)> {
-        self.inner.allocate(size).map_err(|e| {
-            pyo3::exceptions::PyMemoryError::new_err(e.to_string())
-        })
+        self.inner.allocate(size).map_err(pinned_error_to_py)
     }
 
     /// Register an allocated block
@@ -684,16 +684,12 @@ impl PyPinnedMemoryManager {
     /// Returns (should_free, host_ptr) tuple.
     /// If should_free=True, caller should call cudaFreeHost.
     fn free(&mut self, id: u64) -> PyResult<(bool, u64)> {
-        self.inner.free(id).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e.to_string())
-        })
+        self.inner.free(id).map_err(pinned_error_to_py)
     }
 
     /// Associate a block with a task
     fn associate_task(&mut self, id: u64, task_id: String) -> PyResult<()> {
-        self.inner.associate_task(id, task_id).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e.to_string())
-        })
+        self.inner.associate_task(id, task_id).map_err(pinned_error_to_py)
     }
 
     /// Get a block by ID
@@ -703,9 +699,7 @@ impl PyPinnedMemoryManager {
 
     /// Touch a block to update access time
     fn touch(&mut self, id: u64) -> PyResult<()> {
-        self.inner.touch(id).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e.to_string())
-        })
+        self.inner.touch(id).map_err(pinned_error_to_py)
     }
 
     /// Get blocks for a task

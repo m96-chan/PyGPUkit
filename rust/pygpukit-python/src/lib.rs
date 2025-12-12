@@ -4,6 +4,7 @@
 
 use pyo3::prelude::*;
 
+mod errors;
 mod memory;
 mod scheduler;
 mod transfer;
@@ -52,9 +53,12 @@ fn _pygpukit_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<dispatch::PyPacingDecision>()?;
     m.add_class::<dispatch::PyPacingStats>()?;
     // Admission control
+    m.add_class::<scheduler::PyAdmissionConfig>()?;
+    m.add_class::<scheduler::PyAdmissionController>()?;
     m.add_class::<scheduler::PyAdmissionDecision>()?;
     m.add_class::<scheduler::PyAdmissionStats>()?;
-    m.add_class::<scheduler::PyRejectReason>()?;
+    m.add_class::<scheduler::PyRejectReasonEnum>()?;
+    m.add_class::<scheduler::PyRejectReasonDetails>()?;
     // QoS policy
     m.add_class::<scheduler::PyQosClass>()?;
     m.add_class::<scheduler::PyQosPolicy>()?;
