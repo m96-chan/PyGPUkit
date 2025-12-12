@@ -255,15 +255,31 @@ GPUArray mul(const GPUArray& a, const GPUArray& b) {
 // Small matrix kernel block size
 #define BLOCK_SIZE 16
 
-// Tiled matmul configuration
+// Tiled matmul configuration (legacy, for compatibility)
 #define TILE_M 64      // Output tile height
 #define TILE_N 64      // Output tile width
 #define TILE_K 16      // Reduction tile depth
 #define THREAD_M 4     // Elements per thread in M dimension
 #define THREAD_N 4     // Elements per thread in N dimension
 
+// RTX 3090 Ti optimized configuration
+// Target: 35.6 TFLOPS (90% of 40 TFLOPS theoretical)
+// 128x128 tiles with 8x8 elements per thread for high compute intensity
+#define OPT_TILE_M 128     // Output tile height
+#define OPT_TILE_N 128     // Output tile width
+#define OPT_TILE_K 32      // Reduction tile depth (larger K = more compute per load)
+#define OPT_THREAD_M 8     // Elements per thread in M dimension
+#define OPT_THREAD_N 8     // Elements per thread in N dimension
+// Block: (128/8, 128/8) = (16, 16) = 256 threads
+// Each thread: 8x8 = 64 FMAs per K iteration
+// Shared memory per buffer: (128*32 + 32*128) * 4 = 32KB (fits in 48KB default)
+// Double buffer: 64KB (need to use extended shared memory)
+
 // Threshold for switching to tiled kernel
 #define TILED_MATMUL_THRESHOLD 2048
+
+// Threshold for switching to optimized kernel (larger matrices benefit more)
+#define OPTIMIZED_MATMUL_THRESHOLD 2048
 
 // L2-optimized matmul kernel for FP32 (Ampere+)
 // Uses __ldg() for read-only cache and __restrict__ for aliasing hints
@@ -626,6 +642,144 @@ __global__ void matmul_f64_tiled_kernel(
     }
 }
 
+// ============================================================================
+// RTX 3090 Ti Optimized Matmul Kernel (FP32) v2
+// ============================================================================
+//
+// High-performance SGEMM kernel optimized for Ampere:
+// - 128x128 output tile per block
+// - 256 threads (16x16)
+// - 8x8 elements per thread
+// - BK=16 for better memory bandwidth utilization
+// - Vectorized memory access
+//
+__global__ void matmul_f32_optimized_kernel(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    size_t M, size_t N, size_t K
+) {
+    // Tile configuration
+    constexpr int BM = 128;  // Tile rows
+    constexpr int BN = 128;  // Tile cols
+    constexpr int BK = 16;   // Tile depth
+    constexpr int TM = 8;    // Thread rows
+    constexpr int TN = 8;    // Thread cols
+    // Block: (BN/TN, BM/TM) = (16, 16) = 256 threads
+
+    const int tx = threadIdx.x;  // 0-15
+    const int ty = threadIdx.y;  // 0-15
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tid = ty * 16 + tx;  // 0-255
+
+    // Shared memory with padding to avoid bank conflicts
+    __shared__ float As[BK][BM + 1];  // 16 x 129 = 2064 floats
+    __shared__ float Bs[BK][BN + 1];  // 16 x 129 = 2064 floats
+    // Total: ~16KB (fits in 48KB)
+
+    // Accumulators (8x8 = 64 registers per thread)
+    float acc[TM][TN];
+    #pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        #pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            acc[i][j] = 0.0f;
+        }
+    }
+
+    // Global base positions
+    const size_t row_base = by * BM;
+    const size_t col_base = bx * BN;
+
+    // Number of K tiles
+    const int num_k_tiles = (K + BK - 1) / BK;
+
+    // Loading strategy:
+    // A tile: BM x BK = 128 x 16 = 2048 elements, 256 threads = 8 each
+    // B tile: BK x BN = 16 x 128 = 2048 elements, 256 threads = 8 each
+
+    for (int kt = 0; kt < num_k_tiles; ++kt) {
+        const size_t k_offset = kt * BK;
+
+        // Load A tile with coalesced access
+        // Each thread loads 8 elements in a strided pattern
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int idx = tid + i * 256;  // 0-2047
+            const int a_m = idx % BM;       // row (0-127)
+            const int a_k = idx / BM;       // col (0-15)
+            const size_t g_row = row_base + a_m;
+            const size_t g_col = k_offset + a_k;
+            float val = 0.0f;
+            if (g_row < M && g_col < K) {
+                val = A[g_row * K + g_col];
+            }
+            As[a_k][a_m] = val;
+        }
+
+        // Load B tile with coalesced access
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int idx = tid + i * 256;  // 0-2047
+            const int b_n = idx % BN;       // col (0-127) - coalesced!
+            const int b_k = idx / BN;       // row (0-15)
+            const size_t g_row = k_offset + b_k;
+            const size_t g_col = col_base + b_n;
+            float val = 0.0f;
+            if (g_row < K && g_col < N) {
+                val = B[g_row * N + g_col];
+            }
+            Bs[b_k][b_n] = val;
+        }
+
+        __syncthreads();
+
+        // Compute 8x8 outer products
+        #pragma unroll
+        for (int k = 0; k < BK; ++k) {
+            // Load A fragment (8 elements)
+            float a_frag[TM];
+            #pragma unroll
+            for (int m = 0; m < TM; ++m) {
+                a_frag[m] = As[k][ty * TM + m];
+            }
+
+            // Load B fragment and compute outer product
+            float b_frag[TN];
+            #pragma unroll
+            for (int n = 0; n < TN; ++n) {
+                b_frag[n] = Bs[k][tx * TN + n];
+            }
+
+            #pragma unroll
+            for (int m = 0; m < TM; ++m) {
+                #pragma unroll
+                for (int n = 0; n < TN; ++n) {
+                    acc[m][n] = fmaf(a_frag[m], b_frag[n], acc[m][n]);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    // Write output (8x8 per thread)
+    #pragma unroll
+    for (int m = 0; m < TM; ++m) {
+        const size_t out_row = row_base + ty * TM + m;
+        if (out_row < M) {
+            #pragma unroll
+            for (int n = 0; n < TN; ++n) {
+                const size_t out_col = col_base + tx * TN + n;
+                if (out_col < N) {
+                    C[out_row * N + out_col] = acc[m][n];
+                }
+            }
+        }
+    }
+}
+
 void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     validate_matmul_shapes(a, b, "matmul");
     validate_same_dtype(a, b, "matmul");
@@ -638,11 +792,34 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
-    // Select kernel based on matrix size
-    // Use tiled kernel for large matrices (>= TILED_MATMUL_THRESHOLD)
-    bool use_tiled = (M >= TILED_MATMUL_THRESHOLD || N >= TILED_MATMUL_THRESHOLD || K >= TILED_MATMUL_THRESHOLD);
+    // Select kernel based on matrix size and dtype
+    bool use_optimized = (a.dtype() == DataType::Float32) &&
+                         (M >= OPTIMIZED_MATMUL_THRESHOLD ||
+                          N >= OPTIMIZED_MATMUL_THRESHOLD ||
+                          K >= OPTIMIZED_MATMUL_THRESHOLD);
 
-    if (use_tiled) {
+    bool use_tiled = !use_optimized &&
+                     (M >= TILED_MATMUL_THRESHOLD ||
+                      N >= TILED_MATMUL_THRESHOLD ||
+                      K >= TILED_MATMUL_THRESHOLD);
+
+    if (use_optimized) {
+        // RTX 3090 Ti optimized kernel with 128x128 tiles
+        // Block size: 16x16 = 256 threads, each handles 8x8 output elements
+        constexpr int OPT_BM = 128;
+        constexpr int OPT_BN = 128;
+        dim3 block_size(16, 16);  // 256 threads
+        dim3 grid_size(
+            (N + OPT_BN - 1) / OPT_BN,
+            (M + OPT_BM - 1) / OPT_BM
+        );
+
+        matmul_f32_optimized_kernel<<<grid_size, block_size>>>(
+            static_cast<const float*>(a.data()),
+            static_cast<const float*>(b.data()),
+            static_cast<float*>(c.data()),
+            M, N, K);
+    } else if (use_tiled) {
         // Tiled kernel with shared memory and double buffering
         // Block size: (TILE_N / THREAD_N, TILE_M / THREAD_M) = (16, 16)
         dim3 block_size(TILE_N / THREAD_N, TILE_M / THREAD_M);
