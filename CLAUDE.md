@@ -204,6 +204,20 @@ PyGPUkit/
 
 ---
 
+## Branch Strategy
+
+| Change Type | Branch | Flow |
+|-------------|--------|------|
+| Hotfix (v0.1.x) | main | Direct push → tag |
+| Minor/Major (v0.2+) | feature/* | Branch → PR → CI test → main → tag |
+
+**Why feature branches for v0.2+:**
+- CI runs tests on PR before merge
+- Review changes before merging to main
+- Avoid breaking main with incomplete features
+
+---
+
 ## Current State (v0.1)
 
 - ✅ Native C++ backend with CUDA Runtime/Driver API
