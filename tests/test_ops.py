@@ -201,3 +201,150 @@ class TestMatmulOperation:
         result = c.to_numpy()
         expected = np.matmul(a_np, b_np)
         np.testing.assert_array_almost_equal(result, expected, decimal=4)
+
+
+class TestMatmulTiled:
+    """Tests for tiled matmul optimization (Issue #26).
+
+    These tests verify correctness for various matrix sizes including:
+    - Tile-aligned sizes (multiples of 16/32)
+    - Non-aligned sizes
+    - Large matrices
+    """
+
+    @pytest.mark.parametrize("size", [16, 32, 64, 128, 256])
+    def test_matmul_tile_aligned_square(self, size: int):
+        """Test matmul with tile-aligned square matrices."""
+        np.random.seed(42)
+        a_np = np.random.rand(size, size).astype(np.float32)
+        b_np = np.random.rand(size, size).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=4)
+
+    @pytest.mark.parametrize("size", [17, 33, 65, 100, 129, 200])
+    def test_matmul_non_aligned_square(self, size: int):
+        """Test matmul with non-tile-aligned square matrices."""
+        np.random.seed(42)
+        a_np = np.random.rand(size, size).astype(np.float32)
+        b_np = np.random.rand(size, size).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=4)
+
+    @pytest.mark.parametrize(
+        "m,k,n",
+        [
+            (32, 64, 32),   # Aligned rectangular
+            (64, 32, 128),  # Aligned rectangular
+            (33, 65, 17),   # Non-aligned rectangular
+            (100, 50, 75),  # Non-aligned rectangular
+            (128, 256, 64), # Large aligned
+        ],
+    )
+    def test_matmul_rectangular(self, m: int, k: int, n: int):
+        """Test matmul with rectangular matrices of various sizes."""
+        np.random.seed(42)
+        a_np = np.random.rand(m, k).astype(np.float32)
+        b_np = np.random.rand(k, n).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        assert c.shape == (m, n)
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=4)
+
+    def test_matmul_large_512(self):
+        """Test matmul with 512x512 matrices (performance test)."""
+        np.random.seed(42)
+        a_np = np.random.rand(512, 512).astype(np.float32)
+        b_np = np.random.rand(512, 512).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=3)
+
+    def test_matmul_float64_tiled(self):
+        """Test tiled matmul with float64."""
+        np.random.seed(42)
+        a_np = np.random.rand(64, 64).astype(np.float64)
+        b_np = np.random.rand(64, 64).astype(np.float64)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        assert c.dtype == gp.float64
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=10)
+
+    def test_matmul_tall_matrix(self):
+        """Test matmul with tall matrix (M >> N)."""
+        np.random.seed(42)
+        a_np = np.random.rand(256, 32).astype(np.float32)
+        b_np = np.random.rand(32, 16).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        assert c.shape == (256, 16)
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=4)
+
+    def test_matmul_wide_matrix(self):
+        """Test matmul with wide matrix (N >> M)."""
+        np.random.seed(42)
+        a_np = np.random.rand(16, 32).astype(np.float32)
+        b_np = np.random.rand(32, 256).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        assert c.shape == (16, 256)
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=4)
+
+    def test_matmul_single_row_col(self):
+        """Test matmul edge case: single row times single column."""
+        np.random.seed(42)
+        a_np = np.random.rand(1, 64).astype(np.float32)
+        b_np = np.random.rand(64, 1).astype(np.float32)
+
+        a = gp.from_numpy(a_np)
+        b = gp.from_numpy(b_np)
+
+        c = gp.matmul(a, b)
+
+        assert c.shape == (1, 1)
+        result = c.to_numpy()
+        expected = np.matmul(a_np, b_np)
+        np.testing.assert_array_almost_equal(result, expected, decimal=4)

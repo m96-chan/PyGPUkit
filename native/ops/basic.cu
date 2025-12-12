@@ -209,37 +209,133 @@ GPUArray mul(const GPUArray& a, const GPUArray& b) {
 }
 
 // ============================================================================
-// Matmul kernels (naive implementation, can be optimized with tiling)
+// Matmul kernels with shared memory tiling (Issue #26)
 // ============================================================================
 
-__global__ void matmul_f32_kernel(
-    const float* A, const float* B, float* C,
+// Tile size for shared memory optimization
+#define TILE_SIZE 16
+
+// Tiled matmul kernel using shared memory for better memory bandwidth utilization
+// Each thread block computes a TILE_SIZE x TILE_SIZE tile of the output matrix C
+__global__ void matmul_f32_tiled_kernel(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
     size_t M, size_t N, size_t K
 ) {
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    // Shared memory for tiles of A and B
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
 
-    if (row < M && col < N) {
-        float sum = 0.0f;
-        for (size_t k = 0; k < K; ++k) {
-            sum += A[row * K + k] * B[k * N + col];
+    // Thread indices within the block
+    size_t tx = threadIdx.x;
+    size_t ty = threadIdx.y;
+
+    // Global row and column indices for this thread's output element
+    size_t row = blockIdx.y * TILE_SIZE + ty;
+    size_t col = blockIdx.x * TILE_SIZE + tx;
+
+    // Accumulator for the dot product
+    float sum = 0.0f;
+
+    // Number of tiles needed to cover the K dimension
+    size_t numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+
+    // Iterate over tiles
+    for (size_t t = 0; t < numTiles; ++t) {
+        // Load tile of A into shared memory (with boundary check)
+        size_t a_col = t * TILE_SIZE + tx;
+        if (row < M && a_col < K) {
+            As[ty][tx] = A[row * K + a_col];
+        } else {
+            As[ty][tx] = 0.0f;
         }
+
+        // Load tile of B into shared memory (with boundary check)
+        size_t b_row = t * TILE_SIZE + ty;
+        if (b_row < K && col < N) {
+            Bs[ty][tx] = B[b_row * N + col];
+        } else {
+            Bs[ty][tx] = 0.0f;
+        }
+
+        // Synchronize to ensure tiles are loaded
+        __syncthreads();
+
+        // Compute partial dot product for this tile
+        #pragma unroll
+        for (size_t k = 0; k < TILE_SIZE; ++k) {
+            sum += As[ty][k] * Bs[k][tx];
+        }
+
+        // Synchronize before loading next tile
+        __syncthreads();
+    }
+
+    // Write result to global memory (with boundary check)
+    if (row < M && col < N) {
         C[row * N + col] = sum;
     }
 }
 
-__global__ void matmul_f64_kernel(
-    const double* A, const double* B, double* C,
+// Tiled matmul kernel for float64
+__global__ void matmul_f64_tiled_kernel(
+    const double* __restrict__ A,
+    const double* __restrict__ B,
+    double* __restrict__ C,
     size_t M, size_t N, size_t K
 ) {
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    // Shared memory for tiles of A and B
+    __shared__ double As[TILE_SIZE][TILE_SIZE];
+    __shared__ double Bs[TILE_SIZE][TILE_SIZE];
 
-    if (row < M && col < N) {
-        double sum = 0.0;
-        for (size_t k = 0; k < K; ++k) {
-            sum += A[row * K + k] * B[k * N + col];
+    // Thread indices within the block
+    size_t tx = threadIdx.x;
+    size_t ty = threadIdx.y;
+
+    // Global row and column indices for this thread's output element
+    size_t row = blockIdx.y * TILE_SIZE + ty;
+    size_t col = blockIdx.x * TILE_SIZE + tx;
+
+    // Accumulator for the dot product
+    double sum = 0.0;
+
+    // Number of tiles needed to cover the K dimension
+    size_t numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+
+    // Iterate over tiles
+    for (size_t t = 0; t < numTiles; ++t) {
+        // Load tile of A into shared memory (with boundary check)
+        size_t a_col = t * TILE_SIZE + tx;
+        if (row < M && a_col < K) {
+            As[ty][tx] = A[row * K + a_col];
+        } else {
+            As[ty][tx] = 0.0;
         }
+
+        // Load tile of B into shared memory (with boundary check)
+        size_t b_row = t * TILE_SIZE + ty;
+        if (b_row < K && col < N) {
+            Bs[ty][tx] = B[b_row * N + col];
+        } else {
+            Bs[ty][tx] = 0.0;
+        }
+
+        // Synchronize to ensure tiles are loaded
+        __syncthreads();
+
+        // Compute partial dot product for this tile
+        #pragma unroll
+        for (size_t k = 0; k < TILE_SIZE; ++k) {
+            sum += As[ty][k] * Bs[k][tx];
+        }
+
+        // Synchronize before loading next tile
+        __syncthreads();
+    }
+
+    // Write result to global memory (with boundary check)
+    if (row < M && col < N) {
         C[row * N + col] = sum;
     }
 }
@@ -256,22 +352,23 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
-    dim3 block_size(16, 16);
+    // Use tiled kernel with TILE_SIZE x TILE_SIZE blocks
+    dim3 block_size(TILE_SIZE, TILE_SIZE);
     dim3 grid_size(
-        (N + block_size.x - 1) / block_size.x,
-        (M + block_size.y - 1) / block_size.y
+        (N + TILE_SIZE - 1) / TILE_SIZE,
+        (M + TILE_SIZE - 1) / TILE_SIZE
     );
 
     switch (a.dtype()) {
         case DataType::Float32:
-            matmul_f32_kernel<<<grid_size, block_size>>>(
+            matmul_f32_tiled_kernel<<<grid_size, block_size>>>(
                 static_cast<const float*>(a.data()),
                 static_cast<const float*>(b.data()),
                 static_cast<float*>(c.data()),
                 M, N, K);
             break;
         case DataType::Float64:
-            matmul_f64_kernel<<<grid_size, block_size>>>(
+            matmul_f64_tiled_kernel<<<grid_size, block_size>>>(
                 static_cast<const double*>(a.data()),
                 static_cast<const double*>(b.data()),
                 static_cast<double*>(c.data()),
