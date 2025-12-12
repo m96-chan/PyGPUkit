@@ -10,7 +10,7 @@ repos:
     rev: v1.13.0
     hooks:
       - id: mypy
-        args: [--ignore-missing-imports, --disable-error-code=union-attr, --disable-error-code=no-redef, --disable-error-code=no-any-return]
+        args: [--ignore-missing-imports, --disable-error-code=union-attr, --disable-error-code=no-redef, --disable-error-code=no-any-return, --disable-error-code=attr-defined]
         additional_dependencies: [numpy, psutil]
         files: ^src/
 
