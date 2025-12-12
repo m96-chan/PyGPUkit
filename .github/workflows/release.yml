@@ -50,6 +50,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
@@ -60,9 +65,19 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build scikit-build-core pybind11 ninja cmake auditwheel patchelf
+          pip install build scikit-build-core pybind11 ninja cmake auditwheel patchelf maturin
 
-      - name: Build wheel
+      - name: Build Rust module
+        run: |
+          cd rust/pygpukit-python
+          maturin build --release --interpreter python
+          # Extract and copy the Rust extension to src/pygpukit/
+          cd ../target/wheels
+          unzip -o *.whl -d ../rust-extracted
+          find ../rust-extracted -name "_pygpukit_rust*.so" -exec cp {} ../../../src/pygpukit/ \;
+          ls -la ../../../src/pygpukit/*.so || true
+
+      - name: Build wheel (C++ + Rust)
         run: |
           python -m build --wheel
         env:
@@ -71,7 +86,8 @@ jobs:
       - name: Show wheel info before repair
         run: |
           ls -la dist/
-          python -m zipfile -l dist/*.whl | head -20
+          echo "=== Extension modules in wheel ==="
+          python -m zipfile -l dist/*.whl | grep -E '\.so|\.pyd'
 
       - name: Repair wheel with auditwheel
         run: |
@@ -91,7 +107,8 @@ jobs:
       - name: Show wheel info after repair
         run: |
           ls -la dist/
-          python -m zipfile -l dist/*.whl | head -20
+          echo "=== Extension modules in wheel ==="
+          python -m zipfile -l dist/*.whl | grep -E '\.so|\.pyd'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -113,32 +130,57 @@ jobs:
           pyenv local 3.12
           python --version
 
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustup update
+          rustc --version
+          cargo --version
+
       - name: Clean previous builds
         shell: pwsh
         run: |
           if (Test-Path dist) { Remove-Item -Recurse -Force dist }
           if (Test-Path build) { Remove-Item -Recurse -Force build }
+          if (Test-Path rust/target) { Remove-Item -Recurse -Force rust/target }
           Get-ChildItem -Filter "*.egg-info" -Directory | Remove-Item -Recurse -Force
 
       - name: Install build dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install build scikit-build-core pybind11 ninja cmake
+          pip install build scikit-build-core pybind11 ninja cmake maturin
 
-      - name: Build wheel
+      - name: Build Rust module
+        shell: pwsh
+        run: |
+          cd rust/pygpukit-python
+          maturin build --release --interpreter python
+          # Copy the built extension to src/pygpukit/
+          $wheel = Get-ChildItem ../target/wheels/*.whl | Select-Object -First 1
+          Expand-Archive -Path $wheel.FullName -DestinationPath ../target/rust-extracted -Force
+          $ext = Get-ChildItem ../target/rust-extracted/_pygpukit_rust*.pyd -Recurse | Select-Object -First 1
+          if ($ext) {
+            Copy-Item $ext.FullName ../../src/pygpukit/
+            Write-Host "Copied Rust extension: $($ext.Name)"
+          }
+          Get-ChildItem ../../src/pygpukit/*.pyd
+
+      - name: Build wheel (C++ + Rust)
         shell: pwsh
         run: |
           python -m build --wheel
         env:
           CMAKE_CUDA_ARCHITECTURES: "86"
 
-      - name: Verify wheel
+      - name: Verify wheel contents
         shell: pwsh
         run: |
           Get-ChildItem dist/*.whl | ForEach-Object {
             Write-Host "Built: $($_.Name)"
-            python -m zipfile -l $_.FullName | Select-Object -First 20
+            Write-Host "=== Wheel contents ==="
+            python -m zipfile -l $_.FullName | Select-String -Pattern "\.pyd|\.so"
           }
 
       - name: Upload artifact

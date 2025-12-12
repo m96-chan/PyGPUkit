@@ -1,0 +1,10 @@
+[package]
+name = "pygpukit-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core Rust implementation for PyGPUkit memory pool and scheduler"
+
+[dependencies]
+parking_lot.workspace = true
+indexmap.workspace = true

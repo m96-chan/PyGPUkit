@@ -52,8 +52,10 @@ cmake.source-dir = "native"
 cmake.build-type = "Release"
 wheel.packages = ["src/pygpukit"]
 wheel.install-dir = "pygpukit"
-sdist.include = ["native/*"]
-sdist.exclude = ["native/build/*"]
+# Include Rust extension modules (.pyd on Windows, .so on Linux)
+wheel.py-api = ""
+sdist.include = ["native/*", "rust/*"]
+sdist.exclude = ["native/build/*", "rust/target/*"]
 # Allow building without CUDA for testing
 cmake.args = ["-DCMAKE_CUDA_COMPILER_WORKS=1"]
 build.targets = []

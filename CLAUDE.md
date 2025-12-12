@@ -45,6 +45,64 @@ The core scheduling, memory management, GPU coordination, and performance-critic
 
 ---
 
+## PyGPUkit Rust Architecture Specification (MANDATORY)
+
+You **MUST** follow the directory structure below exactly.
+Do **NOT** delete, merge, or simplify these modules.
+Python is only the binding layer; the Rust crates contain the authoritative logic.
+
+```
+rust/
+├── Cargo.toml                               # Workspace root
+├── pygpukit-core/                           # Pure Rust GPU runtime
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── memory/
+│       │   ├── mod.rs
+│       │   ├── block.rs                     # GPU memory block representation
+│       │   ├── pool.rs                      # MemoryPool with LRU eviction
+│       │   └── size_class.rs                # Size-class allocator
+│       └── scheduler/
+│           ├── mod.rs
+│           ├── task.rs                      # TaskState, QoS Policies, Metadata
+│           └── core.rs                      # Scheduler state machine (Rust)
+└── pygpukit-python/
+    ├── Cargo.toml
+    ├── pyproject.toml                       # Maturin configuration
+    └── src/
+        ├── lib.rs                           # Exposes _pygpukit_rust to Python
+        ├── memory.rs                        # PyO3 bindings for MemoryPool
+        └── scheduler.rs                     # PyO3 bindings for Scheduler
+```
+
+### Architecture Rules (Non-Negotiable)
+
+1. **pygpukit-core is the authoritative runtime.**
+   - MemoryPool, Scheduler, Task, LRU, SizeClass MUST be implemented here.
+   - Python MUST NOT reimplement these concepts.
+
+2. **All GPU memory management MUST live in:**
+   `rust/pygpukit-core/src/memory/`
+
+3. **All scheduling logic MUST live in:**
+   `rust/pygpukit-core/src/scheduler/`
+
+4. **Python bindings MUST be thin wrappers only.**
+   - No logic duplication
+   - No scheduler in Python
+   - No memory pool in Python
+
+5. **When adding new features, always add them to Rust first.**
+   Then expose via PyO3.
+
+6. **Never remove:**
+   - `block.rs`
+   - `pool.rs`
+   - `size_class.rs`
+
+---
+
 ## GPU Backend Model (CRITICAL)
 
 ### Mental Model for Code Generation
@@ -382,8 +440,8 @@ For portability: allow runtime switch to sm_89, sm_90.
 ## Next Steps (v0.2)
 
 ### Rust Components (MANDATORY - DO NOT REPLACE WITH PYTHON)
-1. Implement Rust memory pool with LRU eviction
-2. Implement Rust GPU scheduler state machine
+1. ✅ Implement Rust memory pool with LRU eviction - DONE (27 tests pass)
+2. ✅ Implement Rust GPU scheduler state machine - DONE (with memory reservation, dependencies)
 3. Add Rust-side async memory transfer engine
 4. Add Rust-side kernel dispatch controller
 
@@ -393,5 +451,5 @@ For portability: allow runtime switch to sm_89, sm_90.
 7. Add Tensor Core MMA kernel for FP16/TF32
 
 ### Python Components (Orchestration Only)
-8. Python API wrappers for Rust scheduler
-9. Python API wrappers for Rust memory pool
+8. Python API wrappers for Rust scheduler (thin wrappers only)
+9. Python API wrappers for Rust memory pool (thin wrappers only)
