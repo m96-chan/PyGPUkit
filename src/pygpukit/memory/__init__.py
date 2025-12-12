@@ -11,6 +11,7 @@ from pygpukit.memory.pool import (
 # Import Rust implementation if available
 try:
     import _pygpukit_rust._pygpukit_rust as _rust
+
     RustMemoryPool = _rust.MemoryPool
     RustMemoryBlock = _rust.MemoryBlock
     RustPoolStats = _rust.PoolStats

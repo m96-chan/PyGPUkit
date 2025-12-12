@@ -94,11 +94,15 @@ def main():
     print("  RESULTS")
     print("=" * 70)
     print()
-    print(f"{'Size':>8} | {'NumPy (ms)':>12} | {'GPU (ms)':>12} | {'Speedup':>8} | {'GPU GFLOPS':>12}")
+    print(
+        f"{'Size':>8} | {'NumPy (ms)':>12} | {'GPU (ms)':>12} | {'Speedup':>8} | {'GPU GFLOPS':>12}"
+    )
     print("-" * 70)
 
     for r in results:
-        print(f"{r['size']:>8} | {r['numpy_ms']:>12.3f} | {r['gpu_ms']:>12.3f} | {r['speedup']:>7.1f}x | {r['gpu_gflops']:>12.1f}")
+        print(
+            f"{r['size']:>8} | {r['numpy_ms']:>12.3f} | {r['gpu_ms']:>12.3f} | {r['speedup']:>7.1f}x | {r['gpu_gflops']:>12.1f}"
+        )
 
     print()
     print("=" * 70)

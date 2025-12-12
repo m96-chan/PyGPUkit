@@ -30,9 +30,10 @@ _USE_RUST = os.environ.get("PYGPUKIT_USE_RUST", "1").lower() in ("1", "true", "y
 
 # Try to import Rust backend
 _RUST_AVAILABLE = False
-_rust_module = None
+_rust_module: Any = None
 try:
-    import _pygpukit_rust._pygpukit_rust as _rust_module
+    import _pygpukit_rust._pygpukit_rust as _rust_module  # noqa: F811
+
     _RUST_AVAILABLE = True
 except ImportError:
     pass
@@ -134,9 +135,7 @@ class Scheduler:
         self._use_rust = _USE_RUST and _RUST_AVAILABLE
         self._rust_scheduler = None
         if self._use_rust:
-            self._rust_scheduler = _rust_module.Scheduler(
-                total_memory, sched_tick_ms, window_ms
-            )
+            self._rust_scheduler = _rust_module.Scheduler(total_memory, sched_tick_ms, window_ms)
 
         # Python-side storage for callable functions (Rust doesn't store closures)
         # Maps task_id -> callable
@@ -422,11 +421,11 @@ class Scheduler:
                 task = self._tasks.get(task_id)
                 # Convert Rust state to lowercase string
                 state = rust_stats.state
-                if hasattr(state, 'name'):
+                if hasattr(state, "name"):
                     state_str = state.name.lower()
                 else:
                     # Handle PyTaskState enum (e.g., TaskState.Completed -> "completed")
-                    state_str = str(state).split('.')[-1].lower()
+                    state_str = str(state).split(".")[-1].lower()
                 return {
                     "id": rust_stats.id,
                     "state": state_str,
@@ -479,15 +478,9 @@ class Scheduler:
                     "avg_exec_time": rust_stats.avg_exec_time,
                 }
 
-            pending = sum(
-                1 for t in self._tasks.values() if t.state == TaskState.PENDING
-            )
-            running = sum(
-                1 for t in self._tasks.values() if t.state == TaskState.RUNNING
-            )
-            completed = sum(
-                1 for t in self._tasks.values() if t.state == TaskState.COMPLETED
-            )
+            pending = sum(1 for t in self._tasks.values() if t.state == TaskState.PENDING)
+            running = sum(1 for t in self._tasks.values() if t.state == TaskState.RUNNING)
+            completed = sum(1 for t in self._tasks.values() if t.state == TaskState.COMPLETED)
 
             return {
                 "task_count": len(self._tasks),

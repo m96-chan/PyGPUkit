@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Compare tiled vs naive matmul (via NVRTC JIT)."""
+
 import sys
+
 sys.path.insert(0, "src")
-import numpy as np
 import time
+
+import numpy as np
+
 import pygpukit as gp
 from pygpukit.core.backend import get_backend
 
 # Naive kernel source (for comparison)
-NAIVE_KERNEL = '''
+NAIVE_KERNEL = """
 extern "C" __global__ void matmul_naive(
     const float* A, const float* B, float* C,
     int M, int N, int K
@@ -24,7 +28,8 @@ extern "C" __global__ void matmul_naive(
         C[row * N + col] = sum;
     }
 }
-'''
+"""
+
 
 def benchmark_current(a_gpu, b_gpu, iterations=10):
     """Benchmark current (tiled) implementation."""

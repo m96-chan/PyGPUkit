@@ -2,7 +2,6 @@
 """PyGPUkit Scheduler End-to-End Execution Log Simulation."""
 
 import time
-import random
 from datetime import datetime
 
 # Import Rust backend
@@ -80,7 +79,7 @@ def run_simulation():
 
     # Define 6 tasks with 3 QoS policies
     tasks = [
-        ("matmul-4k", "GUARANTEED", 4 * 1024 * 1024 * 1024, 0.40),   # 4GB, 40% BW
+        ("matmul-4k", "GUARANTEED", 4 * 1024 * 1024 * 1024, 0.40),  # 4GB, 40% BW
         ("conv2d-resnet", "GUARANTEED", 2 * 1024 * 1024 * 1024, 0.35),  # 2GB, 35% BW
         ("attention-bert", "BURSTABLE", 6 * 1024 * 1024 * 1024, 0.30),  # 6GB, 30% BW
         ("reduce-sum", "BURSTABLE", 512 * 1024 * 1024, 0.15),  # 512MB, 15% BW
@@ -93,18 +92,31 @@ def run_simulation():
     total_bandwidth_requested = 0.0
 
     for name, policy, mem, bw in tasks:
-        task = rust.TaskMeta(name, f"{policy} task", mem, priority={"GUARANTEED": 100, "BURSTABLE": 50, "BEST_EFFORT": 10}[policy])
+        task = rust.TaskMeta(
+            name,
+            f"{policy} task",
+            mem,
+            priority={"GUARANTEED": 100, "BURSTABLE": 50, "BEST_EFFORT": 10}[policy],
+        )
         task_id = sched.submit(task)
         task_ids.append((task_id, name, policy, mem, bw))
         total_memory_requested += mem
         total_bandwidth_requested += bw
 
         log("SUBMIT", f"Task '{name}' submitted (id={task_id[:8]})")
-        log("SUBMIT", f"  -> Policy={policy}, Memory={mem/1024/1024:.0f}MB, Bandwidth={bw*100:.0f}%")
+        log(
+            "SUBMIT", f"  -> Policy={policy}, Memory={mem/1024/1024:.0f}MB, Bandwidth={bw*100:.0f}%"
+        )
 
-    log("SUBMIT", f"Total: 6 tasks submitted")
-    log("SUBMIT", f"  -> Memory requested: {total_memory_requested/1024/1024/1024:.2f} GB / 18.00 GB ({total_memory_requested*100/TOTAL_MEM:.1f}%)")
-    log("SUBMIT", f"  -> Bandwidth requested: {total_bandwidth_requested*100:.0f}% (OVERCOMMIT DETECTED)")
+    log("SUBMIT", "Total: 6 tasks submitted")
+    log(
+        "SUBMIT",
+        f"  -> Memory requested: {total_memory_requested/1024/1024/1024:.2f} GB / 18.00 GB ({total_memory_requested*100/TOTAL_MEM:.1f}%)",
+    )
+    log(
+        "SUBMIT",
+        f"  -> Bandwidth requested: {total_bandwidth_requested*100:.0f}% (OVERCOMMIT DETECTED)",
+    )
 
     # ========== Phase 4: Admission Control ==========
     separator("PHASE 4: ADMISSION CONTROL")
@@ -113,24 +125,24 @@ def run_simulation():
     separator()
 
     # Simulate admission decisions
-    for task_id, name, policy, mem, bw in task_ids:
+    for _task_id, name, policy, mem, bw in task_ids:
         log("ADMISSION", f"Evaluating task '{name}' (policy={policy})")
 
         if policy == "GUARANTEED":
             log("ADMISSION", f"  [CHECK] Memory: {mem/1024/1024:.0f}MB <= available (PASS)")
             log("ADMISSION", f"  [CHECK] Bandwidth: {bw*100:.0f}% guaranteed reservation (PASS)")
-            log("ADMISSION", f"  [CHECK] Priority: 100 (highest tier)")
-            log("ADMISSION", f"  -> ADMIT (guaranteed resources reserved)")
+            log("ADMISSION", "  [CHECK] Priority: 100 (highest tier)")
+            log("ADMISSION", "  -> ADMIT (guaranteed resources reserved)")
         elif policy == "BURSTABLE":
             log("ADMISSION", f"  [CHECK] Memory: {mem/1024/1024:.0f}MB <= available (PASS)")
             log("ADMISSION", f"  [CHECK] Bandwidth: {bw*100:.0f}% soft limit (may throttle)")
-            log("ADMISSION", f"  [CHECK] Priority: 50 (mid tier)")
-            log("ADMISSION", f"  -> ADMIT (burst capacity available)")
+            log("ADMISSION", "  [CHECK] Priority: 50 (mid tier)")
+            log("ADMISSION", "  -> ADMIT (burst capacity available)")
         else:  # BEST_EFFORT
             log("ADMISSION", f"  [CHECK] Memory: {mem/1024/1024:.0f}MB (opportunistic)")
             log("ADMISSION", f"  [CHECK] Bandwidth: {bw*100:.0f}% (no guarantee)")
-            log("ADMISSION", f"  [CHECK] Priority: 10 (lowest tier)")
-            log("ADMISSION", f"  -> ADMIT (best-effort, may be preempted)")
+            log("ADMISSION", "  [CHECK] Priority: 10 (lowest tier)")
+            log("ADMISSION", "  -> ADMIT (best-effort, may be preempted)")
 
     separator()
     log("ADMISSION", "All 6 tasks ADMITTED")
@@ -161,12 +173,17 @@ def run_simulation():
         total_allocated += size_bytes
 
         # Determine size class
-        size_class = 256 * 1024 * 1024 if size_bytes > 64 * 1024 * 1024 else (
-            64 * 1024 * 1024 if size_bytes > 16 * 1024 * 1024 else 16 * 1024 * 1024
+        size_class = (
+            256 * 1024 * 1024
+            if size_bytes > 64 * 1024 * 1024
+            else (64 * 1024 * 1024 if size_bytes > 16 * 1024 * 1024 else 16 * 1024 * 1024)
         )
 
         log("ALLOC", f"Block {block_id}: {size_mb}MB for '{name}'")
-        log("ALLOC", f"  -> Size class: {size_class/1024/1024:.0f}MB, Internal frag: {(size_class-size_bytes)*100/size_class:.1f}%")
+        log(
+            "ALLOC",
+            f"  -> Size class: {size_class/1024/1024:.0f}MB, Internal frag: {(size_class-size_bytes)*100/size_class:.1f}%",
+        )
 
     stats = pool.stats()
     separator()
@@ -194,7 +211,10 @@ def run_simulation():
     log("REUSE", f"Block {new_block2} allocated (2GB) -> REUSED from free list")
 
     stats = pool.stats()
-    log("MEMPOOL", f"After churn: reuse_count={stats.reuse_count}, cudamalloc_count={stats.cudamalloc_count}")
+    log(
+        "MEMPOOL",
+        f"After churn: reuse_count={stats.reuse_count}, cudamalloc_count={stats.cudamalloc_count}",
+    )
 
     # ========== Phase 6: Bandwidth Calculations ==========
     separator("PHASE 6: BANDWIDTH RESOLUTION")
@@ -233,8 +253,8 @@ def run_simulation():
     log("SCHEDULER", "Starting execution loop (tick=10ms)...")
     separator()
 
-    # Get runnable tasks
-    runnable = sched.get_runnable_tasks(6)
+    # Get runnable tasks (side effect: transitions tasks to running state)
+    _runnable = sched.get_runnable_tasks(6)
 
     execution_order = [
         ("matmul-4k", 0, 45, "84 SMs", "40%"),
@@ -245,7 +265,6 @@ def run_simulation():
         ("cache-warmup", 55, 10, "6 SMs", "burst"),
     ]
 
-    base_time = 0
     for name, start_ms, duration_ms, sms, bw in execution_order:
         # Find task_id
         tid = None
@@ -258,7 +277,10 @@ def run_simulation():
         log("DISPATCH", f"  -> Kernel launch: {sms} active, BW={bw}")
 
         if start_ms + duration_ms <= 65:
-            log("COMPLETE", f"T+{start_ms+duration_ms:03d}ms: '{name}' FINISH (duration={duration_ms}ms)")
+            log(
+                "COMPLETE",
+                f"T+{start_ms+duration_ms:03d}ms: '{name}' FINISH (duration={duration_ms}ms)",
+            )
             if tid:
                 sched.complete_task(tid)
 
@@ -277,14 +299,14 @@ def run_simulation():
     log("STATS", "=== Memory Pool Statistics ===")
     final_stats = pool.stats()
     log("STATS", f"  Quota:           {final_stats.quota/1024/1024/1024:.2f} GB")
-    log("STATS", f"  Peak Used:       13.86 GB (77.0%)")
+    log("STATS", "  Peak Used:       13.86 GB (77.0%)")
     log("STATS", f"  Final Used:      {final_stats.used/1024/1024/1024:.2f} GB")
     log("STATS", f"  Cached:          {final_stats.cached/1024/1024/1024:.2f} GB")
     log("STATS", f"  Allocations:     {final_stats.allocation_count}")
     log("STATS", f"  cudaMalloc:      {final_stats.cudamalloc_count}")
     log("STATS", f"  Reuse:           {final_stats.reuse_count}")
     log("STATS", f"  Evictions:       {final_stats.eviction_count}")
-    log("STATS", f"  Fragmentation:   8.2% (internal)")
+    log("STATS", "  Fragmentation:   8.2% (internal)")
 
     separator()
     log("STATS", "=== Scheduler Statistics ===")
@@ -293,14 +315,14 @@ def run_simulation():
     log("STATS", f"  Tasks Completed: {sched_stats.completed_count}")
     log("STATS", f"  Tasks Failed:    {sched_stats.failed_count}")
     log("STATS", f"  Avg Wait Time:   {sched_stats.avg_wait_time*1000:.2f} ms")
-    log("STATS", f"  Avg Exec Time:   12.5 ms")
+    log("STATS", "  Avg Exec Time:   12.5 ms")
 
     separator()
     log("STATS", "=== Bandwidth Utilization ===")
-    log("STATS", f"  Peak Utilization:    100% (overcommit resolved)")
-    log("STATS", f"  Avg Utilization:     87.3%")
-    log("STATS", f"  Throttle Events:     2 (attention-bert, reduce-sum)")
-    log("STATS", f"  Deferred Tasks:      2 (data-preproc, cache-warmup)")
+    log("STATS", "  Peak Utilization:    100% (overcommit resolved)")
+    log("STATS", "  Avg Utilization:     87.3%")
+    log("STATS", "  Throttle Events:     2 (attention-bert, reduce-sum)")
+    log("STATS", "  Deferred Tasks:      2 (data-preproc, cache-warmup)")
 
     separator()
     log("STATS", "=== Task Completion Table ===")

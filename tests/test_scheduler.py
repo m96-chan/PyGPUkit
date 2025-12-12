@@ -169,6 +169,7 @@ class TestSchedulerStep:
         def make_task(n):
             def task_fn():
                 execution_order.append(n)
+
             return task_fn
 
         scheduler = Scheduler()
@@ -351,8 +352,10 @@ class TestSchedulerThreadSafety:
         def submit_worker():
             try:
                 for _ in range(10):
+
                     def dummy():
                         pass
+
                     task_id = scheduler.submit(dummy)
                     task_ids.append(task_id)
             except Exception as e:

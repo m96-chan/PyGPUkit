@@ -20,30 +20,38 @@ def benchmark_rust():
     n_allocs = 10000
     start = time.perf_counter()
     block_ids = []
-    for i in range(n_allocs):
+    for _ in range(n_allocs):
         block_id = pool.allocate(4096)
         block_ids.append(block_id)
     alloc_time = time.perf_counter() - start
-    print(f"Allocate {n_allocs} blocks:  {alloc_time*1000:.2f} ms ({n_allocs/alloc_time:.0f} ops/sec)")
+    print(
+        f"Allocate {n_allocs} blocks:  {alloc_time*1000:.2f} ms ({n_allocs/alloc_time:.0f} ops/sec)"
+    )
 
     # Free benchmark
     start = time.perf_counter()
     for block_id in block_ids:
         pool.free(block_id)
     free_time = time.perf_counter() - start
-    print(f"Free {n_allocs} blocks:      {free_time*1000:.2f} ms ({n_allocs/free_time:.0f} ops/sec)")
+    print(
+        f"Free {n_allocs} blocks:      {free_time*1000:.2f} ms ({n_allocs/free_time:.0f} ops/sec)"
+    )
 
     # Reuse benchmark (allocate from free list)
     start = time.perf_counter()
     block_ids = []
-    for i in range(n_allocs):
+    for _ in range(n_allocs):
         block_id = pool.allocate(4096)
         block_ids.append(block_id)
     reuse_time = time.perf_counter() - start
-    print(f"Reuse {n_allocs} blocks:     {reuse_time*1000:.2f} ms ({n_allocs/reuse_time:.0f} ops/sec)")
+    print(
+        f"Reuse {n_allocs} blocks:     {reuse_time*1000:.2f} ms ({n_allocs/reuse_time:.0f} ops/sec)"
+    )
 
     stats = pool.stats()
-    print(f"\nPool stats: reuse_count={stats.reuse_count}, cudamalloc_count={stats.cudamalloc_count}")
+    print(
+        f"\nPool stats: reuse_count={stats.reuse_count}, cudamalloc_count={stats.cudamalloc_count}"
+    )
 
     # Cleanup
     for block_id in block_ids:
@@ -61,7 +69,9 @@ def benchmark_rust():
         task = rust.TaskMeta(f"task-{i}", f"Task {i}", 1024)
         sched.submit(task)
     submit_time = time.perf_counter() - start
-    print(f"Submit {n_tasks} tasks:      {submit_time*1000:.2f} ms ({n_tasks/submit_time:.0f} ops/sec)")
+    print(
+        f"Submit {n_tasks} tasks:      {submit_time*1000:.2f} ms ({n_tasks/submit_time:.0f} ops/sec)"
+    )
 
     # Get runnable benchmark
     start = time.perf_counter()
@@ -74,7 +84,9 @@ def benchmark_rust():
     for task_id in runnable:
         sched.complete_task(task_id)
     complete_time = time.perf_counter() - start
-    print(f"Complete {len(runnable)} tasks:   {complete_time*1000:.2f} ms ({len(runnable)/complete_time:.0f} ops/sec)")
+    print(
+        f"Complete {len(runnable)} tasks:   {complete_time*1000:.2f} ms ({len(runnable)/complete_time:.0f} ops/sec)"
+    )
 
     stats = sched.stats()
     print(f"\nScheduler stats: completed={stats.completed_count}")
@@ -98,30 +110,38 @@ def benchmark_python():
     n_allocs = 10000
     start = time.perf_counter()
     blocks = []
-    for i in range(n_allocs):
+    for _ in range(n_allocs):
         block = pool.allocate(4096)
         blocks.append(block)
     alloc_time = time.perf_counter() - start
-    print(f"Allocate {n_allocs} blocks:  {alloc_time*1000:.2f} ms ({n_allocs/alloc_time:.0f} ops/sec)")
+    print(
+        f"Allocate {n_allocs} blocks:  {alloc_time*1000:.2f} ms ({n_allocs/alloc_time:.0f} ops/sec)"
+    )
 
     # Free benchmark
     start = time.perf_counter()
     for block in blocks:
         pool.free(block)
     free_time = time.perf_counter() - start
-    print(f"Free {n_allocs} blocks:      {free_time*1000:.2f} ms ({n_allocs/free_time:.0f} ops/sec)")
+    print(
+        f"Free {n_allocs} blocks:      {free_time*1000:.2f} ms ({n_allocs/free_time:.0f} ops/sec)"
+    )
 
     # Reuse benchmark (allocate from free list)
     start = time.perf_counter()
     blocks = []
-    for i in range(n_allocs):
+    for _ in range(n_allocs):
         block = pool.allocate(4096)
         blocks.append(block)
     reuse_time = time.perf_counter() - start
-    print(f"Reuse {n_allocs} blocks:     {reuse_time*1000:.2f} ms ({n_allocs/reuse_time:.0f} ops/sec)")
+    print(
+        f"Reuse {n_allocs} blocks:     {reuse_time*1000:.2f} ms ({n_allocs/reuse_time:.0f} ops/sec)"
+    )
 
     stats = pool.stats()
-    print(f"\nPool stats: reuse_count={stats['reuse_count']}, cudamalloc_count={stats['cudamalloc_count']}")
+    print(
+        f"\nPool stats: reuse_count={stats['reuse_count']}, cudamalloc_count={stats['cudamalloc_count']}"
+    )
 
     # Cleanup
     for block in blocks:
@@ -136,12 +156,14 @@ def benchmark_python():
     n_tasks = 10000
     start = time.perf_counter()
     tasks = []
-    for i in range(n_tasks):
+    for _ in range(n_tasks):
         task = Task(fn=lambda: None, memory=1024)
         sched.submit(task)
         tasks.append(task)
     submit_time = time.perf_counter() - start
-    print(f"Submit {n_tasks} tasks:      {submit_time*1000:.2f} ms ({n_tasks/submit_time:.0f} ops/sec)")
+    print(
+        f"Submit {n_tasks} tasks:      {submit_time*1000:.2f} ms ({n_tasks/submit_time:.0f} ops/sec)"
+    )
 
     # Note: Python scheduler has different API (run_once, etc.)
     print("(Python scheduler uses different API - skipping detailed benchmark)")

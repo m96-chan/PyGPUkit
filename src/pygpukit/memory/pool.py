@@ -23,9 +23,10 @@ _USE_RUST = os.environ.get("PYGPUKIT_USE_RUST", "1").lower() in ("1", "true", "y
 
 # Try to import Rust backend
 _RUST_AVAILABLE = False
-_rust_module = None
+_rust_module: Any = None
 try:
-    import _pygpukit_rust._pygpukit_rust as _rust_module
+    import _pygpukit_rust._pygpukit_rust as _rust_module  # noqa: F811
+
     _RUST_AVAILABLE = True
 except ImportError:
     pass
@@ -146,6 +147,7 @@ class MemoryPool:
         """Get the backend for CUDA operations."""
         if self._backend is None:
             from pygpukit.core.backend import get_backend
+
             self._backend = get_backend()
         return self._backend
 
@@ -223,7 +225,9 @@ class MemoryPool:
                 device_ptr = block_id  # CPU simulation fallback
 
             # Update Rust with device pointer
-            self._rust_pool.set_device_ptr(block_id, device_ptr if isinstance(device_ptr, int) else block_id)
+            self._rust_pool.set_device_ptr(
+                block_id, device_ptr if isinstance(device_ptr, int) else block_id
+            )
 
             # Create Python MemoryBlock
             block = MemoryBlock(
@@ -379,9 +383,8 @@ class MemoryPool:
             try:
                 # Read data from GPU
                 from pygpukit.core.dtypes import float32
-                host_data = backend.copy_device_to_host(
-                    block.device_ptr, block.size, float32
-                )
+
+                host_data = backend.copy_device_to_host(block.device_ptr, block.size, float32)
                 block.host_data = host_data
             except Exception:
                 # For CPU simulation, data is already on host
@@ -439,7 +442,9 @@ class MemoryPool:
             # Update tracking
             if self._use_rust:
                 self._rust_pool.restore(block.id)
-                self._rust_pool.set_device_ptr(block.id, device_ptr if isinstance(device_ptr, int) else block.id)
+                self._rust_pool.set_device_ptr(
+                    block.id, device_ptr if isinstance(device_ptr, int) else block.id
+                )
             elif block.id in self._active:
                 self._used += block.size
 
@@ -476,9 +481,7 @@ class MemoryPool:
             if block.host_data is not None:
                 result: np.ndarray = block.host_data.view(dtype)
                 return result
-            zeros_result: np.ndarray = np.zeros(
-                block.size // np.dtype(dtype).itemsize, dtype=dtype
-            )
+            zeros_result: np.ndarray = np.zeros(block.size // np.dtype(dtype).itemsize, dtype=dtype)
             return zeros_result
 
         backend = self._get_backend()

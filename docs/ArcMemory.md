@@ -1,7 +1,7 @@
 oso
 # PyGPUkit Memory Manager Architecture — Deep Technical Notes for LLM Implementation
 
-This document explains the internal architecture, constraints, and required hacks to implement the **PyGPUkit Memory Manager**.  
+This document explains the internal architecture, constraints, and required hacks to implement the **PyGPUkit Memory Manager**.
 It is written specifically for **AI code generators (ClaudeCode / ChatGPT Code)** to avoid common CUDA misunderstandings and produce **correct, safe, deterministic GPU memory handling**.
 
 ---
@@ -18,7 +18,7 @@ The Memory Manager provides:
 - **Pinned host memory cache**
 - **Per-slice memory quotas (used by Scheduler)**
 
-CUDA does **not** support per-task or per-stream memory limits.  
+CUDA does **not** support per-task or per-stream memory limits.
 Everything must be implemented fully in software.
 
 ---
@@ -26,23 +26,23 @@ Everything must be implemented fully in software.
 # 2. CUDA Memory Model Constraints (LLM MUST understand)
 
 ### ❌ CUDA cannot:
-- Limit memory usage per task  
-- Track memory ownership  
-- Evict GPU memory automatically  
-- Provide “private GPU memory spaces”  
-- Enforce quotas  
+- Limit memory usage per task
+- Track memory ownership
+- Evict GPU memory automatically
+- Provide “private GPU memory spaces”
+- Enforce quotas
 
 ### ✔ CUDA *can*:
-- Allocate/free raw memory  
+- Allocate/free raw memory
 - Copy to/from host (sync or async)
-- Report total/free memory (`cudaMemGetInfo`)  
+- Report total/free memory (`cudaMemGetInfo`)
 
 Therefore the Memory Manager must simulate:
 
-- isolation  
-- quotas  
-- eviction  
-- overcommit  
+- isolation
+- quotas
+- eviction
+- overcommit
 
 This simulation is the core of PyGPUkit’s Memory Engine.
 
@@ -64,7 +64,7 @@ This ensures strict QoS.
 ---
 
 ## 3.2 Soft Reservation (Overcommit)
-Soft reservation does **not** immediately allocate the full requested memory.  
+Soft reservation does **not** immediately allocate the full requested memory.
 Instead:
 
 - Task declares reservation (metadata only)
@@ -167,21 +167,21 @@ This process must be **transparent** to the user API.
 
 Memory Manager provides:
 
-### → `can_reserve(memory, policy)`  
+### → `can_reserve(memory, policy)`
 Used during **admission control**.
 
-### → `pressure_level()`  
+### → `pressure_level()`
 Used for scheduling decisions when bandwidth throttling interacts with memory load.
 
-### → `evict_for_bandwidth()`  
+### → `evict_for_bandwidth()`
 If Scheduler needs to reduce memory footprint to ensure other tasks can run.
 
 Scheduler and Memory Manager communicate via:
 
-- memory quota  
-- slice assignment  
-- eviction priority  
-- task lifecycle hooks  
+- memory quota
+- slice assignment
+- eviction priority
+- task lifecycle hooks
 
 ---
 
@@ -220,9 +220,9 @@ Easy to implement and sufficient for early versions.
 ---
 
 ## **9.2 Free-List Allocator (future)**
-- Buddy allocator  
-- Best-fit / first-fit strategies  
-- Coalescing of free blocks  
+- Buddy allocator
+- Best-fit / first-fit strategies
+- Coalescing of free blocks
 
 LLMs should not attempt implementing this prematurely unless asked.
 
@@ -253,22 +253,22 @@ Actions:
 
 # 11. LLM Pitfalls (Critical to Avoid)
 
-### ❌ Pitfall 1: Assuming CUDA supports per-task memory control  
+### ❌ Pitfall 1: Assuming CUDA supports per-task memory control
 → Must simulate with pools.
 
-### ❌ Pitfall 2: Forgetting to update `last_access`  
+### ❌ Pitfall 2: Forgetting to update `last_access`
 → LRU eviction becomes ineffective.
 
-### ❌ Pitfall 3: Evicting arrays that are *currently in kernel use*  
+### ❌ Pitfall 3: Evicting arrays that are *currently in kernel use*
 → Must block or mark “locked”.
 
-### ❌ Pitfall 4: Allocating pinned host memory too often  
+### ❌ Pitfall 4: Allocating pinned host memory too often
 → Must reuse pinned buffers when possible.
 
-### ❌ Pitfall 5: Assuming unified memory solves this  
+### ❌ Pitfall 5: Assuming unified memory solves this
 → Unified memory has unpredictable migration latency → unacceptable.
 
-### ❌ Pitfall 6: Eviction deadlocks  
+### ❌ Pitfall 6: Eviction deadlocks
 → Must ensure eviction always frees enough memory or fail gracefully.
 
 ---
@@ -334,12 +334,12 @@ def access(block):
 
 The PyGPUkit Memory Manager is a **software-emulated GPU memory virtualization system** built from:
 
-- memory pools  
-- soft/hard reservations  
-- LRU eviction  
-- pinned-memory backing store  
-- rehydration  
-- per-slice quotas  
+- memory pools
+- soft/hard reservations
+- LRU eviction
+- pinned-memory backing store
+- rehydration
+- per-slice quotas
 
 CUDA does **not** provide any of these primitives; all must be implemented on the host side.
 

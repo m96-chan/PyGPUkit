@@ -17,6 +17,7 @@ from pygpukit.scheduler.core import (
 # Import Rust implementation if available
 try:
     import _pygpukit_rust._pygpukit_rust as _rust
+
     RustScheduler = _rust.Scheduler
     RustTaskMeta = _rust.TaskMeta
     RustTaskState = _rust.scheduler.TaskState

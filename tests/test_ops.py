@@ -247,11 +247,11 @@ class TestMatmulTiled:
     @pytest.mark.parametrize(
         "m,k,n",
         [
-            (32, 64, 32),   # Aligned rectangular
+            (32, 64, 32),  # Aligned rectangular
             (64, 32, 128),  # Aligned rectangular
-            (33, 65, 17),   # Non-aligned rectangular
+            (33, 65, 17),  # Non-aligned rectangular
             (100, 50, 75),  # Non-aligned rectangular
-            (128, 256, 64), # Large aligned
+            (128, 256, 64),  # Large aligned
         ],
     )
     def test_matmul_rectangular(self, m: int, k: int, n: int):

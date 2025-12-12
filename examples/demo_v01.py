@@ -79,13 +79,13 @@ print("\n" + "-" * 60)
 print("4. JIT Kernel Compilation")
 print("-" * 60)
 
-src = '''
+src = """
 extern "C" __global__
 void scale(float* x, float factor, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) x[idx] *= factor;
 }
-'''
+"""
 kernel = gp.jit(src, func="scale")
 print(f"Compiled kernel: {kernel}")
 print(f"  name: {kernel.name}")
