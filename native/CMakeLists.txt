@@ -56,7 +56,8 @@ set_target_properties(_pygpukit_native PROPERTIES
 )
 
 # Install the module to the correct location for scikit-build-core
+# scikit-build-core's wheel.install-dir already sets the base to pygpukit
 install(TARGETS _pygpukit_native
-    LIBRARY DESTINATION pygpukit
-    RUNTIME DESTINATION pygpukit
+    LIBRARY DESTINATION .
+    RUNTIME DESTINATION .
 )

@@ -22,8 +22,30 @@ if TYPE_CHECKING:
 
 # Try to import native module
 _native_module: Any = None
+
+
+def _add_cuda_dll_directory() -> None:
+    """Add CUDA DLL directory on Windows (v0.1.x requires CUDA Toolkit).
+
+    Note: v0.2 will migrate to driver-only mode with bundled NVRTC DLL.
+    For now, we require CUDA Toolkit installation.
+    """
+    import sys
+
+    if sys.platform == "win32":
+        cuda_path = os.environ.get("CUDA_PATH")
+        if cuda_path:
+            bin_path = os.path.join(cuda_path, "bin")
+            if os.path.isdir(bin_path):
+                try:
+                    os.add_dll_directory(bin_path)
+                except (AttributeError, OSError):
+                    pass
+
+
 try:
-    import _pygpukit_native  # type: ignore[import-not-found]
+    _add_cuda_dll_directory()
+    from pygpukit import _pygpukit_native  # type: ignore[import-not-found]
 
     _native_module = _pygpukit_native
 except ImportError:

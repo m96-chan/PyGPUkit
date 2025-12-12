@@ -4,9 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      test_only:
+        description: 'Test build without publishing'
+        type: boolean
+        default: false
 
 jobs:
-  # Build source distribution (no CUDA required)
+  # Build source distribution
   build-sdist:
     runs-on: ubuntu-latest
 
@@ -16,7 +22,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install build dependencies
         run: |
@@ -32,32 +38,29 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  # Build CUDA wheels for Linux (for GitHub Release only, not PyPI)
-  # Note: These use linux_x86_64 tag which PyPI may reject
+  # Build CUDA wheel for Linux (Python 3.12)
   build-linux:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
           cuda: "12.6.0"
           method: "network"
+          linux-local-args: '["--toolkit"]'
 
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build scikit-build-core pybind11 ninja cmake
+          pip install build scikit-build-core pybind11 ninja cmake auditwheel patchelf
 
       - name: Build wheel
         run: |
@@ -65,28 +68,57 @@ jobs:
         env:
           CMAKE_CUDA_ARCHITECTURES: "70;75;80;86;89;90"
 
+      - name: Show wheel info before repair
+        run: |
+          ls -la dist/
+          python -m zipfile -l dist/*.whl | head -20
+
+      - name: Repair wheel with auditwheel
+        run: |
+          # Repair the wheel, excluding CUDA libraries (user must have CUDA driver)
+          auditwheel repair dist/*.whl \
+            --wheel-dir dist-repaired \
+            --exclude libcudart.so.12 \
+            --exclude libcuda.so.1 \
+            --exclude libnvrtc.so.12 \
+            --exclude libnvrtc-builtins.so.12.6 \
+            --plat manylinux_2_35_x86_64
+
+          # Replace original wheel with repaired one
+          rm dist/*.whl
+          mv dist-repaired/*.whl dist/
+
+      - name: Show wheel info after repair
+        run: |
+          ls -la dist/
+          python -m zipfile -l dist/*.whl | head -20
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-linux-py${{ matrix.python-version }}
+          name: wheel-linux-py312
           path: dist/*.whl
 
-  # Build CUDA wheels for Windows (self-hosted runner with CUDA pre-installed)
+  # Build CUDA wheel for Windows (Python 3.12)
   build-windows:
     runs-on: [self-hosted, Windows, X64, cuda]
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }} with pyenv
+      - name: Set up Python 3.12
         shell: pwsh
         run: |
-          pyenv install ${{ matrix.python-version }} --skip-existing
-          pyenv local ${{ matrix.python-version }}
+          pyenv install 3.12 --skip-existing
+          pyenv local 3.12
           python --version
+
+      - name: Clean previous builds
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+          Get-ChildItem -Filter "*.egg-info" -Directory | Remove-Item -Recurse -Force
 
       - name: Install build dependencies
         shell: pwsh
@@ -101,16 +133,25 @@ jobs:
         env:
           CMAKE_CUDA_ARCHITECTURES: "86"
 
+      - name: Verify wheel
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/*.whl | ForEach-Object {
+            Write-Host "Built: $($_.Name)"
+            python -m zipfile -l $_.FullName | Select-Object -First 20
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-windows-py${{ matrix.python-version }}
+          name: wheel-windows-py312
           path: dist/*.whl
 
-  # Publish to TestPyPI (sdist + Windows wheels only)
+  # Publish to TestPyPI first
   publish-testpypi:
     runs-on: ubuntu-latest
-    needs: [build-windows, build-sdist]
+    needs: [build-linux, build-windows, build-sdist]
+    if: github.event_name == 'push' || !inputs.test_only
     environment: testpypi
     permissions:
       id-token: write
@@ -122,15 +163,22 @@ jobs:
           name: sdist
           path: dist
 
-      - name: Download Windows wheels
+      - name: Download Linux wheel
         uses: actions/download-artifact@v4
         with:
-          pattern: wheel-windows-*
+          name: wheel-linux-py312
           path: dist
-          merge-multiple: true
+
+      - name: Download Windows wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-windows-py312
+          path: dist
 
       - name: List dist contents
-        run: ls -la dist/
+        run: |
+          echo "=== Artifacts to publish ==="
+          ls -la dist/
 
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -138,10 +186,11 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
 
-  # Publish to PyPI (sdist + Windows wheels only)
+  # Publish to PyPI after TestPyPI succeeds
   publish-pypi:
     runs-on: ubuntu-latest
     needs: publish-testpypi
+    if: github.event_name == 'push' || !inputs.test_only
     environment: pypi
     permissions:
       id-token: write
@@ -153,22 +202,33 @@ jobs:
           name: sdist
           path: dist
 
-      - name: Download Windows wheels
+      - name: Download Linux wheel
         uses: actions/download-artifact@v4
         with:
-          pattern: wheel-windows-*
+          name: wheel-linux-py312
           path: dist
-          merge-multiple: true
+
+      - name: Download Windows wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-windows-py312
+          path: dist
+
+      - name: List dist contents
+        run: |
+          echo "=== Artifacts to publish ==="
+          ls -la dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
 
-  # Create GitHub Release (includes all wheels for manual download)
+  # Create GitHub Release
   github-release:
     runs-on: ubuntu-latest
-    needs: [build-linux, build-windows, build-sdist, publish-pypi]
+    needs: [build-sdist, build-linux, build-windows, publish-pypi]
+    if: github.event_name == 'push'
     permissions:
       contents: write
 

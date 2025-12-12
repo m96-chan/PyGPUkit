@@ -103,6 +103,27 @@ Python loads a shared library:
 
 The GPU backend is NOT a Python package like cuda-python.
 
+### 10. DLL Loading Model (Windows)
+
+#### v0.1.x (Current):
+- **Requires CUDA Toolkit installation**
+- Loads DLLs from `CUDA_PATH/bin`
+- Links against `cudart`, `cuda_driver`, `nvrtc`
+
+#### v0.2 (Planned - Driver-Only Mode):
+**PyGPUkit will NOT depend on CUDA Toolkit installation.**
+
+1. **NVRTC DLL** (`nvrtc64_xx_0.dll`) will be **shipped inside the wheel**
+   - Load via `os.add_dll_directory(<package_dir>)`
+   - NOT from `CUDA_PATH/bin`
+
+2. **CUDA Driver** (`nvcuda.dll`) is provided by **NVIDIA GPU drivers**
+   - Always available if user has NVIDIA GPU
+   - Do NOT search CUDA Toolkit paths
+
+3. **cudart64_xx.dll will NOT be used**
+   - PyGPUkit will use CUDA Driver API + NVRTC only
+
 ### 9. Correct Error Messages
 
 **NEVER generate:**
