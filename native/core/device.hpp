@@ -40,4 +40,11 @@ int get_current_device();
 // Synchronize current device
 void device_synchronize();
 
+// Validate device compute capability (requires SM >= 80)
+// Throws std::runtime_error if device is too old
+void validate_compute_capability(int device_id = 0);
+
+// Get SM version as integer (e.g., 86 for SM 8.6)
+int get_sm_version(int device_id = 0);
+
 } // namespace pygpukit

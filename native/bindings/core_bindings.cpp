@@ -44,6 +44,11 @@ void init_core_bindings(py::module_& m) {
     m.def("set_device", &set_device, py::arg("device_id"), "Set current device");
     m.def("get_current_device", &get_current_device, "Get current device");
     m.def("device_synchronize", &device_synchronize, "Synchronize current device");
+    m.def("get_sm_version", &get_sm_version, py::arg("device_id") = 0,
+          "Get SM version as integer (e.g., 86 for SM 8.6)");
+    m.def("validate_compute_capability", &validate_compute_capability,
+          py::arg("device_id") = 0,
+          "Validate device compute capability (requires SM >= 80)");
 
     // GPUArray class
     py::class_<GPUArray>(m, "GPUArray")

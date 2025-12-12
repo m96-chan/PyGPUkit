@@ -18,11 +18,16 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # Set default CUDA architectures if not specified
+# PyGPUkit requires SM >= 80 (Ampere and newer)
+# Older architectures (Pascal/Turing) are NOT supported
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
 endif()
 
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+
+# Ampere-optimized compiler flags
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math")
 
 # Build single pybind11 module with all sources
 pybind11_add_module(_pygpukit_native
