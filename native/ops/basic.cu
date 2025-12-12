@@ -1,6 +1,29 @@
 #include "basic.cuh"
-#include <cuda_runtime.h>
 #include <stdexcept>
+
+#ifdef PYGPUKIT_DRIVER_ONLY
+#include "../core/driver_context.hpp"
+#include <cuda.h>
+
+namespace pygpukit {
+namespace ops {
+
+namespace {
+
+void check_driver_error(CUresult result, const char* msg) {
+    if (result != CUDA_SUCCESS) {
+        const char* error_str = nullptr;
+        cuGetErrorString(result, &error_str);
+        throw CudaError(std::string(msg) + ": " + (error_str ? error_str : "unknown error"));
+    }
+}
+
+void sync_and_check(const char* msg) {
+    check_driver_error(cuCtxSynchronize(), msg);
+}
+
+#else
+#include <cuda_runtime.h>
 
 namespace pygpukit {
 namespace ops {
@@ -12,6 +35,13 @@ void check_cuda_error(cudaError_t err, const char* msg) {
         throw CudaError(std::string(msg) + ": " + cudaGetErrorString(err));
     }
 }
+
+void sync_and_check(const char* msg) {
+    check_cuda_error(cudaGetLastError(), msg);
+    check_cuda_error(cudaDeviceSynchronize(), msg);
+}
+
+#endif // PYGPUKIT_DRIVER_ONLY
 
 void validate_same_shape(const GPUArray& a, const GPUArray& b, const char* op_name) {
     if (a.shape() != b.shape()) {
@@ -109,8 +139,7 @@ void add(const GPUArray& a, const GPUArray& b, GPUArray& c) {
             break;
     }
 
-    check_cuda_error(cudaGetLastError(), "add kernel launch failed");
-    check_cuda_error(cudaDeviceSynchronize(), "add kernel sync failed");
+    sync_and_check("add kernel failed");
 }
 
 GPUArray add(const GPUArray& a, const GPUArray& b) {
@@ -195,8 +224,7 @@ void mul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
             break;
     }
 
-    check_cuda_error(cudaGetLastError(), "mul kernel launch failed");
-    check_cuda_error(cudaDeviceSynchronize(), "mul kernel sync failed");
+    sync_and_check("mul kernel failed");
 }
 
 GPUArray mul(const GPUArray& a, const GPUArray& b) {
@@ -209,24 +237,33 @@ GPUArray mul(const GPUArray& a, const GPUArray& b) {
 }
 
 // ============================================================================
-// Matmul kernels - Ampere Optimized (SM >= 80)
+// Matmul kernels - Tiled with Shared Memory and Double Buffering
 // ============================================================================
 //
-// Optimization Strategy for Ampere (RTX 30XX, A100) and newer:
-// - L2-friendly memory access patterns (large L2 cache: 6MB on 3090 Ti)
-// - Use __ldg() for read-only texture cache path
-// - Avoid shared memory tiling (L2 cache handles it better)
-// - No __syncthreads() overhead
-// - Use __restrict__ for compiler optimization
+// Two implementations:
+// 1. L2-optimized kernel: For small matrices (<2048), uses __ldg() cache
+// 2. Tiled kernel: For large matrices (>=2048), uses shared memory tiling
 //
-// Target Performance:
-// - RTX 3090: 2.1-2.3 TFLOPS (FP32 naive)
-// - For higher performance, use Tensor Cores (MMA kernels) or cuBLAS
+// Tiled kernel features:
+// - Configurable TILE_M, TILE_N, TILE_K
+// - Double-buffered prefetch to overlap compute with memory loads
+// - Bank-conflict-free shared memory access
+// - Coalesced global memory access
 //
-// Legacy tiled kernels are REMOVED per optimization directives.
 // ============================================================================
 
+// Small matrix kernel block size
 #define BLOCK_SIZE 16
+
+// Tiled matmul configuration
+#define TILE_M 64      // Output tile height
+#define TILE_N 64      // Output tile width
+#define TILE_K 16      // Reduction tile depth
+#define THREAD_M 4     // Elements per thread in M dimension
+#define THREAD_N 4     // Elements per thread in N dimension
+
+// Threshold for switching to tiled kernel
+#define TILED_MATMUL_THRESHOLD 2048
 
 // L2-optimized matmul kernel for FP32 (Ampere+)
 // Uses __ldg() for read-only cache and __restrict__ for aliasing hints
@@ -275,6 +312,320 @@ __global__ void matmul_f64_l2opt_kernel(
     }
 }
 
+// ============================================================================
+// Tiled Matmul with Shared Memory and Double Buffering (FP32)
+// ============================================================================
+//
+// Each thread block computes a TILE_M x TILE_N output tile.
+// Each thread computes THREAD_M x THREAD_N elements.
+// Block dimensions: (TILE_N / THREAD_N, TILE_M / THREAD_M) = (16, 16) = 256 threads
+//
+// Double buffering:
+// - While computing with data in shared memory buffer 0
+// - Prefetch next tile into shared memory buffer 1
+// - Swap buffers each iteration
+//
+__global__ void matmul_f32_tiled_kernel(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    size_t M, size_t N, size_t K
+) {
+    // Thread and block indices
+    const int tx = threadIdx.x;  // 0..15 (TILE_N / THREAD_N)
+    const int ty = threadIdx.y;  // 0..15 (TILE_M / THREAD_M)
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+
+    // Shared memory for double buffering
+    // Pad by 1 to avoid bank conflicts
+    __shared__ float As[2][TILE_K][TILE_M + 1];
+    __shared__ float Bs[2][TILE_K][TILE_N + 1];
+
+    // Thread's output tile (THREAD_M x THREAD_N elements)
+    float accum[THREAD_M][THREAD_N] = {{0.0f}};
+
+    // Global row/col start for this thread block
+    const size_t block_row_start = by * TILE_M;
+    const size_t block_col_start = bx * TILE_N;
+
+    // Linear thread ID within block
+    const int tid = ty * blockDim.x + tx;
+    const int num_threads = blockDim.x * blockDim.y;  // 256
+
+    // Number of tiles along K dimension
+    const int num_k_tiles = (K + TILE_K - 1) / TILE_K;
+
+    // Current buffer index for double buffering
+    int curr_buf = 0;
+
+    // Prefetch first tile into buffer 0
+    {
+        // Load A tile: TILE_M x TILE_K elements, 256 threads
+        // Each thread loads multiple elements
+        const int a_loads_per_thread = (TILE_M * TILE_K + num_threads - 1) / num_threads;
+        for (int i = 0; i < a_loads_per_thread; ++i) {
+            int load_idx = tid + i * num_threads;
+            if (load_idx < TILE_M * TILE_K) {
+                int a_row = load_idx / TILE_K;
+                int a_col = load_idx % TILE_K;
+                size_t global_row = block_row_start + a_row;
+                size_t global_col = a_col;
+                if (global_row < M && global_col < K) {
+                    As[0][a_col][a_row] = A[global_row * K + global_col];
+                } else {
+                    As[0][a_col][a_row] = 0.0f;
+                }
+            }
+        }
+
+        // Load B tile: TILE_K x TILE_N elements
+        const int b_loads_per_thread = (TILE_K * TILE_N + num_threads - 1) / num_threads;
+        for (int i = 0; i < b_loads_per_thread; ++i) {
+            int load_idx = tid + i * num_threads;
+            if (load_idx < TILE_K * TILE_N) {
+                int b_row = load_idx / TILE_N;
+                int b_col = load_idx % TILE_N;
+                size_t global_row = b_row;
+                size_t global_col = block_col_start + b_col;
+                if (global_row < K && global_col < N) {
+                    Bs[0][b_row][b_col] = B[global_row * N + global_col];
+                } else {
+                    Bs[0][b_row][b_col] = 0.0f;
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    // Main loop over K tiles with double buffering
+    for (int tile_k = 0; tile_k < num_k_tiles; ++tile_k) {
+        int next_buf = 1 - curr_buf;
+
+        // Prefetch next tile (if not the last tile)
+        if (tile_k + 1 < num_k_tiles) {
+            size_t k_offset = (tile_k + 1) * TILE_K;
+
+            // Load A tile
+            const int a_loads_per_thread = (TILE_M * TILE_K + num_threads - 1) / num_threads;
+            for (int i = 0; i < a_loads_per_thread; ++i) {
+                int load_idx = tid + i * num_threads;
+                if (load_idx < TILE_M * TILE_K) {
+                    int a_row = load_idx / TILE_K;
+                    int a_col = load_idx % TILE_K;
+                    size_t global_row = block_row_start + a_row;
+                    size_t global_col = k_offset + a_col;
+                    if (global_row < M && global_col < K) {
+                        As[next_buf][a_col][a_row] = A[global_row * K + global_col];
+                    } else {
+                        As[next_buf][a_col][a_row] = 0.0f;
+                    }
+                }
+            }
+
+            // Load B tile
+            const int b_loads_per_thread = (TILE_K * TILE_N + num_threads - 1) / num_threads;
+            for (int i = 0; i < b_loads_per_thread; ++i) {
+                int load_idx = tid + i * num_threads;
+                if (load_idx < TILE_K * TILE_N) {
+                    int b_row = load_idx / TILE_N;
+                    int b_col = load_idx % TILE_N;
+                    size_t global_row = k_offset + b_row;
+                    size_t global_col = block_col_start + b_col;
+                    if (global_row < K && global_col < N) {
+                        Bs[next_buf][b_row][b_col] = B[global_row * N + global_col];
+                    } else {
+                        Bs[next_buf][b_row][b_col] = 0.0f;
+                    }
+                }
+            }
+        }
+
+        // Compute using current buffer
+        // Each thread computes THREAD_M x THREAD_N elements
+        #pragma unroll
+        for (int k = 0; k < TILE_K; ++k) {
+            // Load A fragment for this thread
+            float a_frag[THREAD_M];
+            #pragma unroll
+            for (int m = 0; m < THREAD_M; ++m) {
+                a_frag[m] = As[curr_buf][k][ty * THREAD_M + m];
+            }
+
+            // Load B fragment and compute
+            #pragma unroll
+            for (int n = 0; n < THREAD_N; ++n) {
+                float b_val = Bs[curr_buf][k][tx * THREAD_N + n];
+                #pragma unroll
+                for (int m = 0; m < THREAD_M; ++m) {
+                    accum[m][n] += a_frag[m] * b_val;
+                }
+            }
+        }
+
+        // Sync before swapping buffers
+        __syncthreads();
+        curr_buf = next_buf;
+    }
+
+    // Write output
+    #pragma unroll
+    for (int m = 0; m < THREAD_M; ++m) {
+        size_t out_row = block_row_start + ty * THREAD_M + m;
+        if (out_row < M) {
+            #pragma unroll
+            for (int n = 0; n < THREAD_N; ++n) {
+                size_t out_col = block_col_start + tx * THREAD_N + n;
+                if (out_col < N) {
+                    C[out_row * N + out_col] = accum[m][n];
+                }
+            }
+        }
+    }
+}
+
+// Tiled Matmul for FP64
+__global__ void matmul_f64_tiled_kernel(
+    const double* __restrict__ A,
+    const double* __restrict__ B,
+    double* __restrict__ C,
+    size_t M, size_t N, size_t K
+) {
+    // Thread and block indices
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+
+    // Shared memory (smaller tiles for FP64 due to memory constraints)
+    constexpr int TILE_K_F64 = 8;
+    __shared__ double As[2][TILE_K_F64][TILE_M + 1];
+    __shared__ double Bs[2][TILE_K_F64][TILE_N + 1];
+
+    double accum[THREAD_M][THREAD_N] = {{0.0}};
+
+    const size_t block_row_start = by * TILE_M;
+    const size_t block_col_start = bx * TILE_N;
+
+    const int tid = ty * blockDim.x + tx;
+    const int num_threads = blockDim.x * blockDim.y;
+
+    const int num_k_tiles = (K + TILE_K_F64 - 1) / TILE_K_F64;
+
+    int curr_buf = 0;
+
+    // Prefetch first tile
+    {
+        const int a_loads_per_thread = (TILE_M * TILE_K_F64 + num_threads - 1) / num_threads;
+        for (int i = 0; i < a_loads_per_thread; ++i) {
+            int load_idx = tid + i * num_threads;
+            if (load_idx < TILE_M * TILE_K_F64) {
+                int a_row = load_idx / TILE_K_F64;
+                int a_col = load_idx % TILE_K_F64;
+                size_t global_row = block_row_start + a_row;
+                size_t global_col = a_col;
+                if (global_row < M && global_col < K) {
+                    As[0][a_col][a_row] = A[global_row * K + global_col];
+                } else {
+                    As[0][a_col][a_row] = 0.0;
+                }
+            }
+        }
+
+        const int b_loads_per_thread = (TILE_K_F64 * TILE_N + num_threads - 1) / num_threads;
+        for (int i = 0; i < b_loads_per_thread; ++i) {
+            int load_idx = tid + i * num_threads;
+            if (load_idx < TILE_K_F64 * TILE_N) {
+                int b_row = load_idx / TILE_N;
+                int b_col = load_idx % TILE_N;
+                size_t global_row = b_row;
+                size_t global_col = block_col_start + b_col;
+                if (global_row < K && global_col < N) {
+                    Bs[0][b_row][b_col] = B[global_row * N + global_col];
+                } else {
+                    Bs[0][b_row][b_col] = 0.0;
+                }
+            }
+        }
+    }
+    __syncthreads();
+
+    for (int tile_k = 0; tile_k < num_k_tiles; ++tile_k) {
+        int next_buf = 1 - curr_buf;
+
+        if (tile_k + 1 < num_k_tiles) {
+            size_t k_offset = (tile_k + 1) * TILE_K_F64;
+
+            const int a_loads_per_thread = (TILE_M * TILE_K_F64 + num_threads - 1) / num_threads;
+            for (int i = 0; i < a_loads_per_thread; ++i) {
+                int load_idx = tid + i * num_threads;
+                if (load_idx < TILE_M * TILE_K_F64) {
+                    int a_row = load_idx / TILE_K_F64;
+                    int a_col = load_idx % TILE_K_F64;
+                    size_t global_row = block_row_start + a_row;
+                    size_t global_col = k_offset + a_col;
+                    if (global_row < M && global_col < K) {
+                        As[next_buf][a_col][a_row] = A[global_row * K + global_col];
+                    } else {
+                        As[next_buf][a_col][a_row] = 0.0;
+                    }
+                }
+            }
+
+            const int b_loads_per_thread = (TILE_K_F64 * TILE_N + num_threads - 1) / num_threads;
+            for (int i = 0; i < b_loads_per_thread; ++i) {
+                int load_idx = tid + i * num_threads;
+                if (load_idx < TILE_K_F64 * TILE_N) {
+                    int b_row = load_idx / TILE_N;
+                    int b_col = load_idx % TILE_N;
+                    size_t global_row = k_offset + b_row;
+                    size_t global_col = block_col_start + b_col;
+                    if (global_row < K && global_col < N) {
+                        Bs[next_buf][b_row][b_col] = B[global_row * N + global_col];
+                    } else {
+                        Bs[next_buf][b_row][b_col] = 0.0;
+                    }
+                }
+            }
+        }
+
+        #pragma unroll
+        for (int k = 0; k < TILE_K_F64; ++k) {
+            double a_frag[THREAD_M];
+            #pragma unroll
+            for (int m = 0; m < THREAD_M; ++m) {
+                a_frag[m] = As[curr_buf][k][ty * THREAD_M + m];
+            }
+
+            #pragma unroll
+            for (int n = 0; n < THREAD_N; ++n) {
+                double b_val = Bs[curr_buf][k][tx * THREAD_N + n];
+                #pragma unroll
+                for (int m = 0; m < THREAD_M; ++m) {
+                    accum[m][n] += a_frag[m] * b_val;
+                }
+            }
+        }
+
+        __syncthreads();
+        curr_buf = next_buf;
+    }
+
+    #pragma unroll
+    for (int m = 0; m < THREAD_M; ++m) {
+        size_t out_row = block_row_start + ty * THREAD_M + m;
+        if (out_row < M) {
+            #pragma unroll
+            for (int n = 0; n < THREAD_N; ++n) {
+                size_t out_col = block_col_start + tx * THREAD_N + n;
+                if (out_col < N) {
+                    C[out_row * N + out_col] = accum[m][n];
+                }
+            }
+        }
+    }
+}
+
 void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     validate_matmul_shapes(a, b, "matmul");
     validate_same_dtype(a, b, "matmul");
@@ -287,34 +638,66 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
-    // L2-optimized kernel for Ampere+ (SM >= 80)
-    dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 grid_size(
-        (N + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        (M + BLOCK_SIZE - 1) / BLOCK_SIZE
-    );
+    // Select kernel based on matrix size
+    // Use tiled kernel for large matrices (>= TILED_MATMUL_THRESHOLD)
+    bool use_tiled = (M >= TILED_MATMUL_THRESHOLD || N >= TILED_MATMUL_THRESHOLD || K >= TILED_MATMUL_THRESHOLD);
 
-    switch (a.dtype()) {
-        case DataType::Float32:
-            matmul_f32_l2opt_kernel<<<grid_size, block_size>>>(
-                static_cast<const float*>(a.data()),
-                static_cast<const float*>(b.data()),
-                static_cast<float*>(c.data()),
-                M, N, K);
-            break;
-        case DataType::Float64:
-            matmul_f64_l2opt_kernel<<<grid_size, block_size>>>(
-                static_cast<const double*>(a.data()),
-                static_cast<const double*>(b.data()),
-                static_cast<double*>(c.data()),
-                M, N, K);
-            break;
-        default:
-            throw std::runtime_error("matmul only supports float32 and float64");
+    if (use_tiled) {
+        // Tiled kernel with shared memory and double buffering
+        // Block size: (TILE_N / THREAD_N, TILE_M / THREAD_M) = (16, 16)
+        dim3 block_size(TILE_N / THREAD_N, TILE_M / THREAD_M);
+        dim3 grid_size(
+            (N + TILE_N - 1) / TILE_N,
+            (M + TILE_M - 1) / TILE_M
+        );
+
+        switch (a.dtype()) {
+            case DataType::Float32:
+                matmul_f32_tiled_kernel<<<grid_size, block_size>>>(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float64:
+                matmul_f64_tiled_kernel<<<grid_size, block_size>>>(
+                    static_cast<const double*>(a.data()),
+                    static_cast<const double*>(b.data()),
+                    static_cast<double*>(c.data()),
+                    M, N, K);
+                break;
+            default:
+                throw std::runtime_error("matmul only supports float32 and float64");
+        }
+    } else {
+        // L2-optimized kernel for small matrices (Ampere+)
+        dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
+        dim3 grid_size(
+            (N + BLOCK_SIZE - 1) / BLOCK_SIZE,
+            (M + BLOCK_SIZE - 1) / BLOCK_SIZE
+        );
+
+        switch (a.dtype()) {
+            case DataType::Float32:
+                matmul_f32_l2opt_kernel<<<grid_size, block_size>>>(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float64:
+                matmul_f64_l2opt_kernel<<<grid_size, block_size>>>(
+                    static_cast<const double*>(a.data()),
+                    static_cast<const double*>(b.data()),
+                    static_cast<double*>(c.data()),
+                    M, N, K);
+                break;
+            default:
+                throw std::runtime_error("matmul only supports float32 and float64");
+        }
     }
 
-    check_cuda_error(cudaGetLastError(), "matmul kernel launch failed");
-    check_cuda_error(cudaDeviceSynchronize(), "matmul kernel sync failed");
+    sync_and_check("matmul kernel failed");
 }
 
 GPUArray matmul(const GPUArray& a, const GPUArray& b) {

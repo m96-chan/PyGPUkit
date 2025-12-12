@@ -2,6 +2,10 @@
 #include "compiler.hpp"
 #include <cuda.h>
 
+#ifdef PYGPUKIT_DRIVER_ONLY
+#include "../core/driver_context.hpp"
+#endif
+
 namespace pygpukit {
 
 namespace {
@@ -16,12 +20,18 @@ void check_cuda_driver_error(CUresult result, const char* msg) {
 
 // Initialize CUDA driver API (called once)
 void ensure_cuda_initialized() {
+#ifdef PYGPUKIT_DRIVER_ONLY
+    // Use unified context manager in driver-only mode
+    driver::DriverContext::instance().set_current();
+#else
+    // Standard mode: use local initialization
     static bool initialized = false;
     if (!initialized) {
         CUresult result = cuInit(0);
         check_cuda_driver_error(result, "Failed to initialize CUDA driver");
         initialized = true;
     }
+#endif
 }
 
 } // anonymous namespace

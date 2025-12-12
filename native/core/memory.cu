@@ -1,8 +1,26 @@
 // CUDA kernels for memory operations
 #include "memory.hpp"
+
+#ifdef PYGPUKIT_DRIVER_ONLY
+#include "driver_context.hpp"
+#include <cuda.h>
+#else
 #include <cuda_runtime.h>
+#endif
 
 namespace pygpukit {
+
+namespace {
+
+void sync_device() {
+#ifdef PYGPUKIT_DRIVER_ONLY
+    cuCtxSynchronize();
+#else
+    cudaDeviceSynchronize();
+#endif
+}
+
+} // anonymous namespace
 
 // Kernel to fill array with ones (float32)
 __global__ void fill_ones_f32_kernel(float* data, size_t n) {
@@ -59,7 +77,7 @@ void fill_ones_impl(DevicePtr ptr, size_t count, DataType dtype) {
                 static_cast<int64_t*>(ptr), count);
             break;
     }
-    cudaDeviceSynchronize();
+    sync_device();
 }
 
 GPUArray ones(const std::vector<size_t>& shape, DataType dtype) {
