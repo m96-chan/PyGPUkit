@@ -45,7 +45,7 @@ def _add_cuda_dll_directory() -> None:
 
 try:
     _add_cuda_dll_directory()
-    from pygpukit import _pygpukit_native  # type: ignore[import-not-found]
+    from pygpukit import _pygpukit_native  # type: ignore[attr-defined]
 
     _native_module = _pygpukit_native
 except ImportError:

@@ -114,8 +114,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install build twine
 
-      - name: Build package
-        run: python -m build
+      - name: Build sdist (wheels built in release workflow with CUDA)
+        run: python -m build --sdist
 
       - name: Check package
         run: twine check dist/*
