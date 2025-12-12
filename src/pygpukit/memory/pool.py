@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from pygpukit.core.dtypes import DataType
+    pass
 
 
 @dataclass
@@ -263,7 +263,7 @@ class MemoryPool:
         freed = 0
         to_evict = []
 
-        for block_id, block in self._lru.items():
+        for _block_id, block in self._lru.items():
             if freed >= needed:
                 break
             to_evict.append(block)
@@ -380,7 +380,6 @@ class MemoryPool:
 
         backend = self._get_backend()
         try:
-            from pygpukit.core.dtypes import DataType
             # Convert numpy dtype to DataType
             if dtype == np.float32:
                 from pygpukit.core.dtypes import float32 as dt

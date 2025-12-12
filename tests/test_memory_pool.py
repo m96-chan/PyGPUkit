@@ -3,8 +3,8 @@
 TDD: These tests are written before the implementation.
 """
 
-import pytest
 import numpy as np
+import pytest
 
 
 class TestMemoryPoolBasic:
@@ -46,7 +46,7 @@ class TestMemoryPoolBasic:
         pool.free(block1)
 
         # Allocate same size - should reuse
-        block2 = pool.allocate(1024 * 1024)
+        _block2 = pool.allocate(1024 * 1024)
 
         # Should reuse the same block (no new cudaMalloc)
         assert pool.stats()["reuse_count"] >= 1
@@ -87,7 +87,7 @@ class TestMemoryPoolLRU:
 
         # Allocate multiple blocks (smaller to fit in quota)
         blocks = []
-        for i in range(4):
+        for _ in range(4):
             block = pool.allocate(1024 * 1024 * 2)  # 2 MB each = 8 MB total
             blocks.append(block)
 
@@ -96,7 +96,7 @@ class TestMemoryPoolLRU:
 
         # Force eviction by allocating more
         # Block[1] should be evicted first (oldest not touched)
-        new_block = pool.allocate(1024 * 1024 * 2)
+        pool.allocate(1024 * 1024 * 2)
 
         # When eviction is needed, LRU block should be evicted
         assert pool.stats()["eviction_count"] >= 1
@@ -132,15 +132,15 @@ class TestMemoryPoolIntegration:
 
     def test_gpuarray_uses_pool(self):
         """Test that GPUArray uses memory pool when available."""
+        from pygpukit import float32, zeros
         from pygpukit.memory import MemoryPool, set_default_pool
-        from pygpukit import zeros, float32
 
         pool = MemoryPool(quota=1024 * 1024 * 100)
         set_default_pool(pool)
 
         try:
             # Create GPUArray - should use pool
-            arr = zeros((1024, 1024), dtype=float32)
+            _arr = zeros((1024, 1024), dtype=float32)
 
             # Note: GPUArray integration not yet implemented
             # For now, just verify pool is working independently
@@ -150,15 +150,15 @@ class TestMemoryPoolIntegration:
 
     def test_multiple_arrays_share_pool(self):
         """Test that multiple GPUArrays share the same pool."""
+        from pygpukit import float32, zeros
         from pygpukit.memory import MemoryPool, set_default_pool
-        from pygpukit import zeros, float32
 
         pool = MemoryPool(quota=1024 * 1024 * 100)
         set_default_pool(pool)
 
         try:
-            arr1 = zeros((512, 512), dtype=float32)
-            arr2 = zeros((512, 512), dtype=float32)
+            _arr1 = zeros((512, 512), dtype=float32)
+            _arr2 = zeros((512, 512), dtype=float32)
 
             # Note: GPUArray integration not yet implemented
             # For now, just verify pool is working independently
@@ -173,6 +173,7 @@ class TestMemoryPoolThreadSafety:
     def test_concurrent_allocations(self):
         """Test thread-safe allocations."""
         import threading
+
         from pygpukit.memory import MemoryPool
 
         pool = MemoryPool(quota=1024 * 1024 * 100)
