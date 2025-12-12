@@ -2,9 +2,13 @@
 
 use pyo3::prelude::*;
 use std::sync::Arc;
+use std::collections::HashMap;
+
+use crate::errors::partition_error_to_py;
+
 use pygpukit_core::scheduler::{
     Scheduler, SchedulerStats, TaskMeta, TaskState, TaskPolicy, TaskStats,
-    AdmissionDecision, AdmissionStats, RejectReason,
+    AdmissionController, AdmissionConfig, AdmissionDecision, AdmissionStats, RejectReason,
     QosClass, QosPolicy, QosTaskMeta, QosEvaluation, QosPolicyEvaluator, QosStats,
     ResourceRequirements,
     PartitionManager, PartitionConfig, Partition, PartitionLimits, PartitionUsage, PartitionStats,
@@ -321,15 +325,15 @@ impl PyTaskStats {
     }
 }
 
-/// Rejection reason enum for Python
-#[pyclass(name = "RejectReason")]
+/// Rejection reason details for Python (provides detailed info about rejection)
+#[pyclass(name = "RejectReasonDetails")]
 #[derive(Clone)]
-pub struct PyRejectReason {
+pub struct PyRejectReasonDetails {
     inner: RejectReason,
 }
 
 #[pymethods]
-impl PyRejectReason {
+impl PyRejectReasonDetails {
     /// Get rejection type as string
     #[getter]
     fn reason_type(&self) -> String {
@@ -380,8 +384,19 @@ impl PyRejectReason {
     }
 
     fn __repr__(&self) -> String {
-        format!("RejectReason({})", self.message())
+        format!("RejectReasonDetails({})", self.message())
     }
+}
+
+/// Rejection reason enum for comparison in Python
+#[pyclass(name = "RejectReason", eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PyRejectReasonEnum {
+    InsufficientMemory = 0,
+    InsufficientBandwidth = 1,
+    QueueFull = 2,
+    UnsatisfiableDependencies = 3,
+    Custom = 4,
 }
 
 /// Admission decision for Python
@@ -393,6 +408,30 @@ pub struct PyAdmissionDecision {
 
 #[pymethods]
 impl PyAdmissionDecision {
+    /// Create an Admitted decision (for testing)
+    #[staticmethod]
+    #[pyo3(name = "Admitted")]
+    fn admitted() -> Self {
+        Self {
+            inner: AdmissionDecision::Admit {
+                reserved_memory: 0,
+                reserved_bandwidth: 0.0,
+            },
+        }
+    }
+
+    /// Create a Queued decision (for testing)
+    #[staticmethod]
+    #[pyo3(name = "Queued")]
+    fn queued() -> Self {
+        Self {
+            inner: AdmissionDecision::Queue {
+                position: 0,
+                estimated_wait_ms: 0.0,
+            },
+        }
+    }
+
     /// Check if admitted
     fn is_admitted(&self) -> bool {
         self.inner.is_admitted()
@@ -406,6 +445,22 @@ impl PyAdmissionDecision {
     /// Check if queued
     fn is_queued(&self) -> bool {
         self.inner.is_queued()
+    }
+
+    /// Get rejection reason type (for comparison)
+    fn reject_reason(&self) -> Option<PyRejectReasonEnum> {
+        match &self.inner {
+            AdmissionDecision::Reject { reason } => {
+                Some(match reason {
+                    RejectReason::InsufficientMemory { .. } => PyRejectReasonEnum::InsufficientMemory,
+                    RejectReason::BandwidthExceeded { .. } => PyRejectReasonEnum::InsufficientBandwidth,
+                    RejectReason::QueueFull { .. } => PyRejectReasonEnum::QueueFull,
+                    RejectReason::UnsatisfiableDependencies { .. } => PyRejectReasonEnum::UnsatisfiableDependencies,
+                    RejectReason::Custom(_) => PyRejectReasonEnum::Custom,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Get decision type as string
@@ -454,11 +509,11 @@ impl PyAdmissionDecision {
         }
     }
 
-    /// Get rejection reason (if rejected)
+    /// Get rejection reason details (if rejected)
     #[getter]
-    fn rejection_reason(&self) -> Option<PyRejectReason> {
+    fn rejection_reason(&self) -> Option<PyRejectReasonDetails> {
         match &self.inner {
-            AdmissionDecision::Reject { reason } => Some(PyRejectReason { inner: reason.clone() }),
+            AdmissionDecision::Reject { reason } => Some(PyRejectReasonDetails { inner: reason.clone() }),
             _ => None,
         }
     }
@@ -469,7 +524,7 @@ impl PyAdmissionDecision {
                 format!("AdmissionDecision(Admit, memory={}, bandwidth={:.4})", reserved_memory, reserved_bandwidth)
             }
             AdmissionDecision::Reject { reason } => {
-                format!("AdmissionDecision(Reject, reason={})", PyRejectReason { inner: reason.clone() }.message())
+                format!("AdmissionDecision(Reject, reason={})", PyRejectReasonDetails { inner: reason.clone() }.message())
             }
             AdmissionDecision::Queue { position, estimated_wait_ms } => {
                 format!("AdmissionDecision(Queue, position={}, wait={:.1}ms)", position, estimated_wait_ms)
@@ -517,9 +572,21 @@ impl PyAdmissionStats {
         self.inner.reserved_memory
     }
 
+    /// Currently used memory (alias for reserved_memory)
+    #[getter]
+    fn used_memory(&self) -> usize {
+        self.inner.reserved_memory
+    }
+
     /// Currently reserved bandwidth
     #[getter]
     fn reserved_bandwidth(&self) -> f64 {
+        self.inner.reserved_bandwidth
+    }
+
+    /// Currently used bandwidth (alias for reserved_bandwidth)
+    #[getter]
+    fn used_bandwidth(&self) -> f64 {
         self.inner.reserved_bandwidth
     }
 
@@ -540,6 +607,115 @@ impl PyAdmissionStats {
             "AdmissionStats(admitted={}, rejected={}, queued={}, pending={})",
             self.inner.admitted_count, self.inner.rejected_count,
             self.inner.queued_count, self.inner.pending_count
+        )
+    }
+}
+
+/// Admission configuration for Python
+#[pyclass(name = "AdmissionConfig")]
+#[derive(Clone)]
+pub struct PyAdmissionConfig {
+    inner: AdmissionConfig,
+}
+
+#[pymethods]
+impl PyAdmissionConfig {
+    /// Create a new AdmissionConfig
+    #[new]
+    #[pyo3(signature = (max_memory, max_bandwidth, max_pending_tasks=1000, enable_best_effort=true))]
+    fn new(max_memory: usize, max_bandwidth: f64, max_pending_tasks: usize, enable_best_effort: bool) -> Self {
+        Self {
+            inner: AdmissionConfig {
+                total_memory: max_memory,
+                max_reserved_memory: max_memory,
+                max_pending_tasks,
+                total_bandwidth: max_bandwidth,
+                enable_best_effort,
+                memory_overcommit_ratio: 1.0,
+            },
+        }
+    }
+
+    #[getter]
+    fn max_memory(&self) -> usize {
+        self.inner.total_memory
+    }
+
+    #[getter]
+    fn max_bandwidth(&self) -> f64 {
+        self.inner.total_bandwidth
+    }
+
+    #[getter]
+    fn max_pending_tasks(&self) -> usize {
+        self.inner.max_pending_tasks
+    }
+
+    #[getter]
+    fn enable_best_effort(&self) -> bool {
+        self.inner.enable_best_effort
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AdmissionConfig(max_memory={}, max_bandwidth={:.2}, max_pending={})",
+            self.inner.total_memory, self.inner.total_bandwidth, self.inner.max_pending_tasks
+        )
+    }
+}
+
+/// Admission controller for Python with task tracking
+#[pyclass(name = "AdmissionController")]
+pub struct PyAdmissionController {
+    inner: AdmissionController,
+    // Track allocations by task_id for release()
+    allocations: HashMap<String, (usize, f64)>,
+}
+
+#[pymethods]
+impl PyAdmissionController {
+    /// Create a new AdmissionController
+    #[new]
+    fn new(config: PyAdmissionConfig) -> Self {
+        Self {
+            inner: AdmissionController::new(config.inner),
+            allocations: HashMap::new(),
+        }
+    }
+
+    /// Try to admit a task with given resource requirements
+    fn try_admit(&mut self, task_id: &str, memory: usize, bandwidth: f64) -> PyAdmissionDecision {
+        // Create a temporary TaskMeta for admission
+        let task = TaskMeta::with_memory(task_id.to_string(), task_id.to_string(), memory);
+        let decision = self.inner.admit(&task);
+
+        // Track allocation if admitted
+        if decision.is_admitted() {
+            self.allocations.insert(task_id.to_string(), (memory, bandwidth));
+        }
+
+        PyAdmissionDecision { inner: decision }
+    }
+
+    /// Release resources for a task
+    fn release(&mut self, task_id: &str) {
+        if let Some((memory, bandwidth)) = self.allocations.remove(task_id) {
+            self.inner.release(memory, bandwidth);
+        }
+    }
+
+    /// Get admission statistics
+    fn stats(&self) -> PyAdmissionStats {
+        PyAdmissionStats {
+            inner: self.inner.stats(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        let stats = self.inner.stats();
+        format!(
+            "AdmissionController(admitted={}, rejected={}, pending={})",
+            stats.admitted_count, stats.rejected_count, stats.pending_count
         )
     }
 }
@@ -782,6 +958,34 @@ impl PyQosTaskMeta {
         self.inner.qos.class.into()
     }
 
+    /// Get memory request (bytes)
+    #[getter]
+    fn memory_request(&self) -> usize {
+        self.inner.qos.resources.memory_request
+    }
+
+    /// Get memory limit (bytes)
+    #[getter]
+    fn memory_limit(&self) -> usize {
+        self.inner.qos.resources.memory_limit
+    }
+
+    /// Get burst ratio (memory_limit / memory_request)
+    #[getter]
+    fn burst_ratio(&self) -> f64 {
+        if self.inner.qos.resources.memory_request > 0 {
+            self.inner.qos.resources.memory_limit as f64 / self.inner.qos.resources.memory_request as f64
+        } else {
+            1.0
+        }
+    }
+
+    /// Get bandwidth request (0.0 - 1.0)
+    #[getter]
+    fn bandwidth_request(&self) -> f64 {
+        self.inner.qos.resources.bandwidth_request
+    }
+
     /// Get effective priority
     fn effective_priority(&self) -> i32 {
         self.inner.effective_priority()
@@ -789,8 +993,8 @@ impl PyQosTaskMeta {
 
     fn __repr__(&self) -> String {
         format!(
-            "QosTaskMeta(id='{}', class={:?}, priority={})",
-            self.inner.task.id, self.inner.qos.class, self.inner.effective_priority()
+            "QosTaskMeta(id='{}', class={:?}, memory={}, priority={})",
+            self.inner.task.id, self.inner.qos.class, self.inner.qos.resources.memory_request, self.inner.effective_priority()
         )
     }
 }
@@ -1460,16 +1664,14 @@ impl PyPartitionManager {
 
     /// Create a new partition
     fn create_partition(&mut self, id: &str, name: &str, limits: PyPartitionLimits) -> PyResult<()> {
-        self.inner.create_partition(id, name, limits.inner).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e.to_string())
-        })
+        self.inner.create_partition(id, name, limits.inner).map_err(partition_error_to_py)
     }
 
     /// Delete a partition
     fn delete_partition(&mut self, id: &str) -> PyResult<PyPartition> {
         self.inner.delete_partition(id)
             .map(|p| PyPartition { inner: p })
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+            .map_err(partition_error_to_py)
     }
 
     /// Get a partition
@@ -1479,9 +1681,7 @@ impl PyPartitionManager {
 
     /// Assign a task to a partition
     fn assign_task(&mut self, task_id: &str, partition_id: &str) -> PyResult<()> {
-        self.inner.assign_task(task_id, partition_id).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e.to_string())
-        })
+        self.inner.assign_task(task_id, partition_id).map_err(partition_error_to_py)
     }
 
     /// Get partition for a task
@@ -1496,9 +1696,7 @@ impl PyPartitionManager {
 
     /// Set default partition
     fn set_default(&mut self, id: &str) -> PyResult<()> {
-        self.inner.set_default(id).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(e.to_string())
-        })
+        self.inner.set_default(id).map_err(partition_error_to_py)
     }
 
     /// Get default partition
@@ -1541,9 +1739,12 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySchedulerStats>()?;
     m.add_class::<PyTaskStats>()?;
     // Admission control
+    m.add_class::<PyAdmissionConfig>()?;
+    m.add_class::<PyAdmissionController>()?;
     m.add_class::<PyAdmissionDecision>()?;
     m.add_class::<PyAdmissionStats>()?;
-    m.add_class::<PyRejectReason>()?;
+    m.add_class::<PyRejectReasonEnum>()?;
+    m.add_class::<PyRejectReasonDetails>()?;
     // QoS policy
     m.add_class::<PyQosClass>()?;
     m.add_class::<PyQosPolicy>()?;

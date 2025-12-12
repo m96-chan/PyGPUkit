@@ -1,9 +1,10 @@
 //! Memory module Python bindings
 
 use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
 use std::sync::Arc;
 use pygpukit_core::memory::{MemoryPool, MemoryBlock, PoolStats};
+
+use crate::errors::memory_error_to_py;
 
 /// Python wrapper for MemoryBlock
 #[pyclass(name = "MemoryBlock")]
@@ -207,11 +208,9 @@ impl PyMemoryPool {
     ///     Block ID for the allocated block
     ///
     /// Raises:
-    ///     RuntimeError: If quota exceeded and cannot evict
+    ///     MemoryError: If quota exceeded and cannot evict
     fn allocate(&self, size: usize) -> PyResult<u64> {
-        self.inner.allocate(size).map_err(|e| {
-            PyRuntimeError::new_err(e.to_string())
-        })
+        self.inner.allocate(size).map_err(memory_error_to_py)
     }
 
     /// Free a memory block (return to free list).
