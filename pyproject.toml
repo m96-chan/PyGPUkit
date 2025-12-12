@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["scikit-build-core>=0.5.0", "pybind11>=2.11.0"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "PyGPUkit"
-version = "0.1.1"
+version = "0.1.2"
 description = "A lightweight GPU runtime for Python with NVRTC JIT compilation and NumPy-like API"
 readme = "README.md"
 license = "MIT"
@@ -47,25 +47,6 @@ Homepage = "https://github.com/m96-chan/PyGPUkit"
 Repository = "https://github.com/m96-chan/PyGPUkit"
 Issues = "https://github.com/m96-chan/PyGPUkit/issues"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/pygpukit"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/native",
-    "/tests",
-    "/README.md",
-    "/LICENSE",
-]
-exclude = [
-    "/native/build",
-    "*.pyd",
-    "*.so",
-]
-
-# Native module build configuration (for cibuildwheel in release.yml)
-# Use: pip install scikit-build-core pybind11 && python -m pip wheel . --no-build-isolation
 [tool.scikit-build]
 cmake.source-dir = "native"
 cmake.build-type = "Release"
@@ -73,6 +54,9 @@ wheel.packages = ["src/pygpukit"]
 wheel.install-dir = "pygpukit"
 sdist.include = ["native/*"]
 sdist.exclude = ["native/build/*"]
+# Allow building without CUDA for testing
+cmake.args = ["-DCMAKE_CUDA_COMPILER_WORKS=1"]
+build.targets = []
 
 [tool.scikit-build.cmake.define]
 CMAKE_CUDA_ARCHITECTURES = "70;75;80;86;89;90"
