@@ -305,7 +305,7 @@ PyGPUkit/
 - [x] Basic stream manager
 - [x] Packaging + wheels
 
-### **v0.2 (Released)**
+### **v0.2.0 (Released)**
 - [x] Rust Memory Pool (LRU, size-class)
 - [x] Rust Scheduler (priority, memory reservation)
 - [x] Rust Transfer Engine (async H2D/D2H)
@@ -319,6 +319,35 @@ PyGPUkit/
 - [x] GPU Partitioning
 - [x] Tiled Matmul (shared memory)
 - [x] 106 Rust tests
+
+### **v0.2.1 — Stabilization Phase**
+- [ ] Admission / QoS spec finalization
+- [ ] Python API inconsistency fixes
+- [ ] Rust error propagation unification
+- [ ] 24h stress test script
+
+### **v0.2.2 — Performance Phase**
+- [ ] 64x64 tile kernel refinement
+- [ ] TensorCore (Ampere+) availability check
+- [ ] Pinned Memory fragmentation test
+- [ ] Async Engine 3-stream support
+
+### **v0.2.3 — Reliability Phase**
+- [ ] Kernel cache LRU completion
+- [ ] Driver-only mode stabilization
+- [ ] Windows/Linux full support
+- [ ] Large GPU memory test (16GB continuous alloc/free)
+
+### **v0.2.4 — Distributed Phase**
+- [ ] Multi-GPU Detection
+- [ ] NCCL / peer-to-peer preliminary support
+- [ ] Scheduler multi-device support
+
+### **v0.2.5 — Pre-v0.3 Finalization**
+- [ ] Full API review
+- [ ] Backward compatibility policy
+- [ ] JIT build options, safety measures, env vars cleanup
+- [ ] Documentation
 
 ### **v0.3 (Planned)**
 - [ ] Triton optional backend
