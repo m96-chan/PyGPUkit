@@ -80,9 +80,18 @@ jobs:
 
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
+        id: cuda-toolkit
         with:
           cuda: "12.6.0"
           method: network
+          use-github-cache: true
+          use-local-cache: false
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cuda-build-${{ runner.os }}
+          max-size: 500M
 
       - name: Configure CMake
         run: |
@@ -90,6 +99,9 @@ jobs:
           mkdir -p build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())")
 
       - name: Build native module
