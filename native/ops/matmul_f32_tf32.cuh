@@ -3,74 +3,58 @@
 #include <cuda_runtime.h>
 #include <mma.h>
 
-/*
- * PyGPUkit TF32 TensorCore GEMM
- * High-performance CUTLASS-style kernel
- *
- * Target (RTX 3090 Ti):
- *   - 26〜29 TFLOPS (TF32 TensorCore)
- *   - Beats PyTorch/cuBLAS FP32
- *
- * Tile:
- *   - BM = 128, BN = 128, BK = 32
- *   - 256 threads = 8 warps (16×16)
- *   - 2-stage cp.async pipeline
- */
-
 namespace pygpukit {
 namespace ops {
 namespace tf32 {
 
-using namespace nvcuda::wmma;
+using namespace nvcuda;
 
+// ============================================================================
+// Tile Configuration
+// ============================================================================
 constexpr int BM = 128;
 constexpr int BN = 128;
-constexpr int BK = 32;
+constexpr int BK = 16;
 
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 8;
 
-// 4x2 warp grid
 constexpr int WARPS_M = 4;
 constexpr int WARPS_N = 2;
 
-// warp computes:
 constexpr int WARP_TILES_M = 2;
 constexpr int WARP_TILES_N = 4;
 
-// Shared memory padding avoids bank conflicts
-constexpr int A_PAD = 4;
-constexpr int B_PAD = 4;
-
-// ==========================================================================
-// cp.async utilities
-// ==========================================================================
-__device__ __forceinline__ void cp_async_cg_16(void* smem_ptr, const void* gmem_ptr) {
+// ----------------------------------------------------------------------------
+// cp.async wrapper (16 bytes)
+// ----------------------------------------------------------------------------
+__device__ __forceinline__ void cp_async_16(void* smem_ptr, const void* gmem_ptr) {
     unsigned smem_addr;
     asm volatile(
         "{ .reg .u64 smem64;\n"
         "  cvta.to.shared.u64 smem64, %1;\n"
         "  cvt.u32.u64 %0, smem64; }\n"
-        : "=r"(smem_addr) : "l"(smem_ptr)
+        : "=r"(smem_addr)
+        : "l"(smem_ptr)
     );
     asm volatile(
-        "cp.async.cg.shared.global [%0], [%1], 16;\n"
+        "cp.async.ca.shared.global [%0], [%1], 16;\n"
         :: "r"(smem_addr), "l"(gmem_ptr)
     );
 }
 
 __device__ __forceinline__ void cp_async_commit() {
-    asm volatile("cp.async.commit_group;");
+    asm volatile("cp.async.commit_group;\n" ::);
 }
 
 __device__ __forceinline__ void cp_async_wait_1() {
-    asm volatile("cp.async.wait_group 1;");
+    asm volatile("cp.async.wait_group 1;\n" ::);
 }
 
-// ==========================================================================
-// Kernel
-// ==========================================================================
+// ============================================================================
+// TF32 TensorCore GEMM Kernel (2-stage pipeline)
+// ============================================================================
 __global__ void __launch_bounds__(256, 2)
 sgemm_tf32_kernel(
     const float* __restrict__ A,
@@ -82,71 +66,68 @@ sgemm_tf32_kernel(
     const int warp_id = tid / 32;
     const int lane_id = tid % 32;
 
-    const int block_m = blockIdx.y * BM;
-    const int block_n = blockIdx.x * BN;
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
 
-    const int warp_m = (warp_id / WARPS_N) * WARP_TILES_M * WMMA_M;
-    const int warp_n = (warp_id % WARPS_N) * WARP_TILES_N * WMMA_N;
+    const int cta_m = by * BM;
+    const int cta_n = bx * BN;
 
-    // Shared memory layout
-    __shared__ float smA[2][BM][BK + A_PAD];
-    __shared__ float smB[2][BK][BN + B_PAD];
+    const int warp_m = (warp_id / WARPS_N) * (WARP_TILES_M * WMMA_M);
+    const int warp_n = (warp_id % WARPS_N) * (WARP_TILES_N * WMMA_N);
 
-    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, precision::tf32, row_major> a_frag[WARP_TILES_M];
-    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, precision::tf32, col_major> b_frag[WARP_TILES_N];
-    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag[WARP_TILES_M][WARP_TILES_N];
+    // Shared memory (2 stages)
+    __shared__ float As[2][BM][BK];
+    __shared__ float Bs[2][BN][BK];   // IMPORTANT: [n][k] = col-major
+
+    wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::row_major> a_frag[WARP_TILES_M];
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, wmma::precision::tf32, wmma::col_major> b_frag[WARP_TILES_N];
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag[WARP_TILES_M][WARP_TILES_N];
 
     #pragma unroll
-    for (int mi = 0; mi < WARP_TILES_M; mi++)
-        #pragma unroll
-        for (int ni = 0; ni < WARP_TILES_N; ni++)
-            fill_fragment(c_frag[mi][ni], 0.0f);
+    for (int i = 0; i < WARP_TILES_M; i++)
+        for (int j = 0; j < WARP_TILES_N; j++)
+            wmma::fill_fragment(c_frag[i][j], 0.0f);
 
-    int k_tiles = K / BK;
+    const int num_tiles = K / BK;
 
-    // -------------------------------
-    // Load tile helper
-    // -------------------------------
-    auto load_A = [&](int stage, int kt) {
-        int k0 = kt * BK;
-        #pragma unroll
-        for (int i = 0; i < 2; i++) {
-            int idx = tid + i * 256;
-            int m = idx / (BK / 4);
-            int k = (idx % (BK / 4)) * 4;
-            if (m < BM && k0 + k < K) {
-                cp_async_cg_16(&smA[stage][m][k], &A[(block_m + m) * K + (k0 + k)]);
-            }
-        }
-    };
-
-    auto load_B = [&](int stage, int kt) {
-        int k0 = kt * BK;
+    // ========================================================================
+    // LOAD TILE 0 & 1  (Pipeline Prologue)
+    // ========================================================================
+    auto load_A = [&](int stage, int k_tile) {
+        const int k_base = k_tile * BK;
         #pragma unroll
         for (int i = 0; i < 2; i++) {
             int idx = tid + i * 256;
-            int k = idx / (BN / 4);
-            int n = (idx % (BN / 4)) * 4;
-            if (n < BN && k0 + k < K) {
-                float4 v = *reinterpret_cast<const float4*>(
-                    &B[(k0 + k) * N + (block_n + n)]
-                );
-                smB[stage][k][n + 0] = v.x;
-                smB[stage][k][n + 1] = v.y;
-                smB[stage][k][n + 2] = v.z;
-                smB[stage][k][n + 3] = v.w;
-            }
+            int m = idx / 4;
+            int k4 = (idx % 4) * 4;
+            cp_async_16(&As[stage][m][k4], &A[(cta_m + m) * K + k_base + k4]);
         }
     };
 
-    // -------------------------------
-    // Prologue
-    // -------------------------------
+    auto load_B = [&](int stage, int k_tile) {
+        const int k_base = k_tile * BK;
+
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            int idx = tid + i * 256;
+            int k = idx / 32;
+            int n = (idx % 32) * 4;
+
+            // global → col-major Bs[n][k]
+            float4 v = *reinterpret_cast<const float4*>(&B[(k_base + k) * N + (cta_n + n)]);
+            Bs[stage][n + 0][k] = v.x;
+            Bs[stage][n + 1][k] = v.y;
+            Bs[stage][n + 2][k] = v.z;
+            Bs[stage][n + 3][k] = v.w;
+        }
+    };
+
+    // Prologue load
     load_A(0, 0);
     load_B(0, 0);
     cp_async_commit();
 
-    if (k_tiles > 1) {
+    if (num_tiles > 1) {
         load_A(1, 1);
         load_B(1, 1);
         cp_async_commit();
@@ -155,96 +136,75 @@ sgemm_tf32_kernel(
     cp_async_wait_1();
     __syncthreads();
 
-    // -------------------------------
-    // Main loop
-    // -------------------------------
-    for (int kt = 0; kt < k_tiles; kt++) {
+    // ========================================================================
+    // MAIN LOOP
+    // ========================================================================
+    for (int t = 0; t < num_tiles; t++) {
+        int curr = t & 1;
+        int next = (t + 2) & 1;
 
-        int curr = kt & 1;
-        int next = 1 - curr;
-
-        // Prefetch tile kt+2
-        if (kt + 2 < k_tiles) {
-            load_A(next, kt + 2);
-            load_B(next, kt + 2);
+        // Prefetch tile t+2
+        if (t + 2 < num_tiles) {
+            load_A(next, t + 2);
+            load_B(next, t + 2);
             cp_async_commit();
         }
 
-        // Compute on curr
         #pragma unroll
         for (int kk = 0; kk < BK; kk += WMMA_K) {
-
             #pragma unroll
-            for (int mi = 0; mi < WARP_TILES_M; mi++) {
-                int m0 = warp_m + mi * WMMA_M;
-                load_matrix_sync(
-                    a_frag[mi],
-                    &smA[curr][m0][kk],
-                    BK + A_PAD
-                );
+            for (int i = 0; i < WARP_TILES_M; i++) {
+                int m_off = warp_m + i * WMMA_M;
+                wmma::load_matrix_sync(a_frag[i], &As[curr][m_off][kk], BK);
             }
 
             #pragma unroll
-            for (int ni = 0; ni < WARP_TILES_N; ni++) {
-                int n0 = warp_n + ni * WMMA_N;
-                load_matrix_sync(
-                    b_frag[ni],
-                    &smB[curr][kk][n0],
-                    BN + B_PAD
-                );
+            for (int j = 0; j < WARP_TILES_N; j++) {
+                int n_off = warp_n + j * WMMA_N;
+                wmma::load_matrix_sync(b_frag[j], &Bs[curr][n_off][kk], BK);
             }
 
             #pragma unroll
-            for (int mi = 0; mi < WARP_TILES_M; mi++)
-                #pragma unroll
-                for (int ni = 0; ni < WARP_TILES_N; ni++)
-                    mma_sync(c_frag[mi][ni], a_frag[mi], b_frag[ni], c_frag[mi][ni]);
+            for (int i = 0; i < WARP_TILES_M; i++)
+                for (int j = 0; j < WARP_TILES_N; j++)
+                    wmma::mma_sync(c_frag[i][j], a_frag[i], b_frag[j], c_frag[i][j]);
         }
 
         cp_async_wait_1();
         __syncthreads();
     }
 
-    // -------------------------------
-    // Epilogue
-    // -------------------------------
+    // ========================================================================
+    // STORE (fast path only for aligned tile)
+    // ========================================================================
     const bool aligned = (N % 8 == 0);
 
     #pragma unroll
-    for (int mi = 0; mi < WARP_TILES_M; mi++) {
-        for (int ni = 0; ni < WARP_TILES_N; ni++) {
+    for (int i = 0; i < WARP_TILES_M; i++) {
+        for (int j = 0; j < WARP_TILES_N; j++) {
+            int m_off = cta_m + warp_m + i * WMMA_M;
+            int n_off = cta_n + warp_n + j * WMMA_N;
 
-            int m0 = block_m + warp_m + mi * WMMA_M;
-            int n0 = block_n + warp_n + ni * WMMA_N;
+            if (m_off < M && n_off < N) {
+                int valid_m = min(WMMA_M, M - m_off);
+                int valid_n = min(WMMA_N, N - n_off);
 
-            int valid_m = min(WMMA_M, M - m0);
-            int valid_n = min(WMMA_N, N - n0);
-
-            if (aligned && valid_m == WMMA_M && valid_n == WMMA_N) {
-                store_matrix_sync(
-                    &C[m0 * N + n0],
-                    c_frag[mi][ni],
-                    (unsigned int)N,
-                    mem_row_major
-                );
-            } else {
-                float tmp[WMMA_M][WMMA_N];
-                store_matrix_sync(&tmp[0][0], c_frag[mi][ni], WMMA_N, mem_row_major);
-
-                if (lane_id < WMMA_N) {
-                    for (int r = 0; r < valid_m; r++) {
-                        if (n0 + lane_id < N)
-                            C[(m0 + r) * N + (n0 + lane_id)] = tmp[r][lane_id];
-                    }
+                if (aligned && valid_m == 16 && valid_n == 16) {
+                    wmma::store_matrix_sync(&C[m_off * N + n_off], c_frag[i][j], N, wmma::mem_row_major);
+                } else {
+                    float tmp[16 * 16];
+                    wmma::store_matrix_sync(tmp, c_frag[i][j], 16, wmma::mem_row_major);
+                    for (int r = 0; r < valid_m; r++)
+                        for (int c = 0; c < valid_n; c++)
+                            C[(m_off + r) * N + (n_off + c)] = tmp[r * 16 + c];
                 }
             }
         }
     }
 }
 
-// ==========================================================================
-// Launcher
-// ==========================================================================
+// ----------------------------------------------------------------------------
+
 inline cudaError_t launch_sgemm_tf32(
     const float* A, const float* B, float* C,
     int M, int N, int K,
@@ -256,6 +216,6 @@ inline cudaError_t launch_sgemm_tf32(
     return cudaGetLastError();
 }
 
-} // namespace tf32
-} // namespace ops
-} // namespace pygpukit
+}  // namespace tf32
+}  // namespace ops
+}  // namespace pygpukit
