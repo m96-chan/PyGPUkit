@@ -236,7 +236,10 @@ sgemm_128x128x32_3stage(
     // Tile: 128 × 16 = 2048 elements = 512 float4s
     // 256 threads × 2 float4s/thread = 512 float4s
     //
-    // CRITICAL: Both source (global) and destination (shared) are 16-byte aligned
+    // CRITICAL: cp.async.cg.16 requires 16-byte aligned source address
+    // When K % 4 != 0, row stride is not 16-byte aligned, must use scalar loads
+    const bool a_aligned = (K % 4 == 0);
+
     auto load_A_tile = [&](int stage, int k_tile) {
         const int k_base = k_tile * BK;
 
@@ -255,12 +258,13 @@ sgemm_128x128x32_3stage(
             // Destination in shared memory: AM[stage][m][k]
             float* dst = &AM(stage, a_m, a_k);
 
-            if (global_m < M && global_k + 3 < K) {
+            // Only use float4 cp.async when K is 16-byte aligned AND within bounds
+            if (a_aligned && global_m < M && global_k + 3 < K) {
                 // float4 cp.async - both src and dst are 16-byte aligned
                 const float* src = &A[global_m * K + global_k];
                 cp_async_cg_16(dst, src);
             } else {
-                // Boundary handling with 4-byte copies
+                // Fallback: scalar loads (handles misaligned K and boundaries)
                 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     if (global_m < M && global_k + j < K) {
@@ -276,6 +280,11 @@ sgemm_128x128x32_3stage(
     // Load B tile with COALESCED float4 access
     // 16 × 128 = 2048 elements = 512 float4s (BK=16)
     // 256 threads × 2 float4s/thread = 512 float4s
+    //
+    // CRITICAL: cp.async.cg.16 requires 16-byte aligned source address
+    // When N % 4 != 0, row stride is not 16-byte aligned, must use scalar loads
+    const bool b_aligned = (N % 4 == 0);
+
     auto load_B_tile = [&](int stage, int k_tile) {
         const int k_base = k_tile * BK;
 
@@ -293,10 +302,12 @@ sgemm_128x128x32_3stage(
 
             float* dst = &BS(stage, b_k, b_n);
 
-            if (global_k < K && global_n + 3 < N) {
+            // Only use float4 cp.async when N is 16-byte aligned AND within bounds
+            if (b_aligned && global_k < K && global_n + 3 < N) {
                 const float* src = &B[global_k * N + global_n];
                 cp_async_cg_16(dst, src);  // float4 = 16 bytes, coalesced!
             } else {
+                // Fallback: scalar loads (handles misaligned N and boundaries)
                 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     if (global_k < K && global_n + j < N) {
@@ -490,6 +501,10 @@ sgemm_128x128x16_4stage(
         }
     };
 
+    // CRITICAL: cp.async.cg.16 requires 16-byte aligned source address
+    // When N % 4 != 0, row stride is not 16-byte aligned, must use scalar loads
+    const bool b_aligned_4 = (N % 4 == 0);
+
     auto load_B = [&](int stage, int k_tile) {
         const int k_base = k_tile * BK_SMALL;
         // 16 × 128 = 2048 elements = 512 float4s, 256 threads → 2 float4 per thread
@@ -504,9 +519,11 @@ sgemm_128x128x16_4stage(
 
             float* dst = &BS4(stage, b_k, b_n);
 
-            if (global_k < K && global_n + 3 < N) {
+            // Only use float4 cp.async when N is 16-byte aligned AND within bounds
+            if (b_aligned_4 && global_k < K && global_n + 3 < N) {
                 cp_async_cg_16(dst, &B[global_k * N + global_n]);
             } else {
+                // Fallback: scalar loads (handles misaligned N and boundaries)
                 for (int j = 0; j < 4; ++j) {
                     if (global_k < K && global_n + j < N) {
                         cp_async_cg_4(&dst[j], &B[global_k * N + global_n + j]);

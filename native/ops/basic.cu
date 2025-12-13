@@ -279,10 +279,11 @@ GPUArray mul(const GPUArray& a, const GPUArray& b) {
 // Double buffer: 64KB (need to use extended shared memory)
 
 // Threshold for switching to tiled kernel
-#define TILED_MATMUL_THRESHOLD 2048
+#define TILED_MATMUL_THRESHOLD 128
 
 // Threshold for switching to optimized kernel (larger matrices benefit more)
-#define OPTIMIZED_MATMUL_THRESHOLD 2048
+// DEBUG: Temporarily lowered from 2048 to 128 for testing TF32 kernel
+#define OPTIMIZED_MATMUL_THRESHOLD 128
 
 // L2-optimized matmul kernel for FP32 (Ampere+)
 // Uses __ldg() for read-only cache and __restrict__ for aliasing hints

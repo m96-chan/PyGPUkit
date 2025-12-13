@@ -38,7 +38,9 @@ endif()
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # Ampere-optimized compiler flags
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math")
+# Add -v for verbose ptxas output to check register usage
+# Limit registers to 128 to prevent spilling issues with WMMA kernels
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math --ptxas-options=-v -maxrregcount=128")
 
 # Build single pybind11 module with all sources
 pybind11_add_module(_pygpukit_native
