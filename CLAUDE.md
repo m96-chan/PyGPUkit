@@ -492,3 +492,93 @@ Correctness: <PASS/FAIL>
 - パフォーマンスの変化を追跡可能にする
 - 試行錯誤の履歴を保存する
 
+---
+
+## Commit Enforcement Rules (ABSOLUTE)
+
+YOU MUST perform a git commit immediately under ANY of the following conditions:
+
+### 1. Benchmark Improvement
+
+If benchmark results improve in ANY matrix size:
+- 2048, 4096, or 8192 shows higher TFLOPS than all previous runs
+- Improvement = ANY positive increase (even +0.01 TFLOPS)
+
+### 2. Correctness Achievement
+
+If correctness becomes PASS for all tested sizes:
+- relative error < 1e-3 for all matrices
+
+### 3. After EVERY Benchmark Execution
+
+- EVEN IF results are worse
+- EVEN IF no improvement is observed
+- You MUST create a commit with message: `bench: results logged (no improvement)`
+
+### 4. Commit Before Proceeding
+
+- You MUST NOT proceed to next kernel edit UNTIL the commit is complete
+
+### 5. Never Overwrite Without Commit
+
+- You MUST NEVER overwrite a working kernel without committing it first
+
+### 6. Revert on Regression
+
+If performance or correctness DEGRADES:
+- You MUST revert to the previous commit BEFORE continuing
+
+**These rules are absolute. No exceptions.**
+
+---
+
+## TF32 TensorCore GEMM Development Notes
+
+### WMMA vs PTX mma.sync
+
+**重要な発見 (2024-12):**
+
+1. **WMMA API** (`nvcuda::wmma`) は動作確認済み
+   - `row_major` A + `row_major` B の組み合わせで正常動作
+   - `row_major` A + `col_major` B は**メモリレイアウトの解釈が異なり失敗**
+
+2. **PTX mma.sync** の正しいマッピングはまだ特定中
+   - m16n8k8 のフラグメントレイアウトが複雑
+   - WMMA の `debug_dump_fragments` で実際のマッピングを確認可能
+
+### 動作確認済みカーネル
+
+```cpp
+// WMMA row_major × row_major (PASS)
+fragment<matrix_a, 16, 16, 8, precision::tf32, row_major> a_frag;
+fragment<matrix_b, 16, 16, 8, precision::tf32, row_major> b_frag;
+fragment<accumulator, 16, 16, 8, float> c_frag;
+
+load_matrix_sync(a_frag, A + k, K);      // ldA = K
+load_matrix_sync(b_frag, B + k * N, N);  // ldB = N (row-major storage)
+mma_sync(c_frag, a_frag, b_frag, c_frag);
+store_matrix_sync(C, c_frag, N, mem_row_major);
+```
+
+### テスト結果 (WMMA row_row)
+
+| M | N | K | max_err | rel_err | Status |
+|---|---|---|---------|---------|--------|
+| 16 | 16 | 8 | 0.0055 | 0.05% | PASS |
+| 16 | 16 | 16 | 0.0089 | 0.07% | PASS |
+| 16 | 16 | 32 | 0.0094 | 0.06% | PASS |
+| 16 | 16 | 64 | 0.0205 | 0.10% | PASS |
+| 16 | 16 | 128 | 0.0247 | 0.08% | PASS |
+| 16 | 16 | 256 | 0.0373 | 0.08% | PASS |
+
+### 次のステップ
+
+1. WMMAの正しいフラグメントマッピングを `debug_dump_fragments` で確認
+2. PTX mma.sync 版のA/B/Cマッピングを修正
+3. マルチタイル・マルチワープへ拡張
+
+### ファイル構成
+
+- `native/ops/matmul_f32_tf32.cuh` - TF32カーネル
+- `native/ops/basic.cu` - ディスパッチロジック (line 848-854)
+- 環境変数 `PYGPUKIT_ALLOW_TF32=1` で有効化
