@@ -19,15 +19,16 @@ import time
 import numpy as np
 import pytest
 
-# Setup CUDA DLL path
+# Setup CUDA DLL path (if CUDA is installed)
 cuda_path = os.environ.get(
     "CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
 )
 cuda_bin = os.path.join(cuda_path, "bin")
-if cuda_bin not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = cuda_bin + os.pathsep + os.environ.get("PATH", "")
-if hasattr(os, "add_dll_directory"):
-    os.add_dll_directory(cuda_bin)
+if os.path.isdir(cuda_bin):
+    if cuda_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = cuda_bin + os.pathsep + os.environ.get("PATH", "")
+    if hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(cuda_bin)
 
 # Skip if native module not available
 try:
