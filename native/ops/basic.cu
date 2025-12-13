@@ -1,6 +1,8 @@
 #include "basic.cuh"
 #include "matmul_f32_ampere.cuh"
+#include "matmul_f32_tf32.cuh"
 #include <stdexcept>
+#include <cstdlib>
 
 #ifdef PYGPUKIT_DRIVER_ONLY
 #include "../core/driver_context.hpp"
@@ -793,20 +795,63 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
+    // Check for TF32 TensorCore mode (requires SM >= 80)
+    // Note: Check on every call since env var might change
+    bool tf32_enabled = false;
+    int sm_version = 0;
+
+    // Check environment variable
+    const char* tf32_env = std::getenv("PYGPUKIT_ALLOW_TF32");
+
+    // Debug output (remove in production)
+    static bool debug_printed = false;
+    if (!debug_printed) {
+        debug_printed = true;
+        printf("[PyGPUkit] PYGPUKIT_ALLOW_TF32 = %s\n", tf32_env ? tf32_env : "(null)");
+        fflush(stdout);
+    }
+
+    if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
+        // Check GPU compute capability
+        int device;
+        cudaGetDevice(&device);
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device);
+        sm_version = prop.major * 10 + prop.minor;
+        tf32_enabled = (sm_version >= 80);  // Ampere or newer
+        if (!debug_printed) {
+            fprintf(stderr, "[PyGPUkit] SM version = %d, TF32 enabled = %d\n", sm_version, tf32_enabled);
+        }
+    }
+
     // Select kernel based on matrix size and dtype
-    bool use_optimized = (a.dtype() == DataType::Float32) &&
+    bool use_tf32 = tf32_enabled &&
+                    (a.dtype() == DataType::Float32) &&
+                    (M >= OPTIMIZED_MATMUL_THRESHOLD &&
+                     N >= OPTIMIZED_MATMUL_THRESHOLD &&
+                     K >= OPTIMIZED_MATMUL_THRESHOLD);
+
+    bool use_optimized = !use_tf32 &&
+                         (a.dtype() == DataType::Float32) &&
                          (M >= OPTIMIZED_MATMUL_THRESHOLD ||
                           N >= OPTIMIZED_MATMUL_THRESHOLD ||
                           K >= OPTIMIZED_MATMUL_THRESHOLD);
 
-    bool use_tiled = !use_optimized &&
+    bool use_tiled = !use_optimized && !use_tf32 &&
                      (M >= TILED_MATMUL_THRESHOLD ||
                       N >= TILED_MATMUL_THRESHOLD ||
                       K >= TILED_MATMUL_THRESHOLD);
 
-    if (use_optimized) {
-        // Ampere-optimized kernel with cp.async and 4-stage pipeline
-        // Target: 22-32 TFLOPS on RTX 3090 Ti
+    if (use_tf32) {
+        // TF32 TensorCore kernel for Ampere+ GPUs
+        // Target: 22-30 TFLOPS on RTX 3090 Ti
+        tf32::launch_sgemm_tf32(
+            static_cast<const float*>(a.data()),
+            static_cast<const float*>(b.data()),
+            static_cast<float*>(c.data()),
+            M, N, K);
+    } else if (use_optimized) {
+        // Ampere-optimized FP32 FMA kernel with cp.async and 4-stage pipeline
         ampere::launch_sgemm_ampere(
             static_cast<const float*>(a.data()),
             static_cast<const float*>(b.data()),
