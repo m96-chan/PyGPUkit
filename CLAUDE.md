@@ -453,3 +453,42 @@ For portability: allow runtime switch to sm_89, sm_90.
 ### Python Components (Orchestration Only)
 8. Python API wrappers for Rust scheduler (thin wrappers only)
 9. Python API wrappers for Rust memory pool (thin wrappers only)
+
+---
+
+## Kernel Development Workflow (MANDATORY)
+
+カーネル開発時は以下のワークフローを**必ず**守ること：
+
+### 1. 開発サイクル
+
+```
+Edit → Build → Validate → Benchmark → Commit
+```
+
+**どんな結果でもValidationとBenchmarkが完了したら必ずコミットする。**
+
+### 2. コミットルール
+
+- Validation/Benchmarkが終わったら**結果に関わらず**コミット
+- コミットメッセージにベンチマーク結果を必ず記載
+
+### 3. コミットメッセージ形式
+
+```
+wip(tf32): <変更内容の要約>
+
+Benchmark results (RTX 3090 Ti):
+- 2048x2048: XX.XX TFLOPS
+- 4096x4096: XX.XX TFLOPS
+- 8192x8192: XX.XX TFLOPS
+
+Correctness: <PASS/FAIL>
+```
+
+### 4. 理由
+
+- 高速だったバージョンに戻せなくなることを防ぐ
+- パフォーマンスの変化を追跡可能にする
+- 試行錯誤の履歴を保存する
+
