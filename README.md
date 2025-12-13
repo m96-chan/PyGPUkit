@@ -20,22 +20,32 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
-## v0.2.2 Features (NEW)
+## v0.2.3 Features (NEW)
 
-### Ampere-Optimized SGEMM
+### TF32 TensorCore GEMM
 | Feature | Description |
 |---------|-------------|
-| **cp.async Pipeline** | 4-stage software pipeline with async memory transfers |
-| **Vectorized Loads** | float4 (16-byte) loads for A and B matrices |
-| **Shared Memory Tiling** | BM=128, BN=128, BK=16 with 8x8 thread tiles |
+| **PTX mma.sync** | Direct TensorCore access via inline PTX assembly |
+| **cp.async Pipeline** | Double-buffered async memory transfers |
+| **TF32 Precision** | 19-bit mantissa (vs FP32's 23-bit), ~0.1% per-op error |
 | **SM 80+ Required** | Ampere architecture (RTX 30XX+) required |
 
-### Performance (RTX 3090 Ti)
-| Matrix Size | TFLOPS | Efficiency | vs NumPy |
-|-------------|--------|------------|----------|
-| 2048x2048 | 7.6 | 19% | 10x |
-| 4096x4096 | 13.2 | 33% | 16x |
-| 8192x8192 | **18.2** | 46% | **22x** |
+### Benchmark Comparison (RTX 3090 Ti, 8192×8192×8192)
+
+| Library | FP32 | TF32 | Notes |
+|---------|------|------|-------|
+| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU baseline |
+| **PyTorch** (cuBLAS) | ~25 TFLOPS* | ~65 TFLOPS* | *Estimated from [benchmarks](https://siboehm.com/articles/22/CUDA-MMM) |
+| **PyGPUkit** | 18 TFLOPS | **27 TFLOPS** | Custom kernels |
+
+> *PyTorch numbers are estimates based on cuBLAS performance. Actual comparison benchmarks planned for v0.2.4.
+
+### PyGPUkit Performance by Size
+| Matrix Size | FP32 | TF32 |
+|-------------|------|------|
+| 2048×2048 | 7.6 TFLOPS | 10.2 TFLOPS |
+| 4096×4096 | 13.2 TFLOPS | 19.5 TFLOPS |
+| 8192×8192 | 18.2 TFLOPS | **27.5 TFLOPS** |
 
 ### Core Infrastructure (Rust)
 | Feature | Description |
@@ -338,18 +348,25 @@ PyGPUkit/
 - [x] 18.2 TFLOPS on RTX 3090 Ti (46% efficiency)
 - [x] SM 80+ (Ampere) architecture requirement
 
-### **v0.2.3 — Reliability Phase**
+### **v0.2.3 — TF32 TensorCore Phase (Released)**
+- [x] TF32 TensorCore GEMM with PTX mma.sync
+- [x] cp.async double-buffered pipeline
+- [x] 27.5 TFLOPS on RTX 3090 Ti
+- [x] PTX fragment mapping documentation
+
+### **v0.2.4 — Benchmark & Reliability Phase**
+- [ ] Actual PyTorch/NumPy comparison benchmarks
 - [ ] Kernel cache LRU completion
 - [ ] Driver-only mode stabilization
 - [ ] Windows/Linux full support
 - [ ] Large GPU memory test (16GB continuous alloc/free)
 
-### **v0.2.4 — Distributed Phase**
+### **v0.2.5 — Distributed Phase**
 - [ ] Multi-GPU Detection
 - [ ] NCCL / peer-to-peer preliminary support
 - [ ] Scheduler multi-device support
 
-### **v0.2.5 — Pre-v0.3 Finalization**
+### **v0.2.6 — Pre-v0.3 Finalization**
 - [ ] Full API review
 - [ ] Backward compatibility policy
 - [ ] JIT build options, safety measures, env vars cleanup
