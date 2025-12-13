@@ -90,6 +90,7 @@ jobs:
           mkdir -p build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())")
 
       - name: Build native module
