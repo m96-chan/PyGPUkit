@@ -1,13 +1,17 @@
-// ============================================================================
-//  TF32 TensorCore GEMM — G3 Optimized Kernel
-//  ✔ Correctness PASS
-//  ✔ 8192 → 25.8 TFLOPS (RTX 3090 Ti)
-//  ✔ Stable 2-stage cp.async pipeline
-//  ✔ CUTLASS-style B transpose (col_major WMMA)
-// ============================================================================
+/**
+ * TF32 TensorCore GEMM Kernel - High Performance Version
+ * Target: 25+ TFLOPS on RTX 3090 Ti
+ *
+ * Key Design Principles:
+ * 1. BOTH A and B use cp.async (no synchronous scatter-stores)
+ * 2. B stored row-major K×N (not transposed)
+ * 3. row_major fragments for both A and B
+ * 4. True 2-stage cp.async pipeline
+ * 5. ~37KB shared memory → 2 blocks/SM
+ */
 
 #pragma once
-#include <cuda.h>
+
 #include <cuda_runtime.h>
 #include <mma.h>
 
@@ -17,57 +21,67 @@ namespace tf32 {
 
 using namespace nvcuda::wmma;
 
-// Kernel tile sizes
+// ============================================================================
+// Tile Configuration
+// ============================================================================
 constexpr int BM = 128;
 constexpr int BN = 128;
-constexpr int BK = 16;
+constexpr int BK = 16;       // BK=16 for 2-stage pipeline under 40KB
 
-// WMMA tile size
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 8;
 
-// warp layout: 4 × 2 = 8 warps
-constexpr int WARPS_M = 4;
-constexpr int WARPS_N = 2;
-
-// result fragments per warp
+constexpr int WARPS_M = 4;   // 4 warps vertically
+constexpr int WARPS_N = 2;   // 2 warps horizontally
 constexpr int WARP_TILES_M = 2;
 constexpr int WARP_TILES_N = 4;
 
-// padding to avoid shared-memory bank conflicts
-constexpr int A_PAD = 4;
-constexpr int B_PAD = 4;
+// Padding for bank conflict avoidance
+constexpr int A_PAD = 4;     // A stride = BK + 4 = 20
+constexpr int B_PAD = 4;     // B stride = BN + 4 = 132
 
-// -----------------------------------------------------------------------------
-// cp.async helper
-// -----------------------------------------------------------------------------
-__device__ __forceinline__ void cp_async_16(void* smem_ptr, const void* gmem_ptr) {
-    unsigned smem_addr;
+// Shared memory sizes:
+// A_smem: 2 × 128 × 20 × 4 = 20,480 bytes
+// B_smem: 2 × 16 × 132 × 4 = 16,896 bytes
+// Total: 37,376 bytes ≈ 37KB (allows 2 blocks/SM)
+
+// ============================================================================
+// cp.async Intrinsics
+// ============================================================================
+
+__device__ __forceinline__ void cp_async_cg_16(void* smem, const void* gmem) {
+    uint32_t smem_addr;
     asm volatile(
-        "{ .reg .u64 smem64;\n"
-        "  cvta.to.shared.u64 smem64, %1;\n"
-        "  cvt.u32.u64 %0, smem64; }\n"
-        : "=r"(smem_addr)
-        : "l"(smem_ptr)
+        "{ .reg .u64 s64;\n"
+        "  cvta.to.shared.u64 s64, %1;\n"
+        "  cvt.u32.u64 %0, s64; }\n"
+        : "=r"(smem_addr) : "l"(smem)
     );
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
-                 :
-                 : "r"(smem_addr), "l"(gmem_ptr));
+    asm volatile(
+        "cp.async.cg.shared.global [%0], [%1], 16;\n"
+        :: "r"(smem_addr), "l"(gmem)
+    );
 }
 
 __device__ __forceinline__ void cp_async_commit() {
     asm volatile("cp.async.commit_group;\n" ::);
 }
-__device__ __forceinline__ void cp_async_wait() {
+
+__device__ __forceinline__ void cp_async_wait_group_1() {
     asm volatile("cp.async.wait_group 1;\n" ::);
 }
 
-// -----------------------------------------------------------------------------
-//  G3 Optimized TF32 Kernel
-// -----------------------------------------------------------------------------
+__device__ __forceinline__ void cp_async_wait_group_0() {
+    asm volatile("cp.async.wait_group 0;\n" ::);
+}
+
+// ============================================================================
+// Main Kernel
+// ============================================================================
+
 __global__ void __launch_bounds__(256, 2)
-sgemm_tf32_g3_kernel(
+sgemm_tf32_wmma_kernel(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
@@ -76,177 +90,186 @@ sgemm_tf32_g3_kernel(
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
     const int tid = threadIdx.y * blockDim.x + threadIdx.x;
-
-    const int lane = tid % 32;
-    const int warp = tid / 32;
-
-    const int warp_m = (warp / WARPS_N) * (WMMA_M * WARP_TILES_M);
-    const int warp_n = (warp % WARPS_N) * (WMMA_N * WARP_TILES_N);
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
 
     const int cta_m = by * BM;
     const int cta_n = bx * BN;
 
-    // Shared memory layout (32KB total)
+    // Warp position in 4×2 grid
+    const int warp_row = warp_id / WARPS_N;
+    const int warp_col = warp_id % WARPS_N;
+    const int warp_m = warp_row * (WARP_TILES_M * WMMA_M);  // 0, 32, 64, 96
+    const int warp_n = warp_col * (WARP_TILES_N * WMMA_N);  // 0, 64
+
+    // Shared memory: row-major for both A and B
+    // A: [stage][m][k] - M×K row-major
+    // B: [stage][k][n] - K×N row-major (NOT transposed!)
     __shared__ float A_smem[2][BM][BK + A_PAD];
-    __shared__ float B_smem[2][BN][BK + B_PAD];
+    __shared__ float B_smem[2][BK][BN + B_PAD];
 
-    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, precision::tf32, row_major>
-        a_frag[WARP_TILES_M];
+    // WMMA fragments - both row_major since both are stored row-major
+    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, precision::tf32, row_major> a_frag[WARP_TILES_M];
+    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, precision::tf32, row_major> b_frag[WARP_TILES_N];
+    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag[WARP_TILES_M][WARP_TILES_N];
 
-    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, precision::tf32, col_major>
-        b_frag[WARP_TILES_N];
-
-    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float>
-        c_frag[WARP_TILES_M][WARP_TILES_N];
-
-    // zero accumulators
+    // Initialize accumulators
     #pragma unroll
-    for (int mi = 0; mi < WARP_TILES_M; mi++)
-        for (int ni = 0; ni < WARP_TILES_N; ni++)
-            fill_fragment(c_frag[mi][ni], 0.f);
-
-    const int num_tiles = K / BK;
-
-    // -------------------------------------------------------------------------
-    // load A_tile(stage,k) and B_tile(stage,k)
-    // -------------------------------------------------------------------------
-    auto load_A_tile = [&](int stage, int kt) {
-        int k0 = kt * BK;
+    for (int mi = 0; mi < WARP_TILES_M; ++mi) {
         #pragma unroll
-        for (int i = 0; i < 2; i++) {
-            int idx = tid + i * 256;
-            int m = idx / 4;
-            int k = (idx % 4) * 4;
-            cp_async_16(&A_smem[stage][m][k], &A[(cta_m + m) * K + k0 + k]);
+        for (int ni = 0; ni < WARP_TILES_N; ++ni) {
+            fill_fragment(c_frag[mi][ni], 0.0f);
+        }
+    }
+
+    const int num_k_tiles = K / BK;
+
+    // ========================================================================
+    // Load A tile: 128×16 = 2048 floats = 512 float4
+    // 256 threads × 2 iterations = 512 cp.async loads
+    // ========================================================================
+    auto load_A_tile = [&](int stage, int k_tile) {
+        const int k_base = k_tile * BK;
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const int idx = tid + i * 256;
+            const int m = idx / 4;            // 0-127 (BM rows)
+            const int k = (idx % 4) * 4;      // 0,4,8,12 (BK/4 groups)
+            cp_async_cg_16(&A_smem[stage][m][k], &A[(cta_m + m) * K + k_base + k]);
         }
     };
 
-    // col-major B tile, transposed at load time
-    auto load_B_tile = [&](int stage, int kt) {
-        int k0 = kt * BK;
+    // ========================================================================
+    // Load B tile: 16×128 = 2048 floats = 512 float4
+    // 256 threads × 2 iterations = 512 cp.async loads
+    // B is loaded directly into K×N row-major layout (NO transpose!)
+    // ========================================================================
+    auto load_B_tile = [&](int stage, int k_tile) {
+        const int k_base = k_tile * BK;
         #pragma unroll
-        for (int i = 0; i < 2; i++) {
-            int idx = tid + i * 256;
-            int k = idx / 32;
-            int n = (idx % 32) * 4;
-
-            float4 v = *reinterpret_cast<const float4*>(
-                &B[(k0 + k) * N + (cta_n + n)]
-            );
-
-            // CUTLASS-style transpose
-            B_smem[stage][n + 0][k] = v.x;
-            B_smem[stage][n + 1][k] = v.y;
-            B_smem[stage][n + 2][k] = v.z;
-            B_smem[stage][n + 3][k] = v.w;
+        for (int i = 0; i < 2; ++i) {
+            const int idx = tid + i * 256;
+            const int k = idx / 32;           // 0-15 (BK rows)
+            const int n = (idx % 32) * 4;     // 0,4,8,...,124 (BN/4 groups)
+            cp_async_cg_16(&B_smem[stage][k][n], &B[(k_base + k) * N + cta_n + n]);
         }
     };
 
-    // -------------------------------------------------------------------------
-    // Prologue: load tile 0 and tile 1
-    // -------------------------------------------------------------------------
+    // ========================================================================
+    // PROLOGUE: Load first 2 tiles
+    // ========================================================================
     load_A_tile(0, 0);
     load_B_tile(0, 0);
     cp_async_commit();
 
-    if (num_tiles > 1) {
+    if (num_k_tiles > 1) {
         load_A_tile(1, 1);
         load_B_tile(1, 1);
         cp_async_commit();
     }
 
-    cp_async_wait();
+    cp_async_wait_group_1();
     __syncthreads();
 
-    // -------------------------------------------------------------------------
-    // Main loop
-    // -------------------------------------------------------------------------
-    for (int kt = 0; kt < num_tiles; kt++) {
-        int curr = kt & 1;
-        int next = 1 - curr;
+    // ========================================================================
+    // MAIN LOOP: 2-stage pipeline
+    // ========================================================================
+    for (int k_tile = 0; k_tile < num_k_tiles; ++k_tile) {
+        const int curr = k_tile & 1;
+        const int next = 1 - curr;
 
-        if (kt + 2 < num_tiles) {
-            load_A_tile(next, kt + 2);
-            load_B_tile(next, kt + 2);
-            cp_async_commit();
+        // 1. Prefetch tile (k+2) into next stage
+        if (k_tile + 2 < num_k_tiles) {
+            load_A_tile(next, k_tile + 2);
+            load_B_tile(next, k_tile + 2);
         }
 
+        // 2. Compute MMA on current tile
         #pragma unroll
         for (int kk = 0; kk < BK; kk += WMMA_K) {
-
+            // Load A fragments
             #pragma unroll
-            for (int mi = 0; mi < WARP_TILES_M; mi++) {
-                load_matrix_sync(
-                    a_frag[mi],
-                    &A_smem[curr][warp_m + mi * WMMA_M][kk],
-                    BK + A_PAD
-                );
+            for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+                const int m_off = warp_m + mi * WMMA_M;
+                load_matrix_sync(a_frag[mi], &A_smem[curr][m_off][kk], BK + A_PAD);
             }
 
+            // Load B fragments (row_major from K×N layout)
+            // ldm = BN + B_PAD = 132 (stride between rows)
             #pragma unroll
-            for (int ni = 0; ni < WARP_TILES_N; ni++) {
-                load_matrix_sync(
-                    b_frag[ni],
-                    &B_smem[curr][warp_n + ni * WMMA_N][kk],
-                    BK + B_PAD
-                );
+            for (int ni = 0; ni < WARP_TILES_N; ++ni) {
+                const int n_off = warp_n + ni * WMMA_N;
+                load_matrix_sync(b_frag[ni], &B_smem[curr][kk][n_off], BN + B_PAD);
             }
 
+            // Matrix multiply-accumulate
             #pragma unroll
-            for (int mi = 0; mi < WARP_TILES_M; mi++)
-                for (int ni = 0; ni < WARP_TILES_N; ni++)
+            for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+                #pragma unroll
+                for (int ni = 0; ni < WARP_TILES_N; ++ni) {
                     mma_sync(c_frag[mi][ni], a_frag[mi], b_frag[ni], c_frag[mi][ni]);
+                }
+            }
         }
 
-        cp_async_wait();
+        // 3. Commit prefetch group
+        cp_async_commit();
+
+        // 4. Wait for previous prefetch
+        cp_async_wait_group_1();
+
+        // 5. Synchronize
         __syncthreads();
     }
 
-    // -------------------------------------------------------------------------
-    // Epilogue
-    // -------------------------------------------------------------------------
-    const bool aligned = (N % 8 == 0);
-
+    // ========================================================================
+    // EPILOGUE: Store results
+    // ========================================================================
     #pragma unroll
-    for (int mi = 0; mi < WARP_TILES_M; mi++) {
-        for (int ni = 0; ni < WARP_TILES_N; ni++) {
-
-            int m_off = cta_m + warp_m + mi * WMMA_M;
-            int n_off = cta_n + warp_n + ni * WMMA_N;
+    for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+        #pragma unroll
+        for (int ni = 0; ni < WARP_TILES_N; ++ni) {
+            const int m_off = cta_m + warp_m + mi * WMMA_M;
+            const int n_off = cta_n + warp_n + ni * WMMA_N;
 
             if (m_off < M && n_off < N) {
-                int valid_m = min(WMMA_M, M - m_off);
-                int valid_n = min(WMMA_N, N - n_off);
-
-                if (aligned && valid_m == WMMA_M && valid_n == WMMA_N) {
-                    store_matrix_sync(
-                        &C[m_off * N + n_off],
-                        c_frag[mi][ni],
-                        (unsigned)N,
-                        mem_row_major
-                    );
+                // Direct store for aligned full tiles
+                if (m_off + WMMA_M <= M && n_off + WMMA_N <= N) {
+                    store_matrix_sync(&C[m_off * N + n_off], c_frag[mi][ni], N, mem_row_major);
                 } else {
-                    // safe epilogue
-                    float tmp[WMMA_M * WMMA_N];
-                    store_matrix_sync(tmp, c_frag[mi][ni], WMMA_N, mem_row_major);
-                    for (int r = 0; r < valid_m; r++)
-                        for (int c = 0; c < valid_n; c++)
-                            C[(m_off + r) * N + (n_off + c)] =
-                                tmp[r * WMMA_N + c];
+                    // Partial tile: use shared memory staging
+                    __shared__ float C_tile[WMMA_M][WMMA_N];
+                    store_matrix_sync(&C_tile[0][0], c_frag[mi][ni], WMMA_N, mem_row_major);
+                    __syncwarp();
+
+                    const int valid_m = min(WMMA_M, M - m_off);
+                    const int valid_n = min(WMMA_N, N - n_off);
+
+                    // Cooperative store
+                    for (int r = lane_id; r < valid_m * valid_n; r += 32) {
+                        const int row = r / valid_n;
+                        const int col = r % valid_n;
+                        C[(m_off + row) * N + n_off + col] = C_tile[row][col];
+                    }
+                    __syncwarp();
                 }
             }
         }
     }
 }
 
+// ============================================================================
+// Launch Function
+// ============================================================================
+
 inline cudaError_t launch_sgemm_tf32(
     const float* A, const float* B, float* C,
     int M, int N, int K,
     cudaStream_t stream = 0
 ) {
-    dim3 block(16, 16);
+    dim3 block(16, 16);  // 256 threads
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
-    sgemm_tf32_g3_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
+    sgemm_tf32_wmma_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
     return cudaGetLastError();
 }
 
