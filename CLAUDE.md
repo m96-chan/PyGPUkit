@@ -571,14 +571,51 @@ store_matrix_sync(C, c_frag, N, mem_row_major);
 | 16 | 16 | 128 | 0.0247 | 0.08% | PASS |
 | 16 | 16 | 256 | 0.0373 | 0.08% | PASS |
 
+### WMMA 16×16×8 フラグメントマッピング (実測値)
+
+`dump_fragments.cu` による実測結果:
+
+#### A fragment (16×8 matrix_a, row_major)
+```cpp
+// Thread t (0-31):
+int a_row = t / 4;      // 0-7
+int a_col = t % 4;      // 0-3
+
+a[0] = A[a_row][a_col]           // rows 0-7,  cols 0-3
+a[1] = A[a_row + 8][a_col]       // rows 8-15, cols 0-3
+a[2] = A[a_row][a_col + 4]       // rows 0-7,  cols 4-7
+a[3] = A[a_row + 8][a_col + 4]   // rows 8-15, cols 4-7
+```
+
+#### B fragment (8×16 matrix_b, row_major)
+```cpp
+// Thread t (0-31):
+int b_row = t % 4;      // 0-3
+int b_col = t / 4;      // 0-7
+
+b[0] = B[b_row][b_col]           // rows 0-3, cols 0-7
+b[1] = B[b_row + 4][b_col]       // rows 4-7, cols 0-7
+b[2] = B[b_row][b_col + 8]       // rows 0-3, cols 8-15
+b[3] = B[b_row + 4][b_col + 8]   // rows 4-7, cols 8-15
+```
+
+#### サイズの違い
+| API | A | B | C |
+|-----|---|---|---|
+| WMMA 16×16×8 | 16×8 | 8×16 | 16×16 |
+| PTX m16n8k8 | 16×8 | 8×8 | 16×8 |
+
+PTX m16n8k8 は WMMA の **B/C の左半分** (cols 0-7) のみを使用。
+
 ### 次のステップ
 
-1. WMMAの正しいフラグメントマッピングを `debug_dump_fragments` で確認
-2. PTX mma.sync 版のA/B/Cマッピングを修正
+1. ✅ WMMAの正しいフラグメントマッピングを `debug_dump_fragments` で確認
+2. PTX mma.sync 版のA/B/Cマッピングを修正 (上記マッピングのcols 0-7部分を使用)
 3. マルチタイル・マルチワープへ拡張
 
 ### ファイル構成
 
 - `native/ops/matmul_f32_tf32.cuh` - TF32カーネル
 - `native/ops/basic.cu` - ディスパッチロジック (line 848-854)
+- `dump_fragments.cu` - フラグメントマッピング確認用
 - 環境変数 `PYGPUKIT_ALLOW_TF32=1` で有効化

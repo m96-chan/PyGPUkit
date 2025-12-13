@@ -72,6 +72,49 @@ inline cudaError_t launch_wmma_row_row(
     return cudaGetLastError();
 }
 
+// ============================================================
+// Debug: Dump WMMA fragment contents
+// Output: A_out[32 * num_elements_a], B_out[32 * num_elements_b]
+// Each thread dumps its fragment elements
+// ============================================================
+__global__ void debug_dump_fragments(
+    const float* A, const float* B,
+    float* A_out, float* B_out,
+    int K, int N
+) {
+    using namespace nvcuda::wmma;
+
+    int lane = threadIdx.x;
+    if (lane >= 32) return;
+
+    fragment<matrix_a, 16, 16, 8, precision::tf32, row_major> a_frag;
+    fragment<matrix_b, 16, 16, 8, precision::tf32, row_major> b_frag;
+
+    // Load first K-tile only
+    load_matrix_sync(a_frag, A, K);
+    load_matrix_sync(b_frag, B, N);
+
+    // Dump A fragment (4 elements per thread for 16x16x8)
+    for (int i = 0; i < a_frag.num_elements; i++) {
+        A_out[lane * a_frag.num_elements + i] = a_frag.x[i];
+    }
+
+    // Dump B fragment (4 elements per thread for 16x16x8)
+    for (int i = 0; i < b_frag.num_elements; i++) {
+        B_out[lane * b_frag.num_elements + i] = b_frag.x[i];
+    }
+}
+
+inline cudaError_t launch_dump_fragments(
+    const float* A, const float* B,
+    float* A_out, float* B_out,
+    int K, int N,
+    cudaStream_t stream = 0
+) {
+    debug_dump_fragments<<<1, 32, 0, stream>>>(A, B, A_out, B_out, K, N);
+    return cudaGetLastError();
+}
+
 } // namespace tf32
 } // namespace ops
 } // namespace pygpukit
