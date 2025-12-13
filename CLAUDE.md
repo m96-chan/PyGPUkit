@@ -607,11 +607,26 @@ b[3] = B[b_row + 4][b_col + 8]   // rows 4-7, cols 8-15
 
 PTX m16n8k8 は WMMA の **B/C の左半分** (cols 0-7) のみを使用。
 
+#### C fragment マッピング (実測: dump_c_fragment.cu)
+```cpp
+int c_row = t / 4;           // 0-7
+int c_col = (t % 4) * 2;     // 0, 2, 4, 6
+c[0] = C[c_row][c_col]        // rows 0-7, cols even
+c[1] = C[c_row][c_col + 1]    // rows 0-7, cols odd
+c[2] = C[c_row + 8][c_col]    // rows 8-15, cols even
+c[3] = C[c_row + 8][c_col + 1]// rows 8-15, cols odd
+```
+
+### 正確性テスト (C fragment 修正後) - 全 PASS
+- 256³〜4096³: rel_err ≈ 8e-4 (0.08%)
+- 決定性100回: PASS
+
 ### 次のステップ
 
-1. ✅ WMMAの正しいフラグメントマッピングを `debug_dump_fragments` で確認
-2. PTX mma.sync 版のA/B/Cマッピングを修正 (上記マッピングのcols 0-7部分を使用)
-3. マルチタイル・マルチワープへ拡張
+1. ✅ WMMAの正しいフラグメントマッピングを `dump_fragments` で確認
+2. ✅ C fragment マッピングを `dump_c_fragment` で確認・修正
+3. ✅ 全正確性テスト PASS
+4. パフォーマンス最適化 (現状 11-18 TFLOPS → 目標 22-35 TFLOPS)
 
 ### ファイル構成
 
