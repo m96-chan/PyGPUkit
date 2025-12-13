@@ -14,7 +14,6 @@ Performance Targets:
 - Minimum: 22 TFLOPS (must beat PyTorch baseline)
 """
 import os
-import sys
 import time
 
 import numpy as np
@@ -71,7 +70,7 @@ def benchmark_matmul(m: int, n: int, k: int, warmup: int = 3, iterations: int = 
         A_gpu = native.from_numpy(A_np)
         B_gpu = native.from_numpy(B_np)
         start = time.perf_counter()
-        C_gpu = native.matmul(A_gpu, B_gpu)
+        _ = native.matmul(A_gpu, B_gpu)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
