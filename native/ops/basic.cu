@@ -1,4 +1,5 @@
 #include "basic.cuh"
+#include "matmul_f32_ampere.cuh"
 #include <stdexcept>
 
 #ifdef PYGPUKIT_DRIVER_ONLY
@@ -804,17 +805,9 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                       K >= TILED_MATMUL_THRESHOLD);
 
     if (use_optimized) {
-        // RTX 3090 Ti optimized kernel with 128x128 tiles
-        // Block size: 16x16 = 256 threads, each handles 8x8 output elements
-        constexpr int OPT_BM = 128;
-        constexpr int OPT_BN = 128;
-        dim3 block_size(16, 16);  // 256 threads
-        dim3 grid_size(
-            (N + OPT_BN - 1) / OPT_BN,
-            (M + OPT_BM - 1) / OPT_BM
-        );
-
-        matmul_f32_optimized_kernel<<<grid_size, block_size>>>(
+        // Ampere-optimized kernel with cp.async and 4-stage pipeline
+        // Target: 22-32 TFLOPS on RTX 3090 Ti
+        ampere::launch_sgemm_ampere(
             static_cast<const float*>(a.data()),
             static_cast<const float*>(b.data()),
             static_cast<float*>(c.data()),

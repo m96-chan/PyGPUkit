@@ -61,7 +61,8 @@ cmake.args = ["-DCMAKE_CUDA_COMPILER_WORKS=1"]
 build.targets = []
 
 [tool.scikit-build.cmake.define]
-CMAKE_CUDA_ARCHITECTURES = "70;75;80;86;89;90"
+# PyGPUkit requires SM >= 80 (Ampere and newer) for cp.async support
+CMAKE_CUDA_ARCHITECTURES = "80;86;89;90"
 
 [tool.cibuildwheel]
 # Skip PyPy, 32-bit builds, and musllinux
