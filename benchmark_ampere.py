@@ -51,13 +51,13 @@ def benchmark_matmul(m, n, k, warmup=3, iterations=10):
 
     # Warmup
     for _ in range(warmup):
-        C_gpu = native.matmul(A_gpu, B_gpu)
+        _ = native.matmul(A_gpu, B_gpu)
 
     # Benchmark (reuse same input arrays)
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
-        C_gpu = native.matmul(A_gpu, B_gpu)
+        _ = native.matmul(A_gpu, B_gpu)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
