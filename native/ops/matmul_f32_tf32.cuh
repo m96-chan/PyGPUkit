@@ -215,6 +215,29 @@ sgemm_tf32_kernel(const float* __restrict__ A,
     }
 }
 
+// ============================================================
+// Launch Function
+// ============================================================
+
+inline cudaError_t launch_sgemm_tf32(
+    const float* A, const float* B, float* C,
+    int M, int N, int K,
+    cudaStream_t stream = 0
+) {
+    dim3 block(16, 16);  // 256 threads
+    dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+
+    // Shared memory size:
+    // A_smem: 2 * BM * (BK + A_PAD) * sizeof(float) = 2 * 128 * 40 * 4 = 40960
+    // B_smem: 2 * BK * (BN + B_PAD) * sizeof(float) = 2 * 32 * 136 * 4 = 34816
+    // Total: 75776 bytes
+    size_t smem_size = 2 * BM * (BK + A_PAD) * sizeof(float)
+                     + 2 * BK * (BN + B_PAD) * sizeof(float);
+
+    sgemm_tf32_kernel<<<grid, block, smem_size, stream>>>(A, B, C, M, N, K);
+    return cudaGetLastError();
+}
+
 } // namespace tf32
 } // namespace ops
 } // namespace pygpukit
