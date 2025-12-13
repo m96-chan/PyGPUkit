@@ -35,10 +35,10 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 | Library | FP32 | TF32 | Notes |
 |---------|------|------|-------|
 | **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU baseline |
-| **PyTorch** (cuBLAS) | ~25 TFLOPS* | ~65 TFLOPS* | *Estimated from [benchmarks](https://siboehm.com/articles/22/CUDA-MMM) |
-| **PyGPUkit** | 18 TFLOPS | **27 TFLOPS** | Custom kernels |
+| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | [NVIDIA benchmark](https://forums.developer.nvidia.com/t/a40-and-3090-gemm-performance-test-data/249424) |
+| **PyGPUkit** | 18 TFLOPS (86%) | 27 TFLOPS (46%) | Custom kernels |
 
-> *PyTorch numbers are estimates based on cuBLAS performance. Actual comparison benchmarks planned for v0.2.4.
+> FP32 is near cuBLAS level. TF32 optimization ongoing.
 
 ### PyGPUkit Performance by Size
 | Matrix Size | FP32 | TF32 |
