@@ -22,8 +22,10 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ## Opening Paragraph (Goal Statement)
 
-PyGPUkit aims to free developers from the complexity of CUDA Toolkit, Anaconda, and fragile GPU environments.
-Its goal is to make GPU programming and model execution feel like using a standard Python library: installable via pip, minimal setup, and no mandatory external SDKs. PyGPUkit provides high-performance GPU kernels, memory management, scheduling, and model execution (e.g. SafeTensors) through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively without fighting their environment.
+PyGPUkit aims to simplify GPU development by reducing dependency on complex CUDA Toolkit installations and fragile GPU environments.
+Its goal is to make GPU programming feel like using a standard Python library: installable via pip with minimal setup. PyGPUkit provides high-performance GPU kernels, memory management, and scheduling through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively.
+
+> **Note:** PyGPUkit currently requires CUDA drivers and NVRTC. It is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads, research, and real-time systems where full ML frameworks are overkill.
 
 ---
 
@@ -76,7 +78,7 @@ Its goal is to make GPU programming and model execution feel like using a standa
 ---
 
 ## Features
-- **Lightweight** — no PyTorch/CuPy overhead
+- **Lightweight** — smaller footprint than PyTorch/CuPy (not a replacement)
 - **Modular** — runtime / memory / scheduler / JIT / ops
 - **Rust Backend** — memory pool, scheduler, dispatch in Rust
 - **GPUArray** with NumPy interop
