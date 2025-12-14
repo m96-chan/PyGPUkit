@@ -41,13 +41,13 @@ Its goal is to make GPU programming feel like using a standard Python library: i
 
 ### Benchmark Comparison (RTX 3090 Ti, 8192×8192×8192)
 
-| Library | FP32 | TF32 | Notes |
-|---------|------|------|-------|
-| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU baseline |
-| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | [NVIDIA benchmark](https://forums.developer.nvidia.com/t/a40-and-3090-gemm-performance-test-data/249424) |
-| **PyGPUkit** | 18 TFLOPS (86%) | 27 TFLOPS (46%) | Custom kernels |
+| Library | FP32 | TF32 | Requires | Notes |
+|---------|------|------|----------|-------|
+| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only | CPU baseline |
+| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit | [NVIDIA benchmark](https://forums.developer.nvidia.com/t/a40-and-3090-gemm-performance-test-data/249424) |
+| **PyGPUkit** (Driver-Only) | 18 TFLOPS (86%) | 27 TFLOPS (46%) | **GPU drivers only** | No CUDA Toolkit needed! |
 
-> FP32 is near cuBLAS level. TF32 optimization ongoing.
+> **v0.2.4+**: PyGPUkit is now a **single-binary distribution** — pre-compiled GPU operations work with just NVIDIA drivers installed. CUDA Toolkit is only needed for JIT compilation of custom kernels.
 
 ### PyGPUkit Performance by Size
 | Matrix Size | FP32 | TF32 |
@@ -350,9 +350,11 @@ PyGPUkit/
 | **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 27.5 TFLOPS |
 
-### **v0.2.4 — NVRTC Optional & Reliability (Current)**
-- [x] NVRTC made optional (works with driver-only installation)
-- [x] `is_nvrtc_available()` / `get_nvrtc_version()` API
+### **v0.2.4 — Single-Binary Distribution (Current)**
+- [x] **Single-binary wheel** — no CUDA Toolkit required for pre-compiled ops
+- [x] **Dynamic NVRTC loading** — JIT available when Toolkit installed
+- [x] **Driver-only mode** — only `nvcuda.dll` required (from GPU drivers)
+- [x] `is_nvrtc_available()` / `get_nvrtc_version()` / `get_nvrtc_path()` API
 - [x] Graceful fallback when NVRTC unavailable
 - [x] Performance tests made informational (always PASS with TFLOPS summary)
 - [ ] Actual PyTorch/NumPy comparison benchmarks
