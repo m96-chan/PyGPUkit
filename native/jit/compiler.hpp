@@ -17,6 +17,10 @@ struct CompiledPTX {
 // Returns true if NVRTC DLL/so is loaded and functional
 bool is_nvrtc_available();
 
+// Get the path to the loaded NVRTC library
+// Returns empty string if NVRTC is not loaded
+std::string get_nvrtc_library_path();
+
 // Compile CUDA source to PTX using NVRTC
 // Throws NvrtcError if NVRTC is not available
 CompiledPTX compile_to_ptx(

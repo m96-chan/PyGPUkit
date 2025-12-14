@@ -25,6 +25,16 @@ void sync_and_check(const char* msg) {
     check_driver_error(cuCtxSynchronize(), msg);
 }
 
+// Get SM version using Driver API
+int get_sm_version_internal() {
+    auto& ctx = driver::DriverContext::instance();
+    CUdevice device = ctx.get_device(ctx.current_device());
+    int major = 0, minor = 0;
+    cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+    cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+    return major * 10 + minor;
+}
+
 #else
 #include <cuda_runtime.h>
 
@@ -42,6 +52,15 @@ void check_cuda_error(cudaError_t err, const char* msg) {
 void sync_and_check(const char* msg) {
     check_cuda_error(cudaGetLastError(), msg);
     check_cuda_error(cudaDeviceSynchronize(), msg);
+}
+
+// Get SM version using Runtime API
+int get_sm_version_internal() {
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device);
+    return prop.major * 10 + prop.minor;
 }
 
 #endif // PYGPUKIT_DRIVER_ONLY
@@ -813,12 +832,8 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     }
 
     if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
-        // Check GPU compute capability
-        int device;
-        cudaGetDevice(&device);
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, device);
-        sm_version = prop.major * 10 + prop.minor;
+        // Check GPU compute capability (using internal helper for driver-only compatibility)
+        sm_version = get_sm_version_internal();
         tf32_enabled = (sm_version >= 80);  // Ampere or newer
         if (!debug_printed) {
             fprintf(stderr, "[PyGPUkit] SM version = %d, TF32 enabled = %d\n", sm_version, tf32_enabled);
@@ -953,11 +968,8 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
     }
 
     // Check GPU compute capability for TF32 support
-    int device;
-    cudaGetDevice(&device);
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, device);
-    int sm_version = prop.major * 10 + prop.minor;
+    // (using internal helper for driver-only compatibility)
+    int sm_version = get_sm_version_internal();
 
     // TF32 only works with float32 and SM >= 80
     bool tf32_enabled = use_tf32_explicit &&

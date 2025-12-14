@@ -8,7 +8,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Driver-Only Mode option
 # When enabled, removes cudart dependency and uses CUDA Driver API only
-option(PYGPUKIT_DRIVER_ONLY "Build in driver-only mode (no cudart dependency)" OFF)
+# Default: ON for self-contained binary (v0.2.4+)
+option(PYGPUKIT_DRIVER_ONLY "Build in driver-only mode (no cudart dependency)" ON)
 
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
@@ -54,6 +55,7 @@ pybind11_add_module(_pygpukit_native
     # JIT
     jit/compiler.cpp
     jit/kernel.cpp
+    jit/nvrtc_loader.cpp
     # Ops
     ops/basic.cu
     # Bindings
@@ -64,17 +66,16 @@ pybind11_add_module(_pygpukit_native
 )
 
 if(PYGPUKIT_DRIVER_ONLY)
-    # Driver-only: Link only cuda_driver and nvrtc (no cudart)
+    # Driver-only: Link only cuda_driver (no cudart, no nvrtc link-time dependency)
+    # NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
     target_link_libraries(_pygpukit_native PRIVATE
         CUDA::cuda_driver
-        CUDA::nvrtc
     )
 else()
-    # Standard: Link cudart, cuda_driver, and nvrtc
+    # Standard: Link cudart and cuda_driver (nvrtc loaded dynamically)
     target_link_libraries(_pygpukit_native PRIVATE
         CUDA::cudart
         CUDA::cuda_driver
-        CUDA::nvrtc
     )
 endif()
 

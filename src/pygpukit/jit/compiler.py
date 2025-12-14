@@ -57,6 +57,16 @@ def get_nvrtc_path() -> str | None:
         ...     print(f"NVRTC found at: {path}")
     """
     try:
+        from pygpukit.core.backend import get_native_module, has_native_module
+
+        # Prefer native module's path (what's actually loaded at runtime)
+        if has_native_module():
+            native = get_native_module()
+            path = native.get_nvrtc_library_path()
+            if path:
+                return path
+
+        # Fall back to Python-side discovery
         from pygpukit.core.backend import _find_nvrtc_dll
 
         return _find_nvrtc_dll()

@@ -49,6 +49,12 @@ void init_jit_bindings(py::module_& m) {
        "Raises:\n"
        "    RuntimeError: If NVRTC is not available.");
 
+    // get_nvrtc_library_path function
+    m.def("get_nvrtc_library_path", &get_nvrtc_library_path,
+          "Get the path to the loaded NVRTC library.\n\n"
+          "Returns:\n"
+          "    str: Path to NVRTC DLL/SO if loaded, empty string otherwise.");
+
     // JITKernel class
     py::class_<JITKernel>(m, "JITKernel")
         .def(py::init<const std::string&, const std::string&, const std::vector<std::string>&>(),
