@@ -9,6 +9,7 @@ mod memory;
 mod scheduler;
 mod transfer;
 mod dispatch;
+mod device;
 
 /// PyGPUkit Rust module
 #[pymodule]
@@ -32,6 +33,11 @@ fn _pygpukit_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let dispatch_module = PyModule::new(m.py(), "dispatch")?;
     dispatch::register(&dispatch_module)?;
     m.add_submodule(&dispatch_module)?;
+
+    // Device submodule
+    let device_module = PyModule::new(m.py(), "device")?;
+    device::register(&device_module)?;
+    m.add_submodule(&device_module)?;
 
     // Also export at top level for convenience
     m.add_class::<memory::PyMemoryPool>()?;
@@ -91,6 +97,9 @@ fn _pygpukit_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheduler::PyPartitionUsage>()?;
     m.add_class::<scheduler::PyPartition>()?;
     m.add_class::<scheduler::PyPartitionStats>()?;
+    // Device capabilities
+    m.add_class::<device::PyKernelType>()?;
+    m.add_class::<device::PyDeviceCapabilities>()?;
 
     Ok(())
 }
