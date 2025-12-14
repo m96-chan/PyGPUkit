@@ -2,6 +2,20 @@
 
 ---
 
+## Goal Statement
+
+PyGPUkit aims to free developers from the complexity of CUDA Toolkit, Anaconda, and fragile GPU environments.
+Its goal is to make GPU programming and model execution feel like using a standard Python library: installable via pip, minimal setup, and no mandatory external SDKs. PyGPUkit provides high-performance GPU kernels, memory management, scheduling, and model execution (e.g. SafeTensors) through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively without fighting their environment.
+
+## Project Goals
+
+1. Provide the smallest usable GPU runtime for Python
+2. Expose GPU scheduling (bandwidth, memory, partitioning)
+3. Make writing custom GPU kernels easy
+4. Serve as a building block for inference engines, DSP systems, and real-time workloads
+
+---
+
 ## IMPORTANT IMPLEMENTATION DIRECTIVES FOR PyGPUkit (MANDATORY)
 
 You **MUST** preserve and prioritize all Rust-based components.
