@@ -6,20 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Driver-Only Mode option
-# When enabled, removes cudart dependency and uses CUDA Driver API only
-# Default: ON for self-contained binary (v0.2.4+)
-option(PYGPUKIT_DRIVER_ONLY "Build in driver-only mode (no cudart dependency)" ON)
-
 # Find CUDA
 find_package(CUDAToolkit REQUIRED)
 
-if(PYGPUKIT_DRIVER_ONLY)
-    message(STATUS "Building in DRIVER-ONLY mode (no cudart dependency)")
-    add_compile_definitions(PYGPUKIT_DRIVER_ONLY=1)
-else()
-    message(STATUS "Building with CUDA Runtime API (cudart)")
-endif()
+# PyGPUkit v0.2.4+: Always build in driver-only mode for single-binary distribution
+# Only nvcuda.dll (GPU driver) is required - no CUDA Toolkit needed at runtime
+message(STATUS "Building in DRIVER-ONLY mode (single-binary distribution)")
 
 # Find Python and pybind11
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
@@ -65,19 +57,12 @@ pybind11_add_module(_pygpukit_native
     bindings/ops_bindings.cpp
 )
 
-if(PYGPUKIT_DRIVER_ONLY)
-    # Driver-only: Link only cuda_driver (no cudart, no nvrtc link-time dependency)
-    # NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
-    target_link_libraries(_pygpukit_native PRIVATE
-        CUDA::cuda_driver
-    )
-else()
-    # Standard: Link cudart and cuda_driver (nvrtc loaded dynamically)
-    target_link_libraries(_pygpukit_native PRIVATE
-        CUDA::cudart
-        CUDA::cuda_driver
-    )
-endif()
+# Link only cuda_driver (no cudart, no nvrtc link-time dependency)
+# NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
+# This enables single-binary distribution that works with just GPU drivers
+target_link_libraries(_pygpukit_native PRIVATE
+    CUDA::cuda_driver
+)
 
 set_target_properties(_pygpukit_native PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON

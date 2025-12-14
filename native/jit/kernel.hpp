@@ -1,3 +1,6 @@
+// JIT kernel management using CUDA Driver API
+// PyGPUkit v0.2.4+: Single-binary distribution (driver-only mode)
+
 #pragma once
 
 #include "../core/types.hpp"
@@ -7,17 +10,12 @@
 #include <vector>
 #include <memory>
 
-#ifdef PYGPUKIT_DRIVER_ONLY
 // Driver-only mode: define our own Dim3 struct
 struct Dim3 {
     unsigned int x, y, z;
     Dim3(unsigned int x_ = 1, unsigned int y_ = 1, unsigned int z_ = 1)
         : x(x_), y(y_), z(z_) {}
 };
-#else
-#include <cuda_runtime.h>
-using Dim3 = dim3;
-#endif
 
 namespace pygpukit {
 

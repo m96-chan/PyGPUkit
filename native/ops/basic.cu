@@ -1,12 +1,13 @@
+// Basic GPU operations using CUDA Driver API
+// PyGPUkit v0.2.4+: Single-binary distribution (driver-only mode)
+
 #include "basic.cuh"
 #include "matmul_f32_ampere.cuh"
 #include "matmul_f32_tf32.cuh"
-#include <stdexcept>
-#include <cstdlib>
-
-#ifdef PYGPUKIT_DRIVER_ONLY
 #include "../core/driver_context.hpp"
 #include <cuda.h>
+#include <stdexcept>
+#include <cstdlib>
 
 namespace pygpukit {
 namespace ops {
@@ -34,36 +35,6 @@ int get_sm_version_internal() {
     cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
     return major * 10 + minor;
 }
-
-#else
-#include <cuda_runtime.h>
-
-namespace pygpukit {
-namespace ops {
-
-namespace {
-
-void check_cuda_error(cudaError_t err, const char* msg) {
-    if (err != cudaSuccess) {
-        throw CudaError(std::string(msg) + ": " + cudaGetErrorString(err));
-    }
-}
-
-void sync_and_check(const char* msg) {
-    check_cuda_error(cudaGetLastError(), msg);
-    check_cuda_error(cudaDeviceSynchronize(), msg);
-}
-
-// Get SM version using Runtime API
-int get_sm_version_internal() {
-    int device;
-    cudaGetDevice(&device);
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, device);
-    return prop.major * 10 + prop.minor;
-}
-
-#endif // PYGPUKIT_DRIVER_ONLY
 
 void validate_same_shape(const GPUArray& a, const GPUArray& b, const char* op_name) {
     if (a.shape() != b.shape()) {

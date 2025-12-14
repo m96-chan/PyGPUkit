@@ -1,11 +1,11 @@
-#include "memory.hpp"
-#include <numeric>
-#include <cstring>
+// Memory management using CUDA Driver API
+// PyGPUkit v0.2.4+: Single-binary distribution (driver-only mode)
 
-#ifdef PYGPUKIT_DRIVER_ONLY
-// Driver-only mode: Use CUDA Driver API
+#include "memory.hpp"
 #include "driver_context.hpp"
 #include "driver_api.hpp"
+#include <numeric>
+#include <cstring>
 
 namespace pygpukit {
 
@@ -68,62 +68,6 @@ void device_memset(DevicePtr ptr, int value, size_t size_bytes) {
 void get_memory_info(size_t* free_bytes, size_t* total_bytes) {
     check_driver_error(cuMemGetInfo(free_bytes, total_bytes), "Failed to get memory info");
 }
-
-#else
-// Standard mode: Use CUDA Runtime API
-#include <cuda_runtime.h>
-
-namespace pygpukit {
-
-namespace {
-
-void check_cuda_error(cudaError_t err, const char* msg) {
-    if (err != cudaSuccess) {
-        throw CudaError(std::string(msg) + ": " + cudaGetErrorString(err));
-    }
-}
-
-} // anonymous namespace
-
-DevicePtr device_malloc(size_t size_bytes) {
-    void* ptr = nullptr;
-    cudaError_t err = cudaMalloc(&ptr, size_bytes);
-    check_cuda_error(err, "Failed to allocate device memory");
-    return ptr;
-}
-
-void device_free(DevicePtr ptr) {
-    if (ptr != nullptr) {
-        cudaFree(ptr);
-    }
-}
-
-void memcpy_host_to_device(DevicePtr dst, const void* src, size_t size_bytes) {
-    cudaError_t err = cudaMemcpy(dst, src, size_bytes, cudaMemcpyHostToDevice);
-    check_cuda_error(err, "Failed to copy host to device");
-}
-
-void memcpy_device_to_host(void* dst, DevicePtr src, size_t size_bytes) {
-    cudaError_t err = cudaMemcpy(dst, src, size_bytes, cudaMemcpyDeviceToHost);
-    check_cuda_error(err, "Failed to copy device to host");
-}
-
-void memcpy_device_to_device(DevicePtr dst, DevicePtr src, size_t size_bytes) {
-    cudaError_t err = cudaMemcpy(dst, src, size_bytes, cudaMemcpyDeviceToDevice);
-    check_cuda_error(err, "Failed to copy device to device");
-}
-
-void device_memset(DevicePtr ptr, int value, size_t size_bytes) {
-    cudaError_t err = cudaMemset(ptr, value, size_bytes);
-    check_cuda_error(err, "Failed to memset device memory");
-}
-
-void get_memory_info(size_t* free_bytes, size_t* total_bytes) {
-    cudaError_t err = cudaMemGetInfo(free_bytes, total_bytes);
-    check_cuda_error(err, "Failed to get memory info");
-}
-
-#endif // PYGPUKIT_DRIVER_ONLY
 
 // GPUArray implementation
 

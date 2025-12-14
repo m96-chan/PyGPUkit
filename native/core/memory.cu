@@ -1,23 +1,16 @@
 // CUDA kernels for memory operations
-#include "memory.hpp"
+// PyGPUkit v0.2.4+: Single-binary distribution (driver-only mode)
 
-#ifdef PYGPUKIT_DRIVER_ONLY
+#include "memory.hpp"
 #include "driver_context.hpp"
 #include <cuda.h>
-#else
-#include <cuda_runtime.h>
-#endif
 
 namespace pygpukit {
 
 namespace {
 
 void sync_device() {
-#ifdef PYGPUKIT_DRIVER_ONLY
     cuCtxSynchronize();
-#else
-    cudaDeviceSynchronize();
-#endif
 }
 
 } // anonymous namespace
