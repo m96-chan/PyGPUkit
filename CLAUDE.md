@@ -617,6 +617,120 @@ If performance or correctness DEGRADES:
 
 **These rules are absolute. No exceptions.**
 
+了解。**そのまま `CLAUDE.md` に貼れる形**で書くね。
+トーンは「ClaudeCodeが迷わない」「実装判断でブレない」ことを最優先にしてる。
+
+---
+
+## Non-goals / Design Principles
+
+### Design Principles
+
+#### 1. PyGPUkit is a GPU Systems Toolkit, not a ML Framework
+
+PyGPUkit is **not** a replacement for PyTorch, JAX, or TensorFlow.
+Its purpose is to provide **low-level, explicit, and controllable GPU execution primitives** on top of which higher-level systems may be built.
+
+* Focus: memory, kernels, scheduling, bandwidth, latency
+* Not focus: autograd graphs, optimizers, training loops
+
+#### 2. Performance Is a Prerequisite, Not the Goal
+
+High performance is assumed.
+Optimization exists to **enable scheduling, concurrency, and predictability**, not as an end in itself.
+
+* Slower-than-cuBLAS requires justification
+* Faster-than-cuBLAS is welcome, but not mandatory
+* Performance regressions are unacceptable without explicit trade-offs
+
+#### 3. NumPy-like Semantics Over Framework-specific APIs
+
+User-facing APIs should resemble **NumPy-style array operations**, not framework-specific abstractions.
+
+* `C = A @ B` is preferred over opaque operator graphs
+* Explicit is better than implicit
+* Users should understand when and how GPU work is executed
+
+#### 4. GPU Scheduling Is a First-Class Concept
+
+PyGPUkit treats the GPU as a **shared, schedulable resource**, similar to Kubernetes concepts.
+
+* Admission control, QoS, memory reservation, kernel pacing
+* Scheduling decisions are explicit and inspectable
+* Kernels are workloads, not side effects
+
+#### 5. SafeTensors Are Immutable Resources
+
+SafeTensors are treated as **immutable, read-only GPU resources**.
+
+* No in-place mutation
+* No hidden ownership or lifecycle coupling
+* Comparable to ConfigMaps or mounted volumes, not model objects
+
+#### 6. Using cuBLAS / CUTLASS Is Not a Failure
+
+Leveraging vendor or OSS-optimized kernels is acceptable and encouraged.
+
+* Value lies in orchestration, scheduling, and integration
+* Reusing proven kernels is preferable to reinventing them
+* Custom kernels exist where scheduling or constraints require them
+
+#### 7. Determinism and Correctness Are Explicitly Defined
+
+Numerical behavior must be **documented and intentional**.
+
+* TF32 precision loss is acceptable when explicitly enabled
+* FP32 correctness must remain available
+* Non-determinism must be explainable and bounded
+
+---
+
+### Non-goals
+
+#### 1. Full Training Framework
+
+PyGPUkit does **not** aim to provide:
+
+* Optimizers
+* Training loops
+* Dataset pipelines
+* Autograd engines
+
+These belong in higher-level frameworks.
+
+#### 2. Abstracting Away GPU Reality
+
+PyGPUkit will **not hide**:
+
+* Memory transfers
+* Synchronization points
+* Kernel launch costs
+* Precision trade-offs
+
+Users are expected to understand GPU fundamentals.
+
+#### 3. Supporting Legacy or Low-End GPUs
+
+The project intentionally targets **modern GPUs (Ampere / Ada and newer)**.
+
+* Older architectures (e.g., Turing and below) are out of scope
+* Features may assume Tensor Cores, large shared memory, and modern instructions
+
+#### 4. API Compatibility With PyTorch
+
+API compatibility with PyTorch is **not a goal**.
+
+* Familiarity is secondary to clarity
+* PyGPUkit APIs may diverge intentionally for correctness or performance reasons
+
+#### 5. “Magic” Performance
+
+No undocumented heuristics or hidden behavior.
+
+* All optimizations must be explainable
+* Performance comes from design, not surprise
+
+
 ---
 
 ## TF32 TensorCore GEMM Development Notes
