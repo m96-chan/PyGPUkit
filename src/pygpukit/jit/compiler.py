@@ -44,6 +44,26 @@ def is_nvrtc_available() -> bool:
         return False
 
 
+def get_nvrtc_path() -> str | None:
+    """Get the path to the discovered NVRTC library.
+
+    Returns:
+        Path to NVRTC DLL/SO if found, None otherwise.
+
+    Example:
+        >>> import pygpukit as gp
+        >>> path = gp.get_nvrtc_path()
+        >>> if path:
+        ...     print(f"NVRTC found at: {path}")
+    """
+    try:
+        from pygpukit.core.backend import _find_nvrtc_dll
+
+        return _find_nvrtc_dll()
+    except Exception:
+        return None
+
+
 def get_nvrtc_version() -> tuple[int, int] | None:
     """Get NVRTC version if available.
 
@@ -136,10 +156,39 @@ class JITKernel:
             self._ptx = f"// Simulated PTX for {self._name}"
 
     def _compile_native(self) -> None:
-        """Compile using native C++ module (NVRTC)."""
-        from pygpukit.core.backend import get_native_module
+        """Compile using native C++ module (NVRTC).
+
+        Raises:
+            RuntimeError: If NVRTC is not available with helpful installation instructions.
+        """
+        import warnings
+
+        from pygpukit.core.backend import _find_nvrtc_dll, get_native_module
 
         native = get_native_module()
+
+        # Check NVRTC availability first
+        if not native.is_nvrtc_available():
+            nvrtc_path = _find_nvrtc_dll()
+            if nvrtc_path:
+                # NVRTC DLL found but not working
+                msg = (
+                    f"NVRTC DLL found at {nvrtc_path} but failed to initialize.\n"
+                    "This may indicate a version mismatch or corrupted installation.\n"
+                    "Try reinstalling CUDA Toolkit."
+                )
+            else:
+                # NVRTC DLL not found
+                msg = (
+                    "NVRTC (NVIDIA Runtime Compiler) is not available.\n"
+                    "JIT compilation requires CUDA Toolkit installation.\n\n"
+                    "To install CUDA Toolkit:\n"
+                    "  https://developer.nvidia.com/cuda-downloads\n\n"
+                    "After installation, ensure CUDA bin directory is in PATH,\n"
+                    "or set CUDA_PATH environment variable.\n\n"
+                    "Pre-compiled GPU operations (matmul, add, mul) still work without NVRTC."
+                )
+            raise RuntimeError(msg)
 
         # Use native JITKernel which handles NVRTC compilation
         self._kernel = native.JITKernel(self._source, self._name, self._options)

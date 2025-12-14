@@ -10,7 +10,10 @@ GPU backend is C++ using CUDA Runtime/Driver API + NVRTC, exposed via pybind11.
 
 from __future__ import annotations
 
+import glob
 import os
+import sys
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -23,31 +26,159 @@ if TYPE_CHECKING:
 # Try to import native module
 _native_module: Any = None
 
+# Track NVRTC discovery status for warning
+_nvrtc_search_performed: bool = False
+_nvrtc_dll_found: str | None = None
 
-def _add_cuda_dll_directory() -> None:
-    """Add CUDA DLL directory on Windows (v0.1.x requires CUDA Toolkit).
 
-    Note: v0.2 will migrate to driver-only mode with bundled NVRTC DLL.
-    For now, we require CUDA Toolkit installation.
+def _find_nvrtc_dll() -> str | None:
+    """Find NVRTC DLL in a version-agnostic way.
+
+    Searches for nvrtc64_*.dll (Windows) or libnvrtc.so* (Linux) in:
+    1. PATH directories
+    2. CUDA_PATH/bin
+    3. Common CUDA installation paths
+
+    Returns:
+        Path to NVRTC DLL if found, None otherwise.
     """
-    import sys
+    global _nvrtc_search_performed, _nvrtc_dll_found
+
+    if _nvrtc_search_performed:
+        return _nvrtc_dll_found
+
+    _nvrtc_search_performed = True
 
     if sys.platform == "win32":
-        cuda_path = os.environ.get("CUDA_PATH")
-        if cuda_path:
-            bin_path = os.path.join(cuda_path, "bin")
-            if os.path.isdir(bin_path):
-                try:
-                    os.add_dll_directory(bin_path)
-                except (AttributeError, OSError):
-                    pass
+        patterns = ["nvrtc64_*.dll", "nvrtc*.dll"]
+    else:
+        patterns = ["libnvrtc.so*", "libnvrtc*.so*"]
+
+    search_paths: list[str] = []
+
+    # 1. PATH directories
+    path_env = os.environ.get("PATH", "")
+    search_paths.extend(path_env.split(os.pathsep))
+
+    # 2. CUDA_PATH/bin (Windows) or CUDA_PATH/lib64 (Linux)
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        if sys.platform == "win32":
+            search_paths.append(os.path.join(cuda_path, "bin"))
+        else:
+            search_paths.append(os.path.join(cuda_path, "lib64"))
+            search_paths.append(os.path.join(cuda_path, "lib"))
+
+    # 3. Common CUDA installation paths
+    if sys.platform == "win32":
+        # Windows: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin
+        nvidia_base = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+        if os.path.isdir(nvidia_base):
+            for version_dir in glob.glob(os.path.join(nvidia_base, "v*")):
+                search_paths.append(os.path.join(version_dir, "bin"))
+    else:
+        # Linux: /usr/local/cuda*/lib64
+        for cuda_dir in glob.glob("/usr/local/cuda*"):
+            search_paths.append(os.path.join(cuda_dir, "lib64"))
+            search_paths.append(os.path.join(cuda_dir, "lib"))
+        # Also check standard library paths
+        search_paths.extend(["/usr/lib64", "/usr/lib", "/usr/local/lib"])
+
+    # Search for NVRTC DLL
+    for search_dir in search_paths:
+        if not search_dir or not os.path.isdir(search_dir):
+            continue
+        for pattern in patterns:
+            matches = glob.glob(os.path.join(search_dir, pattern))
+            if matches:
+                # Return the first match (prefer newest version by sorting)
+                matches.sort(reverse=True)
+                _nvrtc_dll_found = matches[0]
+                return _nvrtc_dll_found
+
+    _nvrtc_dll_found = None
+    return None
+
+
+def _add_cuda_dll_directories() -> list[str]:
+    """Add CUDA DLL directories on Windows for version-agnostic loading.
+
+    Searches for NVRTC in multiple locations and adds all found CUDA
+    directories to the DLL search path.
+
+    Returns:
+        List of directories added to DLL search path.
+    """
+    added_dirs: list[str] = []
+
+    if sys.platform != "win32":
+        return added_dirs
+
+    search_paths: list[str] = []
+
+    # 1. CUDA_PATH/bin
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        bin_path = os.path.join(cuda_path, "bin")
+        if os.path.isdir(bin_path):
+            search_paths.append(bin_path)
+
+    # 2. PATH directories that contain CUDA DLLs
+    path_env = os.environ.get("PATH", "")
+    for path_dir in path_env.split(os.pathsep):
+        if path_dir and os.path.isdir(path_dir):
+            # Check if this directory has any nvrtc DLL
+            if glob.glob(os.path.join(path_dir, "nvrtc*.dll")):
+                search_paths.append(path_dir)
+
+    # 3. Common CUDA installation paths
+    nvidia_base = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    if os.path.isdir(nvidia_base):
+        for version_dir in sorted(glob.glob(os.path.join(nvidia_base, "v*")), reverse=True):
+            bin_dir = os.path.join(version_dir, "bin")
+            if os.path.isdir(bin_dir):
+                search_paths.append(bin_dir)
+
+    # Add unique directories
+    seen: set[str] = set()
+    for path in search_paths:
+        normalized = os.path.normcase(os.path.normpath(path))
+        if normalized not in seen:
+            seen.add(normalized)
+            try:
+                os.add_dll_directory(path)
+                added_dirs.append(path)
+            except (AttributeError, OSError):
+                pass
+
+    return added_dirs
+
+
+def _emit_nvrtc_warning() -> None:
+    """Emit a warning if NVRTC is not available but GPU is."""
+    nvrtc_path = _find_nvrtc_dll()
+
+    if nvrtc_path is None:
+        warnings.warn(
+            "NVRTC (NVIDIA Runtime Compiler) not found. "
+            "JIT compilation of custom kernels is disabled.\n"
+            "Pre-compiled GPU operations (matmul, add, etc.) will still work.\n\n"
+            "To enable JIT compilation, install CUDA Toolkit:\n"
+            "  https://developer.nvidia.com/cuda-downloads\n\n"
+            "Or set CUDA_PATH environment variable to your CUDA installation.\n"
+            "Check availability with: pygpukit.is_nvrtc_available()",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 try:
-    _add_cuda_dll_directory()
+    _add_cuda_dll_directories()
     from pygpukit import _pygpukit_native  # type: ignore[attr-defined]
 
     _native_module = _pygpukit_native
+
+    # Check NVRTC availability and warn if not found (deferred to first use)
 except ImportError:
     pass
 

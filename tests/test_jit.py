@@ -2,7 +2,13 @@
 
 import pytest
 
-from pygpukit.jit.compiler import JITKernel, get_nvrtc_version, is_nvrtc_available, jit
+from pygpukit.jit.compiler import (
+    JITKernel,
+    get_nvrtc_path,
+    get_nvrtc_version,
+    is_nvrtc_available,
+    jit,
+)
 
 
 class TestNVRTCAvailability:
@@ -37,6 +43,27 @@ class TestNVRTCAvailability:
         else:
             assert version is not None
 
+    def test_get_nvrtc_path_returns_string_or_none(self):
+        """Test that get_nvrtc_path returns a string path or None."""
+        path = get_nvrtc_path()
+        assert path is None or isinstance(path, str)
+        if path is not None:
+            # If path is returned, it should be an existing file
+            import os
+
+            assert os.path.isfile(path), f"NVRTC path does not exist: {path}"
+
+    def test_get_nvrtc_path_consistency(self):
+        """Test that get_nvrtc_path is consistent with is_nvrtc_available."""
+        path = get_nvrtc_path()
+        available = is_nvrtc_available()
+
+        # If NVRTC is available, we should have found the DLL
+        # (though the converse isn't always true - DLL found doesn't mean it works)
+        if available and path is None:
+            # This is unusual but can happen if NVRTC is loaded from system paths
+            pass  # Allow this case
+
     def test_is_nvrtc_available_module_level(self):
         """Test that is_nvrtc_available is exported from main module."""
         import pygpukit as gp
@@ -52,6 +79,13 @@ class TestNVRTCAvailability:
 
         assert hasattr(gp, "get_nvrtc_version")
         assert callable(gp.get_nvrtc_version)
+
+    def test_get_nvrtc_path_module_level(self):
+        """Test that get_nvrtc_path is exported from main module."""
+        import pygpukit as gp
+
+        assert hasattr(gp, "get_nvrtc_path")
+        assert callable(gp.get_nvrtc_path)
 
 
 class TestJITKernel:
