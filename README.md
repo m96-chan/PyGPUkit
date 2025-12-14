@@ -58,15 +58,18 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 |---------|------|------|--------------|
 | **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only |
 | **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** | 17.7 TFLOPS | 28.2 TFLOPS | **GPU drivers only** |
+| **PyGPUkit** (Driver-Only) | 17.7 TFLOPS | 28.2 TFLOPS | GPU drivers only |
+| **PyGPUkit** (Full) | 17.7 TFLOPS | 30.3 TFLOPS | GPU drivers + CUDA Toolkit |
+
+> Driver-Only mode uses pre-compiled kernels. Full mode adds JIT compilation for custom kernels with slightly better TF32 optimization.
 
 ### PyGPUkit Performance by Matrix Size
 
-| Matrix Size | FP32 | TF32 |
-|-------------|------|------|
-| 2048×2048 | 8.7 TFLOPS | 12.2 TFLOPS |
-| 4096×4096 | 14.2 TFLOPS | 22.0 TFLOPS |
-| 8192×8192 | 17.7 TFLOPS | **28.2 TFLOPS** |
+| Matrix Size | FP32 | TF32 (Driver-Only) | TF32 (Full) |
+|-------------|------|-------------------|-------------|
+| 2048×2048 | 8.7 TFLOPS | 12.2 TFLOPS | 13.0 TFLOPS |
+| 4096×4096 | 14.2 TFLOPS | 22.0 TFLOPS | 23.5 TFLOPS |
+| 8192×8192 | 17.7 TFLOPS | 28.2 TFLOPS | **30.3 TFLOPS** |
 
 ---
 
