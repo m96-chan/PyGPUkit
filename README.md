@@ -20,6 +20,13 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## Opening Paragraph (Goal Statement)
+
+PyGPUkit aims to free developers from the complexity of CUDA Toolkit, Anaconda, and fragile GPU environments.
+Its goal is to make GPU programming and model execution feel like using a standard Python library: installable via pip, minimal setup, and no mandatory external SDKs. PyGPUkit provides high-performance GPU kernels, memory management, scheduling, and model execution (e.g. SafeTensors) through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively without fighting their environment.
+
+---
+
 ## v0.2.3 Features (NEW)
 
 ### TF32 TensorCore GEMM
