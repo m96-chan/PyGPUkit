@@ -157,30 +157,22 @@ sgemm_tf32_ampere_kernel(
     __shared__ float smA[2][BM][BK + A_PAD];
     __shared__ float smB[2][BK][BN + B_PAD];
 
-    // Note: Zero-init removed for performance. Requires aligned sizes (multiple of BM, BN, BK).
-    // For non-aligned sizes, add zero-init back.
-
     float acc[WARP_TILES_M][WARP_TILES_N][4] = {};
 
     const int num_k_tiles = K / BK;
 
-    // 実測マッピング用のインデックス (dump_c_fragment.cu で確認)
-    // A fragment: a[0] = A[row][col], a[1] = A[row+8][col], a[2] = A[row][col+4], a[3] = A[row+8][col+4]
+    // Fragment index mappings (verified via dump_c_fragment.cu)
     const int a_row_base = lane / 4;   // 0-7
     const int a_col_base = lane % 4;   // 0-3
-    // B fragment: b[0] = B[row][col], b[1] = B[row+4][col]
     const int b_row_base = lane % 4;   // 0-3
     const int b_col = lane / 4;        // 0-7
-    // C fragment: c[0] = C[row][col*2], c[1] = C[row][col*2+1], c[2] = C[row+8][col*2], c[3] = C[row+8][col*2+1]
     const int c_row_base = lane / 4;
     const int c_col_base = (lane % 4) * 2;
 
     // ====== cp.async load helpers ======
-    // A: 128x16 = 2048 floats, 256 threads → 8 floats/thread (2 x float4)
     auto load_A_async = [&](int stage, int kt) {
-        const int a_row = tid / 4;         // 0..63
-        const int a_col = (tid % 4) * 4;   // 0, 4, 8, 12
-
+        const int a_row = tid / 4;
+        const int a_col = (tid % 4) * 4;
         #pragma unroll
         for (int i = 0; i < 2; ++i) {
             int row = a_row + i * 64;
@@ -192,11 +184,9 @@ sgemm_tf32_ampere_kernel(
         }
     };
 
-    // B: 16x128 = 2048 floats, 256 threads → 8 floats/thread (2 x float4)
     auto load_B_async = [&](int stage, int kt) {
-        const int b_row = tid / 32;           // 0..7 (k dimension)
-        const int b_col_ld = (tid % 32) * 4;  // 0..124 (n dimension)
-
+        const int b_row = tid / 32;
+        const int b_col_ld = (tid % 32) * 4;
         #pragma unroll
         for (int i = 0; i < 2; ++i) {
             int k = b_row + i * 8;
@@ -215,39 +205,31 @@ sgemm_tf32_ampere_kernel(
     cp_async_wait_0();
     __syncthreads();
 
-    // ====== Main loop with simple double buffering ======
+    // ====== Main loop with double buffering ======
     for (int kt = 0; kt < num_k_tiles; ++kt) {
         int curr = kt & 1;
         int next = curr ^ 1;
 
-        // Prefetch next tile into the OTHER buffer (if exists)
-        if (kt + 1 < num_k_tiles) {
-            load_A_async(next, kt + 1);
-            load_B_async(next, kt + 1);
-            cp_async_commit();
-        }
+        // Prefetch next tile (unconditionally - last iteration loads garbage but unused)
+        load_A_async(next, kt + 1);
+        load_B_async(next, kt + 1);
+        cp_async_commit();
 
-        // Process current tile (BK=16 with 2 WMMA_K=8 iterations)
+        // Process current tile - A fragment hoisted outside wn loop
         #pragma unroll
         for (int kk = 0; kk < BK; kk += WMMA_K) {
-
             #pragma unroll
             for (int wm = 0; wm < WARP_TILES_M; ++wm) {
+                // Preload A fragment (same for all wn iterations)
+                int tile_m = warp_m + wm * WMMA_M;
+                float a0 = smA[curr][tile_m + a_row_base][kk + a_col_base];
+                float a1 = smA[curr][tile_m + a_row_base + 8][kk + a_col_base];
+                float a2 = smA[curr][tile_m + a_row_base][kk + a_col_base + 4];
+                float a3 = smA[curr][tile_m + a_row_base + 8][kk + a_col_base + 4];
+
                 #pragma unroll
                 for (int wn = 0; wn < WARP_TILES_N; ++wn) {
-
-                    int tile_m = warp_m + wm * WMMA_M;
                     int tile_n = warp_n + wn * WMMA_N;
-
-                    // A fragment (実測マッピング - 正確!)
-                    // a[0] = A[row][col], a[1] = A[row+8][col], a[2] = A[row][col+4], a[3] = A[row+8][col+4]
-                    float a0 = smA[curr][tile_m + a_row_base][kk + a_col_base];
-                    float a1 = smA[curr][tile_m + a_row_base + 8][kk + a_col_base];
-                    float a2 = smA[curr][tile_m + a_row_base][kk + a_col_base + 4];
-                    float a3 = smA[curr][tile_m + a_row_base + 8][kk + a_col_base + 4];
-
-                    // B fragment (実測マッピング - 正確!)
-                    // b[0] = B[row][col], b[1] = B[row+4][col]
                     float b0 = smB[curr][kk + b_row_base][tile_n + b_col];
                     float b1 = smB[curr][kk + b_row_base + 4][tile_n + b_col];
 
@@ -267,10 +249,8 @@ sgemm_tf32_ampere_kernel(
             }
         }
 
-        // Wait for prefetch to complete before next iteration
-        if (kt + 1 < num_k_tiles) {
-            cp_async_wait_0();
-        }
+        // Wait for prefetch (no-op if nothing pending)
+        cp_async_wait_0();
         __syncthreads();
     }
 
