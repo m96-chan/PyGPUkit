@@ -362,6 +362,99 @@ store_matrix_sync(C, c_frag, N, mem_row_major);
 
 ---
 
+## TF32 Optimization Research (Issue #53)
+
+### Current Performance Status
+
+| Metric | Value |
+|--------|-------|
+| Current | **27.38 TFLOPS** (8192×8192) |
+| RTX 3090 Ti TF32 Theoretical | ~40 TFLOPS |
+| cuBLAS Reference | ~59 TFLOPS |
+| Gap to cuBLAS | **47%** |
+
+### Current Implementation Parameters
+
+```
+Block Tile: BM=128, BN=128, BK=16
+Warp Tile: WARP_TILES_M=2, WARP_TILES_N=8 (32×64 per warp)
+MMA Instruction: mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32
+Pipeline: 2-stage double buffering
+Thread Block: 256 threads (8 warps)
+Shared Memory: ~37KB/block → occupancy ~16.7%
+```
+
+### CUTLASS Optimization Techniques
+
+#### 1. Swizzled Shared Memory Layout (High Priority)
+
+Current implementation uses simple padding (`A_PAD=4, B_PAD=4`) but bank conflicts are not fully eliminated.
+
+**CUTLASS Approach:**
+```cpp
+// XOR-based swizzle pattern
+int store_column = (lane_id % 8) ^ (lane_id / 8);
+```
+
+- Store and Load phases use transposed index relationship
+- XOR operation applied per 8×8 block unit
+- Combined with `ldmatrix` for fully bank conflict-free access
+
+**Key Insight:**
+> "the indexing in the 'Loading from Shared Memory to Registers' slide is transposed from the indexing in 'Load from Global/Store to Shared' slide."
+
+#### 2. ldmatrix Instruction (High Priority)
+
+Current implementation manually loads from shared memory to registers:
+```cpp
+// Current implementation
+float a0 = smA[curr][tile_m + a_row_base][kk + a_col_base];
+```
+
+**CUTLASS Approach:**
+- Uses `ldmatrix.sync.aligned.m8n8.x4.shared.b16`
+- Single instruction loads four 8×8 matrices (entire warp)
+
+**TF32 Limitation:**
+> "ldmatrix cannot transpose 32-bit data. CUTLASS uses 32-bit shared memory load to load data from shared memory to the registers to do the transpose right before calling tf32 tensor core."
+
+#### 3. Multi-stage Pipeline (Medium-High Priority)
+
+Current: 2-stage → CUTLASS default: **4-stage**
+
+**Past Failed Attempt:**
+> "3-stage pipeline: -28% (50% more smem reduced occupancy)"
+
+**Considerations:**
+- Trade-off between shared memory usage and occupancy
+- RTX 3090 Ti: 100KB/SM available
+- Current 37KB → 4-stage at ~74KB should fit
+
+### Recommended Implementation Order
+
+| Priority | Optimization | Expected Gain | Difficulty |
+|----------|-------------|---------------|------------|
+| 1 | Swizzled shared memory layout | +10-15% | Medium |
+| 2 | 4-stage pipeline (proper smem sizing) | +5-10% | Medium |
+| 3 | Warp tile tuning (BM/BN/BK re-tuning) | +5-10% | Low |
+| 4 | Epilogue fusion (bias + activation) | Memory reduction | Medium |
+
+### Path to 35 TFLOPS
+
+- Current: 27.38 TFLOPS (68% of target)
+- Swizzle + 4-stage: 32-34 TFLOPS expected
+- Fine-tuning: 35+ TFLOPS
+
+### Reference Materials
+
+- [CUTLASS TF32 GEMM Example](https://github.com/NVIDIA/cutlass/blob/main/examples/14_ampere_tf32_tensorop_gemm/ampere_tf32_tensorop_gemm.cu)
+- [CUTLASS Efficient GEMM Documentation](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/efficient_gemm.html)
+- [CUTLASS Swizzled Layouts Discussion](https://github.com/NVIDIA/cutlass/discussions/1130)
+- [Understanding CUTLASS Permuted Shared Memory](https://forums.developer.nvidia.com/t/understanding-cutlass-permuted-shared-memory-layout/303697)
+- [Dissecting Tensor Cores (Academic Paper)](https://arxiv.org/pdf/2206.02874)
+
+---
+
 ## Development Workflow
 
 ### Kernel Development Cycle
