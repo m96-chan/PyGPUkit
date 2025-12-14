@@ -152,6 +152,12 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
 
     _validate_same_dtype(a, b, "matmul")
 
+    # Check TF32 dtype requirement early (before backend dispatch)
+    if use_tf32 is True:
+        from pygpukit.core.dtypes import float32
+        if a.dtype != float32:
+            raise RuntimeError("TF32 matmul requires float32 dtype")
+
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
