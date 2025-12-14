@@ -4,6 +4,7 @@
 #include "basic.cuh"
 #include "matmul_f32_ampere.cuh"
 #include "matmul_f32_tf32.cuh"
+#include "matmul_f32_tf32_v2.cuh"
 #include "../core/driver_context.hpp"
 #include <cuda.h>
 #include <stdexcept>
@@ -1333,11 +1334,21 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
                 static_cast<float*>(c.data()),
                 M, N, K);
         } else {
-            tf32::launch_sgemm_tf32(
-                static_cast<const float*>(a.data()),
-                static_cast<const float*>(b.data()),
-                static_cast<float*>(c.data()),
-                M, N, K);
+            // Check for v2 kernel (optimized) via environment variable
+            const char* use_v2 = std::getenv("PYGPUKIT_TF32_V2");
+            if (use_v2 && std::string(use_v2) == "1") {
+                tf32_v2::launch_sgemm_tf32_v2(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+            } else {
+                tf32::launch_sgemm_tf32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+            }
         }
     } else if (use_optimized) {
         ampere::launch_sgemm_ampere(
