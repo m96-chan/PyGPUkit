@@ -9,7 +9,7 @@ This demo showcases v0.2.3 features:
 
 Requirements:
 - NVIDIA Ampere+ GPU (RTX 30XX, A100, etc.)
-- CUDA Toolkit installed
+- NVIDIA GPU drivers installed
 """
 
 import os

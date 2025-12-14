@@ -1,10 +1,104 @@
-"""JIT compiler for CUDA kernels using NVRTC."""
+"""JIT compiler for CUDA kernels using NVRTC.
+
+NVRTC (NVIDIA Runtime Compilation) is used to compile CUDA kernels at runtime.
+NVRTC is optional - use `is_nvrtc_available()` to check availability.
+
+If NVRTC is not available:
+- JIT compilation will raise RuntimeError
+- Pre-compiled kernels (matmul, add, etc.) will still work via the native backend
+- CPU simulation mode will continue to work
+"""
 
 from __future__ import annotations
 
 import hashlib
 import re
 from typing import Any
+
+
+def is_nvrtc_available() -> bool:
+    """Check if NVRTC JIT compiler is available.
+
+    NVRTC enables runtime compilation of custom CUDA kernels.
+    It is optional - pre-compiled GPU operations work without NVRTC.
+
+    Returns:
+        True if NVRTC is available and functional, False otherwise.
+
+    Example:
+        >>> import pygpukit as gp
+        >>> if gp.is_nvrtc_available():
+        ...     kernel = gp.jit(source, func="my_kernel")
+        ... else:
+        ...     print("JIT not available, using pre-compiled kernels")
+    """
+    try:
+        from pygpukit.core.backend import get_native_module, has_native_module
+
+        if not has_native_module():
+            return False
+
+        native = get_native_module()
+        return native.is_nvrtc_available()
+    except Exception:
+        return False
+
+
+def get_nvrtc_path() -> str | None:
+    """Get the path to the discovered NVRTC library.
+
+    Returns:
+        Path to NVRTC DLL/SO if found, None otherwise.
+
+    Example:
+        >>> import pygpukit as gp
+        >>> path = gp.get_nvrtc_path()
+        >>> if path:
+        ...     print(f"NVRTC found at: {path}")
+    """
+    try:
+        from pygpukit.core.backend import get_native_module, has_native_module
+
+        # Prefer native module's path (what's actually loaded at runtime)
+        if has_native_module():
+            native = get_native_module()
+            path = native.get_nvrtc_library_path()
+            if path:
+                return path
+
+        # Fall back to Python-side discovery
+        from pygpukit.core.backend import _find_nvrtc_dll
+
+        return _find_nvrtc_dll()
+    except Exception:
+        return None
+
+
+def get_nvrtc_version() -> tuple[int, int] | None:
+    """Get NVRTC version if available.
+
+    Returns:
+        Tuple of (major, minor) version numbers, or None if NVRTC unavailable.
+
+    Example:
+        >>> import pygpukit as gp
+        >>> version = gp.get_nvrtc_version()
+        >>> if version:
+        ...     print(f"NVRTC {version[0]}.{version[1]}")
+    """
+    try:
+        from pygpukit.core.backend import get_native_module, has_native_module
+
+        if not has_native_module():
+            return None
+
+        native = get_native_module()
+        if not native.is_nvrtc_available():
+            return None
+
+        return native.get_nvrtc_version()
+    except Exception:
+        return None
 
 
 class JITKernel:
@@ -72,10 +166,37 @@ class JITKernel:
             self._ptx = f"// Simulated PTX for {self._name}"
 
     def _compile_native(self) -> None:
-        """Compile using native C++ module (NVRTC)."""
-        from pygpukit.core.backend import get_native_module
+        """Compile using native C++ module (NVRTC).
+
+        Raises:
+            RuntimeError: If NVRTC is not available with helpful installation instructions.
+        """
+        from pygpukit.core.backend import _find_nvrtc_dll, get_native_module
 
         native = get_native_module()
+
+        # Check NVRTC availability first
+        if not native.is_nvrtc_available():
+            nvrtc_path = _find_nvrtc_dll()
+            if nvrtc_path:
+                # NVRTC DLL found but not working
+                msg = (
+                    f"NVRTC library found at {nvrtc_path} but failed to initialize.\n"
+                    "This may indicate a version mismatch or corrupted installation.\n"
+                    "Try updating your NVIDIA GPU driver:\n"
+                    "  https://www.nvidia.com/Download/index.aspx"
+                )
+            else:
+                # NVRTC DLL not found
+                msg = (
+                    "NVRTC (NVIDIA Runtime Compiler) is not available.\n"
+                    "JIT compilation of custom kernels requires NVRTC.\n\n"
+                    "Pre-compiled GPU operations (matmul, add, mul) work without NVRTC.\n"
+                    "To use custom JIT kernels, NVRTC can be obtained from:\n"
+                    "  https://developer.nvidia.com/cuda-downloads\n\n"
+                    "Check availability: pygpukit.is_nvrtc_available()"
+                )
+            raise RuntimeError(msg)
 
         # Use native JITKernel which handles NVRTC compilation
         self._kernel = native.JITKernel(self._source, self._name, self._options)

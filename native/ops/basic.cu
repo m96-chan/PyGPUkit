@@ -1,12 +1,13 @@
+// Basic GPU operations using CUDA Driver API
+// PyGPUkit v0.2.4+: Single-binary distribution (driver-only mode)
+
 #include "basic.cuh"
 #include "matmul_f32_ampere.cuh"
 #include "matmul_f32_tf32.cuh"
-#include <stdexcept>
-#include <cstdlib>
-
-#ifdef PYGPUKIT_DRIVER_ONLY
 #include "../core/driver_context.hpp"
 #include <cuda.h>
+#include <stdexcept>
+#include <cstdlib>
 
 namespace pygpukit {
 namespace ops {
@@ -25,26 +26,15 @@ void sync_and_check(const char* msg) {
     check_driver_error(cuCtxSynchronize(), msg);
 }
 
-#else
-#include <cuda_runtime.h>
-
-namespace pygpukit {
-namespace ops {
-
-namespace {
-
-void check_cuda_error(cudaError_t err, const char* msg) {
-    if (err != cudaSuccess) {
-        throw CudaError(std::string(msg) + ": " + cudaGetErrorString(err));
-    }
+// Get SM version using Driver API
+int get_sm_version_internal() {
+    auto& ctx = driver::DriverContext::instance();
+    CUdevice device = ctx.get_device(ctx.current_device());
+    int major = 0, minor = 0;
+    cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, device);
+    cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device);
+    return major * 10 + minor;
 }
-
-void sync_and_check(const char* msg) {
-    check_cuda_error(cudaGetLastError(), msg);
-    check_cuda_error(cudaDeviceSynchronize(), msg);
-}
-
-#endif // PYGPUKIT_DRIVER_ONLY
 
 void validate_same_shape(const GPUArray& a, const GPUArray& b, const char* op_name) {
     if (a.shape() != b.shape()) {
@@ -813,12 +803,8 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     }
 
     if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
-        // Check GPU compute capability
-        int device;
-        cudaGetDevice(&device);
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, device);
-        sm_version = prop.major * 10 + prop.minor;
+        // Check GPU compute capability (using internal helper for driver-only compatibility)
+        sm_version = get_sm_version_internal();
         tf32_enabled = (sm_version >= 80);  // Ampere or newer
         if (!debug_printed) {
             fprintf(stderr, "[PyGPUkit] SM version = %d, TF32 enabled = %d\n", sm_version, tf32_enabled);
@@ -953,11 +939,8 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
     }
 
     // Check GPU compute capability for TF32 support
-    int device;
-    cudaGetDevice(&device);
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, device);
-    int sm_version = prop.major * 10 + prop.minor;
+    // (using internal helper for driver-only compatibility)
+    int sm_version = get_sm_version_internal();
 
     // TF32 only works with float32 and SM >= 80
     bool tf32_enabled = use_tf32_explicit &&

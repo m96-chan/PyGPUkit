@@ -1,15 +1,13 @@
+// Stream management using CUDA Driver API
+// PyGPUkit v0.2.4+: Single-binary distribution (driver-only mode)
+
 #pragma once
 
 #include "types.hpp"
-
-#ifdef PYGPUKIT_DRIVER_ONLY
 #include <cuda.h>
+
 // CUstream and cudaStream_t are the same underlying type
 using StreamHandle = CUstream;
-#else
-#include <cuda_runtime.h>
-using StreamHandle = cudaStream_t;
-#endif
 
 namespace pygpukit {
 

@@ -25,7 +25,7 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 PyGPUkit aims to simplify GPU development by reducing dependency on complex CUDA Toolkit installations and fragile GPU environments.
 Its goal is to make GPU programming feel like using a standard Python library: installable via pip with minimal setup. PyGPUkit provides high-performance GPU kernels, memory management, and scheduling through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively.
 
-> **Note:** PyGPUkit currently requires CUDA drivers and NVRTC. It is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads, research, and real-time systems where full ML frameworks are overkill.
+> **Note:** PyGPUkit requires NVIDIA GPU drivers. NVRTC (JIT compilation) is **optional** — pre-compiled kernels work without CUDA Toolkit. It is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads, research, and real-time systems where full ML frameworks are overkill.
 
 ---
 
@@ -41,20 +41,21 @@ Its goal is to make GPU programming feel like using a standard Python library: i
 
 ### Benchmark Comparison (RTX 3090 Ti, 8192×8192×8192)
 
-| Library | FP32 | TF32 | Notes |
-|---------|------|------|-------|
-| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU baseline |
-| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | [NVIDIA benchmark](https://forums.developer.nvidia.com/t/a40-and-3090-gemm-performance-test-data/249424) |
-| **PyGPUkit** | 18 TFLOPS (86%) | 27 TFLOPS (46%) | Custom kernels |
+| Library | FP32 | TF32 | Requires | Notes |
+|---------|------|------|----------|-------|
+| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only | CPU baseline |
+| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit | [NVIDIA benchmark](https://forums.developer.nvidia.com/t/a40-and-3090-gemm-performance-test-data/249424) |
+| **PyGPUkit** (Driver-Only) | 17.7 TFLOPS | 28.2 TFLOPS | **GPU drivers only** | No CUDA Toolkit needed! |
+| **PyGPUkit** (CUDA Toolkit) | 17.7 TFLOPS | 30.3 TFLOPS | CUDA Toolkit | +JIT compilation |
 
-> FP32 is near cuBLAS level. TF32 optimization ongoing.
+> **v0.2.4+**: PyGPUkit is now a **single-binary distribution** — pre-compiled GPU operations work with just NVIDIA drivers installed. CUDA Toolkit is only needed for JIT compilation of custom kernels. Performance is virtually identical between modes.
 
-### PyGPUkit Performance by Size
+### PyGPUkit Performance by Size (Driver-Only)
 | Matrix Size | FP32 | TF32 |
 |-------------|------|------|
-| 2048×2048 | 7.6 TFLOPS | 10.2 TFLOPS |
-| 4096×4096 | 13.2 TFLOPS | 19.5 TFLOPS |
-| 8192×8192 | 18.2 TFLOPS | **27.5 TFLOPS** |
+| 2048×2048 | 8.7 TFLOPS | 12.2 TFLOPS |
+| 4096×4096 | 14.2 TFLOPS | 22.0 TFLOPS |
+| 8192×8192 | 17.7 TFLOPS | **28.2 TFLOPS** |
 
 ### Core Infrastructure (Rust)
 | Feature | Description |
@@ -104,14 +105,31 @@ pip install -e .
 
 Requirements:
 - Python 3.10+
-- CUDA 11+
-- NVRTC available
-- NVIDIA GPU
+- NVIDIA GPU with drivers installed
+- **Optional:** CUDA Toolkit (for JIT compilation of custom kernels)
+
+> **Note:** NVRTC (NVIDIA Runtime Compiler) is included in CUDA Toolkit.
+> Pre-compiled GPU operations (matmul, add, mul, etc.) work with just GPU drivers.
+> CUDA Toolkit is only needed if you want to write and compile custom CUDA kernels at runtime.
 
 **Supported GPUs:**
-- RTX 30XX series (Ampere) and above
+- RTX 30XX series (Ampere, SM 80+) and above
 - Performance tuning is optimized for GPUs with large L2 cache (6MB+)
-- Older GPUs (RTX 20XX, GTX 10XX, etc.) are NOT tuned and may have suboptimal performance
+- Older GPUs (RTX 20XX, GTX 10XX, etc.) are **NOT supported** (SM < 80)
+
+**Runtime Modes:**
+| Mode | Requirements | Features |
+|------|-------------|----------|
+| **Full JIT** | GPU drivers + CUDA Toolkit | All features including custom kernels |
+| **Pre-compiled only** | GPU drivers only | Built-in ops (matmul, add, etc.) |
+| **CPU simulation** | None | Testing/development without GPU |
+
+Check NVRTC availability:
+```python
+import pygpukit as gp
+print(f"CUDA: {gp.is_cuda_available()}")
+print(f"NVRTC: {gp.is_nvrtc_available()}")
+```
 
 ---
 
@@ -145,7 +163,7 @@ arr = z.to_numpy()
 garr = gp.from_numpy(arr)
 ```
 
-### Custom NVRTC Kernel
+### Custom NVRTC Kernel (requires CUDA Toolkit)
 ```cuda
 extern "C" __global__
 void scale(float* x, float factor, int n) {
@@ -155,8 +173,12 @@ void scale(float* x, float factor, int n) {
 ```
 
 ```python
-kernel = gp.jit(src, func="scale")
-kernel(x, factor=0.5, n=x.size)
+# Check if JIT is available before using custom kernels
+if gp.is_nvrtc_available():
+    kernel = gp.jit(src, func="scale")
+    kernel(x, factor=0.5, n=x.size)
+else:
+    print("JIT requires CUDA Toolkit. Using pre-compiled ops instead.")
 ```
 
 ### Rust Scheduler (v0.2)
@@ -333,11 +355,14 @@ PyGPUkit/
 | **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 27.5 TFLOPS |
 
-### **v0.2.4 — Benchmark & Reliability Phase**
+### **v0.2.4 — Single-Binary Distribution (Current)**
+- [x] **Single-binary wheel** — no CUDA Toolkit required for pre-compiled ops
+- [x] **Dynamic NVRTC loading** — JIT available when Toolkit installed
+- [x] **Driver-only mode** — only `nvcuda.dll` required (from GPU drivers)
+- [x] `is_nvrtc_available()` / `get_nvrtc_version()` / `get_nvrtc_path()` API
+- [x] Graceful fallback when NVRTC unavailable
+- [x] Performance tests made informational (always PASS with TFLOPS summary)
 - [ ] Actual PyTorch/NumPy comparison benchmarks
-- [ ] Kernel cache LRU completion
-- [ ] Driver-only mode stabilization
-- [ ] Windows/Linux full support
 - [ ] Large GPU memory test (16GB continuous alloc/free)
 
 ### **v0.2.5 — Distributed Phase**
