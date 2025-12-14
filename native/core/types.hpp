@@ -41,6 +41,51 @@ inline std::string dtype_name(DataType dtype) {
 using DevicePtr = void*;
 
 // Error handling
+
+// NVRTC error codes (matches nvrtcResult + custom codes)
+enum class NvrtcErrorCode {
+    Success = 0,
+    OutOfMemory = 1,
+    ProgramCreationFailure = 2,
+    InvalidInput = 3,
+    InvalidProgram = 4,
+    InvalidOption = 5,
+    Compilation = 6,
+    BuiltinOperationFailure = 7,
+    NoNameExpressionsAfterCompilation = 8,
+    NoLoweredNamesBeforeCompilation = 9,
+    NameExpressionNotValid = 10,
+    InternalError = 11,
+    // Custom error codes (1000+)
+    NotLoaded = 1000,           // NVRTC DLL not loaded
+    PtxLoadFailed = 1001,       // cuModuleLoadData failed
+    FunctionNotFound = 1002,    // cuModuleGetFunction failed
+    LaunchFailed = 1003,        // cuLaunchKernel failed
+};
+
+// Get string name for error code
+inline const char* nvrtc_error_name(NvrtcErrorCode code) {
+    switch (code) {
+        case NvrtcErrorCode::Success: return "Success";
+        case NvrtcErrorCode::OutOfMemory: return "OutOfMemory";
+        case NvrtcErrorCode::ProgramCreationFailure: return "ProgramCreationFailure";
+        case NvrtcErrorCode::InvalidInput: return "InvalidInput";
+        case NvrtcErrorCode::InvalidProgram: return "InvalidProgram";
+        case NvrtcErrorCode::InvalidOption: return "InvalidOption";
+        case NvrtcErrorCode::Compilation: return "Compilation";
+        case NvrtcErrorCode::BuiltinOperationFailure: return "BuiltinOperationFailure";
+        case NvrtcErrorCode::NoNameExpressionsAfterCompilation: return "NoNameExpressionsAfterCompilation";
+        case NvrtcErrorCode::NoLoweredNamesBeforeCompilation: return "NoLoweredNamesBeforeCompilation";
+        case NvrtcErrorCode::NameExpressionNotValid: return "NameExpressionNotValid";
+        case NvrtcErrorCode::InternalError: return "InternalError";
+        case NvrtcErrorCode::NotLoaded: return "NotLoaded";
+        case NvrtcErrorCode::PtxLoadFailed: return "PtxLoadFailed";
+        case NvrtcErrorCode::FunctionNotFound: return "FunctionNotFound";
+        case NvrtcErrorCode::LaunchFailed: return "LaunchFailed";
+        default: return "Unknown";
+    }
+}
+
 class CudaError : public std::runtime_error {
 public:
     explicit CudaError(const std::string& msg) : std::runtime_error(msg) {}
@@ -48,7 +93,27 @@ public:
 
 class NvrtcError : public std::runtime_error {
 public:
-    explicit NvrtcError(const std::string& msg) : std::runtime_error(msg) {}
+    explicit NvrtcError(const std::string& msg)
+        : std::runtime_error(msg)
+        , code_(NvrtcErrorCode::InternalError)
+        , log_() {}
+
+    NvrtcError(const std::string& msg, NvrtcErrorCode code)
+        : std::runtime_error(msg)
+        , code_(code)
+        , log_() {}
+
+    NvrtcError(const std::string& msg, NvrtcErrorCode code, const std::string& log)
+        : std::runtime_error(msg)
+        , code_(code)
+        , log_(log) {}
+
+    NvrtcErrorCode code() const { return code_; }
+    const std::string& log() const { return log_; }
+
+private:
+    NvrtcErrorCode code_;
+    std::string log_;
 };
 
 } // namespace pygpukit

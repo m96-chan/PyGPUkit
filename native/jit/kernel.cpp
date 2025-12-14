@@ -71,11 +71,27 @@ void JITKernel::compile(const std::vector<std::string>& options) {
 
     // Load module from PTX
     CUresult result = cuModuleLoadData(&module_, ptx_.c_str());
-    check_cuda_driver_error(result, "Failed to load module from PTX");
+    if (result != CUDA_SUCCESS) {
+        const char* error_str;
+        cuGetErrorString(result, &error_str);
+        throw NvrtcError(
+            std::string("Failed to load module from PTX: ") + (error_str ? error_str : "unknown error"),
+            NvrtcErrorCode::PtxLoadFailed
+        );
+    }
 
     // Get function handle
     result = cuModuleGetFunction(&function_, module_, func_name_.c_str());
-    check_cuda_driver_error(result, "Failed to get function from module");
+    if (result != CUDA_SUCCESS) {
+        const char* error_str;
+        cuGetErrorString(result, &error_str);
+        cuModuleUnload(module_);
+        module_ = nullptr;
+        throw NvrtcError(
+            std::string("Function '") + func_name_ + "' not found in module: " + (error_str ? error_str : "unknown error"),
+            NvrtcErrorCode::FunctionNotFound
+        );
+    }
 }
 
 void JITKernel::cleanup() {

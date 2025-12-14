@@ -49,6 +49,12 @@ void init_core_bindings(py::module_& m) {
     m.def("validate_compute_capability", &validate_compute_capability,
           py::arg("device_id") = 0,
           "Validate device compute capability (requires SM >= 80)");
+    m.def("get_recommended_arch", &get_recommended_arch, py::arg("device_id") = 0,
+          "Get recommended -arch option for JIT compilation (e.g., 'sm_86')");
+    m.def("get_fallback_archs", &get_fallback_archs, py::arg("device_id") = 0,
+          "Get fallback -arch options for older drivers (in order of preference)");
+    m.def("is_arch_supported", &is_arch_supported, py::arg("arch"),
+          "Check if driver supports a given PTX architecture");
 
     // GPUArray class
     py::class_<GPUArray>(m, "GPUArray")

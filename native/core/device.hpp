@@ -2,6 +2,7 @@
 
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace pygpukit {
 
@@ -46,5 +47,17 @@ void validate_compute_capability(int device_id = 0);
 
 // Get SM version as integer (e.g., 86 for SM 8.6)
 int get_sm_version(int device_id = 0);
+
+// Get recommended -arch option for JIT compilation (e.g., "sm_86")
+// Based on current GPU's compute capability
+std::string get_recommended_arch(int device_id = 0);
+
+// Get fallback -arch options for older drivers (in order of preference)
+// Returns list like ["sm_80", "compute_80"] for fallback
+std::vector<std::string> get_fallback_archs(int device_id = 0);
+
+// Check if driver supports a given PTX architecture
+// arch should be like "sm_86" or "compute_80"
+bool is_arch_supported(const std::string& arch);
 
 } // namespace pygpukit
