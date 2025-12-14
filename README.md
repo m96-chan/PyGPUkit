@@ -45,16 +45,17 @@ Its goal is to make GPU programming feel like using a standard Python library: i
 |---------|------|------|----------|-------|
 | **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only | CPU baseline |
 | **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit | [NVIDIA benchmark](https://forums.developer.nvidia.com/t/a40-and-3090-gemm-performance-test-data/249424) |
-| **PyGPUkit** (Driver-Only) | 18 TFLOPS (86%) | 27 TFLOPS (46%) | **GPU drivers only** | No CUDA Toolkit needed! |
+| **PyGPUkit** (Driver-Only) | 17.7 TFLOPS | 28.2 TFLOPS | **GPU drivers only** | No CUDA Toolkit needed! |
+| **PyGPUkit** (CUDA Toolkit) | 17.7 TFLOPS | 30.3 TFLOPS | CUDA Toolkit | +JIT compilation |
 
-> **v0.2.4+**: PyGPUkit is now a **single-binary distribution** — pre-compiled GPU operations work with just NVIDIA drivers installed. CUDA Toolkit is only needed for JIT compilation of custom kernels.
+> **v0.2.4+**: PyGPUkit is now a **single-binary distribution** — pre-compiled GPU operations work with just NVIDIA drivers installed. CUDA Toolkit is only needed for JIT compilation of custom kernels. Performance is virtually identical between modes.
 
-### PyGPUkit Performance by Size
+### PyGPUkit Performance by Size (Driver-Only)
 | Matrix Size | FP32 | TF32 |
 |-------------|------|------|
-| 2048×2048 | 7.6 TFLOPS | 10.2 TFLOPS |
-| 4096×4096 | 13.2 TFLOPS | 19.5 TFLOPS |
-| 8192×8192 | 18.2 TFLOPS | **27.5 TFLOPS** |
+| 2048×2048 | 8.7 TFLOPS | 12.2 TFLOPS |
+| 4096×4096 | 14.2 TFLOPS | 22.0 TFLOPS |
+| 8192×8192 | 17.7 TFLOPS | **28.2 TFLOPS** |
 
 ### Core Infrastructure (Rust)
 | Feature | Description |
