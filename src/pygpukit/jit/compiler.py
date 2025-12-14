@@ -161,8 +161,6 @@ class JITKernel:
         Raises:
             RuntimeError: If NVRTC is not available with helpful installation instructions.
         """
-        import warnings
-
         from pygpukit.core.backend import _find_nvrtc_dll, get_native_module
 
         native = get_native_module()
