@@ -60,3 +60,64 @@ def get_device_info(device_id: int = 0) -> DeviceInfo:
         max_threads_per_block=props.max_threads_per_block,
         warp_size=props.warp_size,
     )
+
+
+def get_device_capabilities(device_id: int = 0):
+    """Get device capabilities from Rust backend.
+
+    Returns a DeviceCapabilities object with:
+    - sm_version: SM version (e.g., 86 for SM 8.6)
+    - tensorcore: Whether TF32 TensorCores are available
+    - tensorcore_fp16: Whether FP16 TensorCores are available
+    - tensorcore_bf16: Whether BF16 TensorCores are available
+    - async_copy: Whether cp.async is supported
+
+    Args:
+        device_id: Device index (default 0).
+
+    Returns:
+        DeviceCapabilities from Rust backend.
+    """
+    try:
+        from pygpukit._pygpukit_rust import DeviceCapabilities
+    except ImportError:
+        # Rust module not available - create from device info
+        info = get_device_info(device_id)
+        if info.compute_capability:
+            sm_version = info.compute_capability[0] * 10 + info.compute_capability[1]
+        else:
+            sm_version = 0
+
+        # Create a simple capabilities object
+        @dataclass
+        class _DeviceCapabilities:
+            device_id: int
+            name: str
+            sm_version: int
+            compute_capability: int
+            tensorcore: bool
+            tensorcore_fp16: bool
+            tensorcore_bf16: bool
+            async_copy: bool
+
+        return _DeviceCapabilities(
+            device_id=device_id,
+            name=info.name,
+            sm_version=sm_version,
+            compute_capability=sm_version,
+            tensorcore=sm_version >= 80,
+            tensorcore_fp16=sm_version >= 70,
+            tensorcore_bf16=sm_version >= 80,
+            async_copy=sm_version >= 80,
+        )
+
+    # Get actual device info and create capabilities
+    info = get_device_info(device_id)
+    if info.compute_capability:
+        sm_version = info.compute_capability[0] * 10 + info.compute_capability[1]
+    else:
+        sm_version = 0
+
+    # Create Rust DeviceCapabilities with actual SM version
+    caps = DeviceCapabilities(sm_version)
+    return caps

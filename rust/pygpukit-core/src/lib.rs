@@ -6,11 +6,13 @@
 //! - Async memory transfer engine with separate streams
 //! - Kernel dispatch controller with stream management
 //! - Kernel pacing engine with bandwidth control
+//! - Device capabilities and kernel type selection
 
 pub mod memory;
 pub mod scheduler;
 pub mod transfer;
 pub mod dispatch;
+pub mod device;
 
 pub use memory::{MemoryBlock, MemoryPool, PoolStats, MemoryError};
 pub use scheduler::{
@@ -29,3 +31,4 @@ pub use dispatch::{
     SliceScheduler, SliceConfig, SlicedKernel, KernelSlice, SliceInfo, SliceStats,
     KernelCache, CacheConfig, CachedKernel, CompileOptions, CacheStats,
 };
+pub use device::{KernelType, DeviceCapabilities};
