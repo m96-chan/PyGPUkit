@@ -108,6 +108,10 @@ Requirements:
 - NVIDIA GPU with drivers installed
 - **Optional:** CUDA Toolkit (for JIT compilation of custom kernels)
 
+> **Note:** NVRTC (NVIDIA Runtime Compiler) is included in CUDA Toolkit.
+> Pre-compiled GPU operations (matmul, add, mul, etc.) work with just GPU drivers.
+> CUDA Toolkit is only needed if you want to write and compile custom CUDA kernels at runtime.
+
 **Supported GPUs:**
 - RTX 30XX series (Ampere, SM 80+) and above
 - Performance tuning is optimized for GPUs with large L2 cache (6MB+)
