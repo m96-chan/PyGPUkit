@@ -323,45 +323,15 @@ PyGPUkit/
 
 ## Roadmap
 
-### **v0.1 (Released)**
-- [x] GPUArray
-- [x] NVRTC JIT
-- [x] add/mul/matmul ops
-- [x] Basic stream manager
-- [x] Packaging + wheels
+### **v0.1 — v0.2.3 (Released)**
 
-### **v0.2.0 (Released)**
-- [x] Rust Memory Pool (LRU, size-class)
-- [x] Rust Scheduler (priority, memory reservation)
-- [x] Rust Transfer Engine (async H2D/D2H)
-- [x] Rust Kernel Dispatch Controller
-- [x] Admission Control
-- [x] QoS Policy Framework (Guaranteed/Burstable/BestEffort)
-- [x] Kernel Pacing Engine
-- [x] Micro-Slicing Framework
-- [x] Pinned Memory Support
-- [x] Kernel Cache (PTX caching)
-- [x] GPU Partitioning
-- [x] Tiled Matmul (shared memory)
-- [x] 106 Rust tests
-
-### **v0.2.1 — Stabilization Phase (Released)**
-- [x] Admission / QoS spec finalization
-- [x] Python API inconsistency fixes
-- [x] Rust error propagation unification
-
-### **v0.2.2 — Performance Phase (Released)**
-- [x] Ampere-optimized SGEMM with cp.async pipeline
-- [x] 4-stage software pipelining for latency hiding
-- [x] float4 vectorized memory loads
-- [x] 18.2 TFLOPS on RTX 3090 Ti (46% efficiency)
-- [x] SM 80+ (Ampere) architecture requirement
-
-### **v0.2.3 — TF32 TensorCore Phase (Released)**
-- [x] TF32 TensorCore GEMM with PTX mma.sync
-- [x] cp.async double-buffered pipeline
-- [x] 27.5 TFLOPS on RTX 3090 Ti
-- [x] PTX fragment mapping documentation
+| Version | Highlights |
+|---------|------------|
+| **v0.1** | GPUArray, NVRTC JIT, add/mul/matmul, wheels |
+| **v0.2.0** | Rust scheduler (QoS, admission control, partitioning), memory pool (LRU), kernel cache, 106 Rust tests |
+| **v0.2.1** | API stabilization, error propagation |
+| **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
+| **v0.2.3** | TF32 TensorCore (PTX mma.sync), 27.5 TFLOPS |
 
 ### **v0.2.4 — Benchmark & Reliability Phase**
 - [ ] Actual PyTorch/NumPy comparison benchmarks
