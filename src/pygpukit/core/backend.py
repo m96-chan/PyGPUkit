@@ -163,10 +163,9 @@ def _emit_nvrtc_warning() -> None:
             "NVRTC (NVIDIA Runtime Compiler) not found. "
             "JIT compilation of custom kernels is disabled.\n"
             "Pre-compiled GPU operations (matmul, add, etc.) will still work.\n\n"
-            "To enable JIT compilation, install CUDA Toolkit:\n"
+            "NVRTC is optional. To enable JIT compilation:\n"
             "  https://developer.nvidia.com/cuda-downloads\n\n"
-            "Or set CUDA_PATH environment variable to your CUDA installation.\n"
-            "Check availability with: pygpukit.is_nvrtc_available()",
+            "Check availability: pygpukit.is_nvrtc_available()",
             UserWarning,
             stacklevel=3,
         )

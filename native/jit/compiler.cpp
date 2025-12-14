@@ -15,9 +15,9 @@ void check_nvrtc_error(nvrtc::Result result, const char* msg) {
 void ensure_nvrtc_available() {
     if (!is_nvrtc_available()) {
         throw NvrtcError(
-            "NVRTC is not available. JIT compilation requires CUDA Toolkit installation. "
-            "Install CUDA Toolkit from https://developer.nvidia.com/cuda-downloads "
-            "or use pre-compiled kernels."
+            "NVRTC is not available. JIT compilation of custom kernels requires NVRTC. "
+            "Pre-compiled GPU operations (matmul, add, mul) work without NVRTC. "
+            "For custom kernels, see: https://developer.nvidia.com/cuda-downloads"
         );
     }
 }

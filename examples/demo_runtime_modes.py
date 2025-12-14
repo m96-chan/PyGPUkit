@@ -260,11 +260,11 @@ def main() -> None:
      - Pre-compiled ops work
      - Best performance
 
-  2. GPU FALLBACK MODE (CUDA only)
+  2. GPU FALLBACK MODE (Driver only)
      - Pre-compiled ops work (matmul, add, mul)
      - Custom JIT kernels NOT available
      - GPU memory/scheduling work
-     - Install CUDA Toolkit for JIT
+     - NVRTC optional for JIT
 
   3. CPU SIMULATION MODE (No GPU)
      - Full API compatibility

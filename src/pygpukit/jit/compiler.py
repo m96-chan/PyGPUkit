@@ -1,10 +1,10 @@
 """JIT compiler for CUDA kernels using NVRTC.
 
 NVRTC (NVIDIA Runtime Compilation) is used to compile CUDA kernels at runtime.
-NVRTC requires CUDA Toolkit installation. Use `is_nvrtc_available()` to check.
+NVRTC is optional - use `is_nvrtc_available()` to check availability.
 
 If NVRTC is not available:
-- JIT compilation will raise RuntimeError with installation instructions
+- JIT compilation will raise RuntimeError
 - Pre-compiled kernels (matmul, add, etc.) will still work via the native backend
 - CPU simulation mode will continue to work
 """
@@ -20,7 +20,7 @@ def is_nvrtc_available() -> bool:
     """Check if NVRTC JIT compiler is available.
 
     NVRTC enables runtime compilation of custom CUDA kernels.
-    It requires CUDA Toolkit to be installed on the system.
+    It is optional - pre-compiled GPU operations work without NVRTC.
 
     Returns:
         True if NVRTC is available and functional, False otherwise.
@@ -181,20 +181,20 @@ class JITKernel:
             if nvrtc_path:
                 # NVRTC DLL found but not working
                 msg = (
-                    f"NVRTC DLL found at {nvrtc_path} but failed to initialize.\n"
+                    f"NVRTC library found at {nvrtc_path} but failed to initialize.\n"
                     "This may indicate a version mismatch or corrupted installation.\n"
-                    "Try reinstalling CUDA Toolkit."
+                    "Try updating your NVIDIA GPU driver:\n"
+                    "  https://www.nvidia.com/Download/index.aspx"
                 )
             else:
                 # NVRTC DLL not found
                 msg = (
                     "NVRTC (NVIDIA Runtime Compiler) is not available.\n"
-                    "JIT compilation requires CUDA Toolkit installation.\n\n"
-                    "To install CUDA Toolkit:\n"
+                    "JIT compilation of custom kernels requires NVRTC.\n\n"
+                    "Pre-compiled GPU operations (matmul, add, mul) work without NVRTC.\n"
+                    "To use custom JIT kernels, NVRTC can be obtained from:\n"
                     "  https://developer.nvidia.com/cuda-downloads\n\n"
-                    "After installation, ensure CUDA bin directory is in PATH,\n"
-                    "or set CUDA_PATH environment variable.\n\n"
-                    "Pre-compiled GPU operations (matmul, add, mul) still work without NVRTC."
+                    "Check availability: pygpukit.is_nvrtc_available()"
                 )
             raise RuntimeError(msg)
 

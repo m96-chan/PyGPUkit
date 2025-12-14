@@ -16,8 +16,8 @@ void init_jit_bindings(py::module_& m) {
     // is_nvrtc_available function
     m.def("is_nvrtc_available", &is_nvrtc_available,
           "Check if NVRTC JIT compiler is available.\n\n"
-          "Returns True if NVRTC is available for JIT compilation.\n"
-          "NVRTC requires CUDA Toolkit installation.\n\n"
+          "NVRTC enables runtime compilation of custom CUDA kernels.\n"
+          "Pre-compiled GPU operations work without NVRTC.\n\n"
           "Returns:\n"
           "    bool: True if NVRTC is functional, False otherwise.");
 
@@ -27,7 +27,7 @@ void init_jit_bindings(py::module_& m) {
           py::arg("name") = "kernel.cu",
           py::arg("options") = std::vector<std::string>{},
           "Compile CUDA source to PTX.\n\n"
-          "Requires NVRTC (CUDA Toolkit). Use is_nvrtc_available() to check.\n\n"
+          "Requires NVRTC. Use is_nvrtc_available() to check.\n\n"
           "Args:\n"
           "    source: CUDA C++ source code\n"
           "    name: Kernel filename (default: kernel.cu)\n"
@@ -43,7 +43,7 @@ void init_jit_bindings(py::module_& m) {
         get_nvrtc_version(&major, &minor);
         return py::make_tuple(major, minor);
     }, "Get NVRTC version as (major, minor).\n\n"
-       "Requires NVRTC (CUDA Toolkit). Use is_nvrtc_available() to check.\n\n"
+       "Requires NVRTC. Use is_nvrtc_available() to check.\n\n"
        "Returns:\n"
        "    tuple: (major, minor) version numbers\n\n"
        "Raises:\n"
