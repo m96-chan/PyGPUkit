@@ -27,7 +27,7 @@ from pygpukit.jit.compiler import (
     jit,
     warmup,
 )
-from pygpukit.ops.basic import add, matmul, mul
+from pygpukit.ops.basic import add, div, exp, log, matmul, mul, relu, sub
 
 # Try to import Rust types, fallback to Python implementations
 try:
@@ -79,6 +79,11 @@ __all__ = [
     "check_driver_compatibility",
     # Operations
     "add",
+    "sub",
     "mul",
+    "div",
+    "exp",
+    "log",
+    "relu",
     "matmul",
 ]
