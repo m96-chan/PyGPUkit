@@ -1,10 +1,74 @@
-"""JIT compiler for CUDA kernels using NVRTC."""
+"""JIT compiler for CUDA kernels using NVRTC.
+
+NVRTC (NVIDIA Runtime Compilation) is used to compile CUDA kernels at runtime.
+NVRTC requires CUDA Toolkit installation. Use `is_nvrtc_available()` to check.
+
+If NVRTC is not available:
+- JIT compilation will raise RuntimeError with installation instructions
+- Pre-compiled kernels (matmul, add, etc.) will still work via the native backend
+- CPU simulation mode will continue to work
+"""
 
 from __future__ import annotations
 
 import hashlib
 import re
 from typing import Any
+
+
+def is_nvrtc_available() -> bool:
+    """Check if NVRTC JIT compiler is available.
+
+    NVRTC enables runtime compilation of custom CUDA kernels.
+    It requires CUDA Toolkit to be installed on the system.
+
+    Returns:
+        True if NVRTC is available and functional, False otherwise.
+
+    Example:
+        >>> import pygpukit as gp
+        >>> if gp.is_nvrtc_available():
+        ...     kernel = gp.jit(source, func="my_kernel")
+        ... else:
+        ...     print("JIT not available, using pre-compiled kernels")
+    """
+    try:
+        from pygpukit.core.backend import get_native_module, has_native_module
+
+        if not has_native_module():
+            return False
+
+        native = get_native_module()
+        return native.is_nvrtc_available()
+    except Exception:
+        return False
+
+
+def get_nvrtc_version() -> tuple[int, int] | None:
+    """Get NVRTC version if available.
+
+    Returns:
+        Tuple of (major, minor) version numbers, or None if NVRTC unavailable.
+
+    Example:
+        >>> import pygpukit as gp
+        >>> version = gp.get_nvrtc_version()
+        >>> if version:
+        ...     print(f"NVRTC {version[0]}.{version[1]}")
+    """
+    try:
+        from pygpukit.core.backend import get_native_module, has_native_module
+
+        if not has_native_module():
+            return None
+
+        native = get_native_module()
+        if not native.is_nvrtc_available():
+            return None
+
+        return native.get_nvrtc_version()
+    except Exception:
+        return None
 
 
 class JITKernel:

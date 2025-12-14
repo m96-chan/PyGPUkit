@@ -25,7 +25,7 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 PyGPUkit aims to simplify GPU development by reducing dependency on complex CUDA Toolkit installations and fragile GPU environments.
 Its goal is to make GPU programming feel like using a standard Python library: installable via pip with minimal setup. PyGPUkit provides high-performance GPU kernels, memory management, and scheduling through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively.
 
-> **Note:** PyGPUkit currently requires CUDA drivers and NVRTC. It is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads, research, and real-time systems where full ML frameworks are overkill.
+> **Note:** PyGPUkit requires NVIDIA GPU drivers. NVRTC (JIT compilation) is **optional** — pre-compiled kernels work without CUDA Toolkit. It is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads, research, and real-time systems where full ML frameworks are overkill.
 
 ---
 
@@ -104,14 +104,27 @@ pip install -e .
 
 Requirements:
 - Python 3.10+
-- CUDA 11+
-- NVRTC available
-- NVIDIA GPU
+- NVIDIA GPU with drivers installed
+- **Optional:** CUDA Toolkit (for JIT compilation of custom kernels)
 
 **Supported GPUs:**
-- RTX 30XX series (Ampere) and above
+- RTX 30XX series (Ampere, SM 80+) and above
 - Performance tuning is optimized for GPUs with large L2 cache (6MB+)
-- Older GPUs (RTX 20XX, GTX 10XX, etc.) are NOT tuned and may have suboptimal performance
+- Older GPUs (RTX 20XX, GTX 10XX, etc.) are **NOT supported** (SM < 80)
+
+**Runtime Modes:**
+| Mode | Requirements | Features |
+|------|-------------|----------|
+| **Full JIT** | GPU drivers + CUDA Toolkit | All features including custom kernels |
+| **Pre-compiled only** | GPU drivers only | Built-in ops (matmul, add, etc.) |
+| **CPU simulation** | None | Testing/development without GPU |
+
+Check NVRTC availability:
+```python
+import pygpukit as gp
+print(f"CUDA: {gp.is_cuda_available()}")
+print(f"NVRTC: {gp.is_nvrtc_available()}")
+```
 
 ---
 
@@ -145,7 +158,7 @@ arr = z.to_numpy()
 garr = gp.from_numpy(arr)
 ```
 
-### Custom NVRTC Kernel
+### Custom NVRTC Kernel (requires CUDA Toolkit)
 ```cuda
 extern "C" __global__
 void scale(float* x, float factor, int n) {
@@ -155,8 +168,12 @@ void scale(float* x, float factor, int n) {
 ```
 
 ```python
-kernel = gp.jit(src, func="scale")
-kernel(x, factor=0.5, n=x.size)
+# Check if JIT is available before using custom kernels
+if gp.is_nvrtc_available():
+    kernel = gp.jit(src, func="scale")
+    kernel(x, factor=0.5, n=x.size)
+else:
+    print("JIT requires CUDA Toolkit. Using pre-compiled ops instead.")
 ```
 
 ### Rust Scheduler (v0.2)
@@ -333,11 +350,12 @@ PyGPUkit/
 | **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 27.5 TFLOPS |
 
-### **v0.2.4 — Benchmark & Reliability Phase**
+### **v0.2.4 — NVRTC Optional & Reliability (Current)**
+- [x] NVRTC made optional (works with driver-only installation)
+- [x] `is_nvrtc_available()` / `get_nvrtc_version()` API
+- [x] Graceful fallback when NVRTC unavailable
+- [x] Performance tests made informational (always PASS with TFLOPS summary)
 - [ ] Actual PyTorch/NumPy comparison benchmarks
-- [ ] Kernel cache LRU completion
-- [ ] Driver-only mode stabilization
-- [ ] Windows/Linux full support
 - [ ] Large GPU memory test (16GB continuous alloc/free)
 
 ### **v0.2.5 — Distributed Phase**

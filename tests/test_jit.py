@@ -2,7 +2,56 @@
 
 import pytest
 
-from pygpukit.jit.compiler import JITKernel, jit
+from pygpukit.jit.compiler import JITKernel, get_nvrtc_version, is_nvrtc_available, jit
+
+
+class TestNVRTCAvailability:
+    """Tests for NVRTC availability detection."""
+
+    def test_is_nvrtc_available_returns_bool(self):
+        """Test that is_nvrtc_available returns a boolean."""
+        result = is_nvrtc_available()
+        assert isinstance(result, bool)
+
+    def test_get_nvrtc_version_when_available(self):
+        """Test get_nvrtc_version returns tuple when NVRTC available."""
+        if not is_nvrtc_available():
+            pytest.skip("NVRTC not available")
+
+        version = get_nvrtc_version()
+        assert version is not None
+        assert isinstance(version, tuple)
+        assert len(version) == 2
+        assert isinstance(version[0], int)
+        assert isinstance(version[1], int)
+        # NVRTC version should be at least 11.0
+        assert version[0] >= 11
+
+    def test_get_nvrtc_version_when_unavailable(self):
+        """Test get_nvrtc_version returns None when NVRTC unavailable."""
+        # This test documents expected behavior when NVRTC is not available
+        # We can't force NVRTC to be unavailable, but we test the interface
+        version = get_nvrtc_version()
+        if not is_nvrtc_available():
+            assert version is None
+        else:
+            assert version is not None
+
+    def test_is_nvrtc_available_module_level(self):
+        """Test that is_nvrtc_available is exported from main module."""
+        import pygpukit as gp
+
+        assert hasattr(gp, "is_nvrtc_available")
+        assert callable(gp.is_nvrtc_available)
+        result = gp.is_nvrtc_available()
+        assert isinstance(result, bool)
+
+    def test_get_nvrtc_version_module_level(self):
+        """Test that get_nvrtc_version is exported from main module."""
+        import pygpukit as gp
+
+        assert hasattr(gp, "get_nvrtc_version")
+        assert callable(gp.get_nvrtc_version)
 
 
 class TestJITKernel:
