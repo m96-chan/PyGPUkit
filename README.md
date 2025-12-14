@@ -22,8 +22,10 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ## Opening Paragraph (Goal Statement)
 
-PyGPUkit aims to free developers from the complexity of CUDA Toolkit, Anaconda, and fragile GPU environments.
-Its goal is to make GPU programming and model execution feel like using a standard Python library: installable via pip, minimal setup, and no mandatory external SDKs. PyGPUkit provides high-performance GPU kernels, memory management, scheduling, and model execution (e.g. SafeTensors) through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively without fighting their environment.
+PyGPUkit aims to simplify GPU development by reducing dependency on complex CUDA Toolkit installations and fragile GPU environments.
+Its goal is to make GPU programming feel like using a standard Python library: installable via pip with minimal setup. PyGPUkit provides high-performance GPU kernels, memory management, and scheduling through a NumPy-like API and a Kubernetes-inspired resource model, allowing developers to use GPUs explicitly, predictably, and productively.
+
+> **Note:** PyGPUkit currently requires CUDA drivers and NVRTC. It is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads, research, and real-time systems where full ML frameworks are overkill.
 
 ---
 
@@ -76,7 +78,7 @@ Its goal is to make GPU programming and model execution feel like using a standa
 ---
 
 ## Features
-- **Lightweight** — no PyTorch/CuPy overhead
+- **Lightweight** — smaller footprint than PyTorch/CuPy (not a replacement)
 - **Modular** — runtime / memory / scheduler / JIT / ops
 - **Rust Backend** — memory pool, scheduler, dispatch in Rust
 - **GPUArray** with NumPy interop
@@ -321,45 +323,15 @@ PyGPUkit/
 
 ## Roadmap
 
-### **v0.1 (Released)**
-- [x] GPUArray
-- [x] NVRTC JIT
-- [x] add/mul/matmul ops
-- [x] Basic stream manager
-- [x] Packaging + wheels
+### **v0.1 — v0.2.3 (Released)**
 
-### **v0.2.0 (Released)**
-- [x] Rust Memory Pool (LRU, size-class)
-- [x] Rust Scheduler (priority, memory reservation)
-- [x] Rust Transfer Engine (async H2D/D2H)
-- [x] Rust Kernel Dispatch Controller
-- [x] Admission Control
-- [x] QoS Policy Framework (Guaranteed/Burstable/BestEffort)
-- [x] Kernel Pacing Engine
-- [x] Micro-Slicing Framework
-- [x] Pinned Memory Support
-- [x] Kernel Cache (PTX caching)
-- [x] GPU Partitioning
-- [x] Tiled Matmul (shared memory)
-- [x] 106 Rust tests
-
-### **v0.2.1 — Stabilization Phase (Released)**
-- [x] Admission / QoS spec finalization
-- [x] Python API inconsistency fixes
-- [x] Rust error propagation unification
-
-### **v0.2.2 — Performance Phase (Released)**
-- [x] Ampere-optimized SGEMM with cp.async pipeline
-- [x] 4-stage software pipelining for latency hiding
-- [x] float4 vectorized memory loads
-- [x] 18.2 TFLOPS on RTX 3090 Ti (46% efficiency)
-- [x] SM 80+ (Ampere) architecture requirement
-
-### **v0.2.3 — TF32 TensorCore Phase (Released)**
-- [x] TF32 TensorCore GEMM with PTX mma.sync
-- [x] cp.async double-buffered pipeline
-- [x] 27.5 TFLOPS on RTX 3090 Ti
-- [x] PTX fragment mapping documentation
+| Version | Highlights |
+|---------|------------|
+| **v0.1** | GPUArray, NVRTC JIT, add/mul/matmul, wheels |
+| **v0.2.0** | Rust scheduler (QoS, admission control, partitioning), memory pool (LRU), kernel cache, 106 Rust tests |
+| **v0.2.1** | API stabilization, error propagation |
+| **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
+| **v0.2.3** | TF32 TensorCore (PTX mma.sync), 27.5 TFLOPS |
 
 ### **v0.2.4 — Benchmark & Reliability Phase**
 - [ ] Actual PyTorch/NumPy comparison benchmarks

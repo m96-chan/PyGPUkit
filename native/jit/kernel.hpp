@@ -7,6 +7,18 @@
 #include <vector>
 #include <memory>
 
+#ifdef PYGPUKIT_DRIVER_ONLY
+// Driver-only mode: define our own Dim3 struct
+struct Dim3 {
+    unsigned int x, y, z;
+    Dim3(unsigned int x_ = 1, unsigned int y_ = 1, unsigned int z_ = 1)
+        : x(x_), y(y_), z(z_) {}
+};
+#else
+#include <cuda_runtime.h>
+using Dim3 = dim3;
+#endif
+
 namespace pygpukit {
 
 // Forward declaration
@@ -14,10 +26,10 @@ class JITKernel;
 
 // Kernel launch configuration
 struct LaunchConfig {
-    dim3 grid;
-    dim3 block;
+    Dim3 grid;
+    Dim3 block;
     size_t shared_mem;
-    cudaStream_t stream;
+    StreamHandle stream;
 
     LaunchConfig()
         : grid(1), block(256), shared_mem(0), stream(nullptr) {}
@@ -25,7 +37,7 @@ struct LaunchConfig {
     LaunchConfig(unsigned int grid_x, unsigned int block_x)
         : grid(grid_x), block(block_x), shared_mem(0), stream(nullptr) {}
 
-    LaunchConfig(dim3 g, dim3 b, size_t smem = 0, cudaStream_t s = nullptr)
+    LaunchConfig(Dim3 g, Dim3 b, size_t smem = 0, StreamHandle s = nullptr)
         : grid(g), block(b), shared_mem(smem), stream(s) {}
 };
 
