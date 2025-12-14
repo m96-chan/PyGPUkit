@@ -178,7 +178,7 @@ class TestTF32Correctness:
             max_diff = np.max(np.abs(C_current - C_first))
             assert max_diff == 0.0, f"Non-deterministic at iteration {i}: max diff = {max_diff}"
 
-        print(f"\n100 iterations: deterministic PASS")
+        print("\n100 iterations: deterministic PASS")
 
 
 class TestTF32Performance:
@@ -282,7 +282,7 @@ class TestTF32VsFP32:
 
         # TF32 should achieve at least 22 TFLOPS (vs FP32's ~18 TFLOPS)
         print(f"\nTF32: {tf32_tflops:.1f} TFLOPS")
-        assert tf32_tflops >= 22.0, f"TF32 not faster than FP32 baseline"
+        assert tf32_tflops >= 22.0, "TF32 not faster than FP32 baseline"
 
 
 if __name__ == "__main__":
