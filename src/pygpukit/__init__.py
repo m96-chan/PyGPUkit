@@ -5,6 +5,7 @@ __version__ = "0.2.0"
 from pygpukit.core.array import GPUArray
 from pygpukit.core.device import (
     DeviceInfo,
+    FallbackDeviceCapabilities,
     get_device_capabilities,
     get_device_info,
     is_cuda_available,
@@ -15,11 +16,12 @@ from pygpukit.core.stream import Stream, StreamManager, default_stream
 from pygpukit.jit.compiler import JITKernel, jit
 from pygpukit.ops.basic import add, matmul, mul
 
-# Try to import Rust types
+# Try to import Rust types, fallback to Python implementations
 try:
     from pygpukit._pygpukit_rust import DeviceCapabilities, KernelType
 except ImportError:
-    DeviceCapabilities = None
+    # Use Python fallback when Rust module is not available
+    DeviceCapabilities = FallbackDeviceCapabilities
     KernelType = None
 
 __all__ = [

@@ -62,6 +62,19 @@ def get_device_info(device_id: int = 0) -> DeviceInfo:
     )
 
 
+@dataclass
+class FallbackDeviceCapabilities:
+    """Fallback DeviceCapabilities when Rust module is not available."""
+    device_id: int
+    name: str
+    sm_version: int
+    compute_capability: int
+    tensorcore: bool
+    tensorcore_fp16: bool
+    tensorcore_bf16: bool
+    async_copy: bool
+
+
 def get_device_capabilities(device_id: int = 0):
     """Get device capabilities from Rust backend.
 
@@ -76,48 +89,36 @@ def get_device_capabilities(device_id: int = 0):
         device_id: Device index (default 0).
 
     Returns:
-        DeviceCapabilities from Rust backend.
+        DeviceCapabilities from Rust backend, or FallbackDeviceCapabilities.
     """
+    # Try to get device info first
     try:
-        from pygpukit._pygpukit_rust import DeviceCapabilities
-    except ImportError:
-        # Rust module not available - create from device info
         info = get_device_info(device_id)
         if info.compute_capability:
             sm_version = info.compute_capability[0] * 10 + info.compute_capability[1]
         else:
             sm_version = 0
+        device_name = info.name
+    except Exception:
+        # Can't get device info - use defaults
+        sm_version = 86  # Default to Ampere
+        device_name = "Unknown GPU"
 
-        # Create a simple capabilities object
-        @dataclass
-        class _DeviceCapabilities:
-            device_id: int
-            name: str
-            sm_version: int
-            compute_capability: int
-            tensorcore: bool
-            tensorcore_fp16: bool
-            tensorcore_bf16: bool
-            async_copy: bool
+    # Try to use Rust DeviceCapabilities
+    try:
+        from pygpukit._pygpukit_rust import DeviceCapabilities
+        return DeviceCapabilities(sm_version)
+    except ImportError:
+        pass
 
-        return _DeviceCapabilities(
-            device_id=device_id,
-            name=info.name,
-            sm_version=sm_version,
-            compute_capability=sm_version,
-            tensorcore=sm_version >= 80,
-            tensorcore_fp16=sm_version >= 70,
-            tensorcore_bf16=sm_version >= 80,
-            async_copy=sm_version >= 80,
-        )
-
-    # Get actual device info and create capabilities
-    info = get_device_info(device_id)
-    if info.compute_capability:
-        sm_version = info.compute_capability[0] * 10 + info.compute_capability[1]
-    else:
-        sm_version = 0
-
-    # Create Rust DeviceCapabilities with actual SM version
-    caps = DeviceCapabilities(sm_version)
-    return caps
+    # Fallback to Python implementation
+    return FallbackDeviceCapabilities(
+        device_id=device_id,
+        name=device_name,
+        sm_version=sm_version,
+        compute_capability=sm_version,
+        tensorcore=sm_version >= 80,
+        tensorcore_fp16=sm_version >= 70,
+        tensorcore_bf16=sm_version >= 80,
+        async_copy=sm_version >= 80,
+    )
