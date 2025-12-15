@@ -232,3 +232,83 @@ class GPUArray:
             except Exception:
                 pass  # Ignore errors during cleanup
             self._device_ptr = None
+
+    # ========================================================================
+    # Arithmetic operators
+    # ========================================================================
+
+    def __add__(self, other: GPUArray) -> GPUArray:
+        """Element-wise addition."""
+        from pygpukit.ops.basic import add
+        return add(self, other)
+
+    def __sub__(self, other: GPUArray) -> GPUArray:
+        """Element-wise subtraction."""
+        from pygpukit.ops.basic import sub
+        return sub(self, other)
+
+    def __mul__(self, other: GPUArray) -> GPUArray:
+        """Element-wise multiplication."""
+        from pygpukit.ops.basic import mul
+        return mul(self, other)
+
+    def __truediv__(self, other: GPUArray) -> GPUArray:
+        """Element-wise division."""
+        from pygpukit.ops.basic import div
+        return div(self, other)
+
+    def __matmul__(self, other: GPUArray) -> GPUArray:
+        """Matrix multiplication."""
+        from pygpukit.ops.basic import matmul
+        return matmul(self, other)
+
+    # ========================================================================
+    # Type conversion
+    # ========================================================================
+
+    def astype(self, dtype: DataType) -> GPUArray:
+        """Convert array to a different data type.
+
+        Args:
+            dtype: Target data type.
+
+        Returns:
+            A new GPUArray with the specified dtype.
+        """
+        if self._dtype == dtype:
+            return self
+
+        from pygpukit.core.factory import from_numpy
+        from pygpukit.core.dtypes import bfloat16, float32, float16
+
+        # Get numpy array
+        np_data = self.to_numpy()
+
+        # Handle BF16 source (stored as uint16)
+        if self._dtype == bfloat16:
+            # Convert BF16 (uint16) to FP32: shift left by 16 bits
+            bf16_as_uint32 = np_data.astype(np.uint32) << 16
+            fp32_data = bf16_as_uint32.view(np.float32)
+
+            if dtype == float32:
+                return from_numpy(fp32_data)
+            elif dtype == float16:
+                return from_numpy(fp32_data.astype(np.float16))
+            else:
+                return from_numpy(fp32_data.astype(dtype.to_numpy_dtype()))
+
+        # Convert to BF16
+        if dtype == bfloat16:
+            # BF16: convert via float32, store as uint16
+            fp32_data = np_data.astype(np.float32)
+            # Round to nearest even
+            uint32_view = fp32_data.view(np.uint32)
+            bf16_data = ((uint32_view + 0x7FFF + ((uint32_view >> 16) & 1)) >> 16).astype(np.uint16)
+            result = from_numpy(bf16_data)
+            # Override dtype to bfloat16
+            result._dtype = dtype
+            return result
+        else:
+            target_np_dtype = dtype.to_numpy_dtype()
+            converted = np_data.astype(target_np_dtype)
+            return from_numpy(converted)
