@@ -2,19 +2,16 @@
 """
 PyGPUkit v0.2.6 Multi-LLM Async Execution Demo
 
-Demonstrates running multiple "LLM-like" workloads concurrently on a single GPU:
-- TTS (Text-to-Speech simulation)
-- LLM (Language Model simulation)
-- Vision (Image processing simulation)
+Demonstrates running multiple LLM-like workloads concurrently on a single GPU
+using PyGPUkit's native LLM module (GPT2Model with MLP blocks).
 
 Each workload runs on a separate CUDA stream with independent VRAM budgets.
 Uses Python asyncio for non-blocking parallel execution.
 
-Target API:
-    async with context_session(llm_ctx), context_session(tts_ctx):
-        llm_f = llm_ctx.dispatch_async(llm_req)
-        tts_f = tts_ctx.dispatch_async(tts_req)
-        text, audio = await asyncio.gather(llm_f, tts_f)
+Key differences from PyTorch-based demo:
+- Uses PyGPUkit's native matmul (CUTLASS TF32)
+- Uses PyGPUkit's native layernorm, gelu
+- Real transformer block structure (LayerNorm -> MLP -> Residual)
 """
 
 from __future__ import annotations
@@ -47,6 +44,7 @@ except ImportError:
 # Check if GPU operations are available
 try:
     import pygpukit as gpk
+    from pygpukit.llm import MLP, LayerNorm, TransformerBlock
 
     HAS_GPU = True
 except ImportError:
@@ -56,107 +54,102 @@ except ImportError:
 def section(title: str) -> None:
     """Print section header."""
     print()
-    print("=" * 60)
+    print("=" * 70)
     print(f" {title}")
-    print("=" * 60)
+    print("=" * 70)
 
 
 # =============================================================================
-# Simulated LLM Workloads (using matmul as proxy)
+# Real LLM Workloads using PyGPUkit's GPT2Model
 # =============================================================================
 
 
-class SimulatedLLM:
-    """Simulated LLM using matmul operations."""
+class PyGPUkitLLM:
+    """LLM using PyGPUkit's native GPT2Model structure."""
 
-    def __init__(self, name: str, hidden_size: int = 1024, n_layers: int = 4):
+    def __init__(
+        self,
+        name: str,
+        n_embd: int = 768,
+        n_layer: int = 6,
+        n_inner: int | None = None,
+    ):
         self.name = name
-        self.hidden_size = hidden_size
-        self.n_layers = n_layers
-        self._weights = None
+        self.n_embd = n_embd
+        self.n_layer = n_layer
+        self.n_inner = n_inner or (4 * n_embd)
+        self.blocks: list[TransformerBlock] = []
+        self.ln_f: LayerNorm | None = None
 
     def load_weights(self) -> None:
-        """Load random weights (simulating model loading)."""
+        """Initialize random weights (simulating model loading)."""
         if not HAS_GPU:
             return
-        print(f"  [{self.name}] Loading weights (hidden={self.hidden_size}, layers={self.n_layers})")
-        self._weights = [
-            gpk.from_numpy(np.random.randn(self.hidden_size, self.hidden_size).astype(np.float32))
-            for _ in range(self.n_layers)
-        ]
 
-    def forward(self, batch_size: int = 32) -> np.ndarray:
-        """Run forward pass (simulated with matmul chain)."""
-        if not HAS_GPU or self._weights is None:
-            # CPU fallback: just sleep
+        print(
+            f"  [{self.name}] Loading GPT2-style model (embd={self.n_embd}, layers={self.n_layer})"
+        )
+
+        # Create transformer blocks with random weights
+        self.blocks = []
+        for i in range(self.n_layer):
+            # LayerNorm weights
+            ln_weight = gpk.from_numpy(np.ones(self.n_embd, dtype=np.float32))
+            ln_bias = gpk.from_numpy(np.zeros(self.n_embd, dtype=np.float32))
+
+            # MLP weights: fc1 [n_inner, n_embd], fc2 [n_embd, n_inner]
+            c_fc_weight = gpk.from_numpy(
+                (np.random.randn(self.n_inner, self.n_embd) * 0.02).astype(np.float32)
+            )
+            c_fc_bias = gpk.from_numpy(np.zeros(self.n_inner, dtype=np.float32))
+            c_proj_weight = gpk.from_numpy(
+                (np.random.randn(self.n_embd, self.n_inner) * 0.02).astype(np.float32)
+            )
+            c_proj_bias = gpk.from_numpy(np.zeros(self.n_embd, dtype=np.float32))
+
+            mlp = MLP(c_fc_weight, c_fc_bias, c_proj_weight, c_proj_bias)
+            block = TransformerBlock(ln_weight, ln_bias, mlp)
+            self.blocks.append(block)
+
+        # Final LayerNorm
+        self.ln_f = LayerNorm(
+            gpk.from_numpy(np.ones(self.n_embd, dtype=np.float32)),
+            gpk.from_numpy(np.zeros(self.n_embd, dtype=np.float32)),
+        )
+
+        # Calculate model size
+        params = self.n_layer * (
+            self.n_embd  # ln weight
+            + self.n_embd  # ln bias
+            + self.n_inner * self.n_embd  # c_fc weight
+            + self.n_inner  # c_fc bias
+            + self.n_embd * self.n_inner  # c_proj weight
+            + self.n_embd  # c_proj bias
+        )
+        print(f"  [{self.name}] Parameters: {params / 1e6:.1f}M")
+
+    def forward(self, batch_size: int = 128, seq_len: int = 512) -> np.ndarray:
+        """Run forward pass through transformer blocks.
+
+        This simulates the MLP portion of transformer inference.
+        Each block: LayerNorm -> MLP (fc1 -> gelu -> fc2) -> Residual
+        """
+        if not HAS_GPU or not self.blocks:
             time.sleep(0.1)
-            return np.zeros((batch_size, self.hidden_size), dtype=np.float32)
+            return np.zeros((batch_size, self.n_embd), dtype=np.float32)
 
-        # Create input
-        x = gpk.from_numpy(np.random.randn(batch_size, self.hidden_size).astype(np.float32))
+        # Create input hidden states [batch_size, n_embd]
+        hidden = gpk.from_numpy(np.random.randn(batch_size, self.n_embd).astype(np.float32) * 0.1)
 
-        # Chain of matmuls (simulating transformer layers)
-        for w in self._weights:
-            x = x @ w
+        # Apply transformer blocks
+        for block in self.blocks:
+            hidden = block(hidden)
 
-        return x.to_numpy()
+        # Final LayerNorm
+        if self.ln_f:
+            hidden = self.ln_f(hidden)
 
-
-class SimulatedTTS:
-    """Simulated TTS using matmul operations."""
-
-    def __init__(self, name: str = "tts"):
-        self.name = name
-        self._encoder = None
-        self._decoder = None
-
-    def load_weights(self) -> None:
-        """Load random weights."""
-        if not HAS_GPU:
-            return
-        print(f"  [{self.name}] Loading TTS weights")
-        self._encoder = gpk.from_numpy(np.random.randn(512, 512).astype(np.float32))
-        self._decoder = gpk.from_numpy(np.random.randn(512, 1024).astype(np.float32))
-
-    def synthesize(self, text_len: int = 64) -> np.ndarray:
-        """Synthesize audio (simulated)."""
-        if not HAS_GPU or self._encoder is None:
-            time.sleep(0.05)
-            return np.zeros((text_len * 16,), dtype=np.float32)
-
-        x = gpk.from_numpy(np.random.randn(text_len, 512).astype(np.float32))
-        x = x @ self._encoder
-        x = x @ self._decoder
-        return x.to_numpy().flatten()
-
-
-class SimulatedVision:
-    """Simulated Vision model using matmul operations."""
-
-    def __init__(self, name: str = "vision"):
-        self.name = name
-        self._backbone = None
-
-    def load_weights(self) -> None:
-        """Load random weights."""
-        if not HAS_GPU:
-            return
-        print(f"  [{self.name}] Loading Vision weights")
-        self._backbone = [
-            gpk.from_numpy(np.random.randn(256, 256).astype(np.float32))
-            for _ in range(3)
-        ]
-
-    def process(self, patches: int = 196) -> np.ndarray:
-        """Process image (simulated)."""
-        if not HAS_GPU or self._backbone is None:
-            time.sleep(0.03)
-            return np.zeros((patches, 256), dtype=np.float32)
-
-        x = gpk.from_numpy(np.random.randn(patches, 256).astype(np.float32))
-        for w in self._backbone:
-            x = x @ w
-        return x.to_numpy()
+        return hidden.to_numpy()
 
 
 # =============================================================================
@@ -168,32 +161,45 @@ def demo_sequential() -> float:
     """Run workloads sequentially (baseline)."""
     section("Sequential Execution (Baseline)")
 
-    llm = SimulatedLLM("llm", hidden_size=1024, n_layers=4)
-    tts = SimulatedTTS("tts")
-    vision = SimulatedVision("vision")
+    # Create models with different sizes (simulating different LLMs)
+    llm_large = PyGPUkitLLM("llm-large", n_embd=1024, n_layer=12)  # ~50M MLP params
+    llm_medium = PyGPUkitLLM("llm-medium", n_embd=768, n_layer=6)  # ~14M MLP params
+    llm_small = PyGPUkitLLM("llm-small", n_embd=512, n_layer=4)  # ~4M MLP params
 
     print("\nLoading models...")
-    llm.load_weights()
-    tts.load_weights()
-    vision.load_weights()
+    llm_large.load_weights()
+    llm_medium.load_weights()
+    llm_small.load_weights()
 
-    print("\nRunning sequentially...")
-    start = time.perf_counter()
+    # Warmup
+    print("\nWarmup...")
+    llm_large.forward(batch_size=64)
+    llm_medium.forward(batch_size=64)
+    llm_small.forward(batch_size=64)
 
-    # Run one after another
-    llm_result = llm.forward(batch_size=32)
-    tts_result = tts.synthesize(text_len=64)
-    vision_result = vision.process(patches=196)
+    print("\nRunning sequentially (3 iterations)...")
+    times = []
+    for i in range(3):
+        start = time.perf_counter()
 
-    elapsed = time.perf_counter() - start
+        # Run one after another (simulating sequential inference requests)
+        result_large = llm_large.forward(batch_size=128)
+        result_medium = llm_medium.forward(batch_size=128)
+        result_small = llm_small.forward(batch_size=128)
+
+        elapsed = time.perf_counter() - start
+        times.append(elapsed)
+        print(f"  Iteration {i + 1}: {elapsed * 1000:.2f} ms")
+
+    avg_elapsed = sum(times) / len(times)
 
     print("\nResults:")
-    print(f"  LLM output shape: {llm_result.shape}")
-    print(f"  TTS output shape: {tts_result.shape}")
-    print(f"  Vision output shape: {vision_result.shape}")
-    print(f"\n  Total time: {elapsed * 1000:.2f} ms")
+    print(f"  Large output shape: {result_large.shape}")
+    print(f"  Medium output shape: {result_medium.shape}")
+    print(f"  Small output shape: {result_small.shape}")
+    print(f"\n  Average time: {avg_elapsed * 1000:.2f} ms")
 
-    return elapsed
+    return avg_elapsed
 
 
 async def demo_parallel_async() -> float:
@@ -210,58 +216,75 @@ async def demo_parallel_async() -> float:
 
     # Create execution contexts with VRAM budgets
     print("\nCreating execution contexts...")
-    llm_ctx = create_context("llm", max_vram=4 * GB)
-    tts_ctx = create_context("tts", max_vram=2 * GB)
-    vision_ctx = create_context("vision", max_vram=1 * GB)
+    ctx_large = create_context("llm-large", max_vram=4 * GB)
+    ctx_medium = create_context("llm-medium", max_vram=2 * GB)
+    ctx_small = create_context("llm-small", max_vram=1 * GB)
 
-    print(f"  LLM context: stream_id={llm_ctx.stream_id}, max_vram={llm_ctx.max_vram / GB:.1f} GB")
-    print(f"  TTS context: stream_id={tts_ctx.stream_id}, max_vram={tts_ctx.max_vram / GB:.1f} GB")
-    print(f"  Vision context: stream_id={vision_ctx.stream_id}, max_vram={vision_ctx.max_vram / GB:.1f} GB")
+    print(
+        f"  Large context: stream_id={ctx_large.stream_id}, max_vram={ctx_large.max_vram / GB:.1f} GB"
+    )
+    print(
+        f"  Medium context: stream_id={ctx_medium.stream_id}, max_vram={ctx_medium.max_vram / GB:.1f} GB"
+    )
+    print(
+        f"  Small context: stream_id={ctx_small.stream_id}, max_vram={ctx_small.max_vram / GB:.1f} GB"
+    )
 
-    # Create simulated models
-    llm = SimulatedLLM("llm", hidden_size=1024, n_layers=4)
-    tts = SimulatedTTS("tts")
-    vision = SimulatedVision("vision")
+    # Create models
+    llm_large = PyGPUkitLLM("llm-large", n_embd=1024, n_layer=12)
+    llm_medium = PyGPUkitLLM("llm-medium", n_embd=768, n_layer=6)
+    llm_small = PyGPUkitLLM("llm-small", n_embd=512, n_layer=4)
 
     print("\nLoading models...")
-    llm.load_weights()
-    tts.load_weights()
-    vision.load_weights()
+    llm_large.load_weights()
+    llm_medium.load_weights()
+    llm_small.load_weights()
 
     # Define async workloads
-    async def run_llm() -> np.ndarray:
-        """Run LLM in executor (non-blocking)."""
+    async def run_large() -> np.ndarray:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: llm.forward(batch_size=32))
+        return await loop.run_in_executor(None, lambda: llm_large.forward(batch_size=128))
 
-    async def run_tts() -> np.ndarray:
-        """Run TTS in executor (non-blocking)."""
+    async def run_medium() -> np.ndarray:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: tts.synthesize(text_len=64))
+        return await loop.run_in_executor(None, lambda: llm_medium.forward(batch_size=128))
 
-    async def run_vision() -> np.ndarray:
-        """Run Vision in executor (non-blocking)."""
+    async def run_small() -> np.ndarray:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: vision.process(patches=196))
+        return await loop.run_in_executor(None, lambda: llm_small.forward(batch_size=128))
 
-    print("\nRunning in parallel with asyncio.gather...")
-    start = time.perf_counter()
+    # Warmup
+    print("\nWarmup...")
+    async with context_session(ctx_large), context_session(ctx_medium), context_session(ctx_small):
+        await asyncio.gather(run_large(), run_medium(), run_small())
 
-    # Run all workloads in parallel
-    async with context_session(llm_ctx), context_session(tts_ctx), context_session(vision_ctx):
-        llm_result, tts_result, vision_result = await asyncio.gather(
-            run_llm(),
-            run_tts(),
-            run_vision(),
-        )
+    print("\nRunning in parallel (3 iterations)...")
+    times = []
+    for i in range(3):
+        start = time.perf_counter()
 
-    elapsed = time.perf_counter() - start
+        async with (
+            context_session(ctx_large),
+            context_session(ctx_medium),
+            context_session(ctx_small),
+        ):
+            result_large, result_medium, result_small = await asyncio.gather(
+                run_large(),
+                run_medium(),
+                run_small(),
+            )
+
+        elapsed = time.perf_counter() - start
+        times.append(elapsed)
+        print(f"  Iteration {i + 1}: {elapsed * 1000:.2f} ms")
+
+    avg_elapsed = sum(times) / len(times)
 
     print("\nResults:")
-    print(f"  LLM output shape: {llm_result.shape}")
-    print(f"  TTS output shape: {tts_result.shape}")
-    print(f"  Vision output shape: {vision_result.shape}")
-    print(f"\n  Total time: {elapsed * 1000:.2f} ms")
+    print(f"  Large output shape: {result_large.shape}")
+    print(f"  Medium output shape: {result_medium.shape}")
+    print(f"  Small output shape: {result_small.shape}")
+    print(f"\n  Average time: {avg_elapsed * 1000:.2f} ms")
 
     # Show scheduler stats
     s = stats()
@@ -270,11 +293,11 @@ async def demo_parallel_async() -> float:
     print(f"  VRAM used: {s.used_vram / MB:.1f} MB")
 
     # Cleanup
-    destroy_context("llm")
-    destroy_context("tts")
-    destroy_context("vision")
+    destroy_context("llm-large")
+    destroy_context("llm-medium")
+    destroy_context("llm-small")
 
-    return elapsed
+    return avg_elapsed
 
 
 def demo_context_session_api():
@@ -336,15 +359,28 @@ def demo_speedup_comparison():
         speedup = seq_time / par_time if par_time > 0 else 0
         print(f"  Speedup:    {speedup:.2f}x")
 
+        if speedup < 1.0:
+            print("\n  Note: Single-GPU parallel execution has overhead.")
+            print("  Speedup improves with:")
+            print("    - Multi-GPU setups (true parallelism)")
+            print("    - I/O-bound workloads (async overlapping)")
+            print("    - CPU preprocessing overlapping GPU compute")
+
 
 def main():
-    print("=" * 60)
+    print("=" * 70)
     print(" PyGPUkit v0.2.6 - Multi-LLM Async Execution Demo")
-    print("=" * 60)
+    print(" Using native PyGPUkit LLM module (CUTLASS TF32 matmul)")
+    print("=" * 70)
 
     print("\nBackend status:")
     print(f"  GPU available: {HAS_GPU}")
     print(f"  Multi-LLM scheduler: {HAS_MULTI_LLM}")
+
+    if HAS_GPU:
+        import pygpukit as gpk
+
+        print(f"  CUDA available: {gpk.is_cuda_available()}")
 
     if not HAS_GPU:
         print("\n  [WARNING] No GPU available, running in CPU simulation mode")
@@ -356,12 +392,13 @@ def main():
     demo_speedup_comparison()
 
     section("Demo Complete")
-    print("Multi-LLM async execution demonstrated successfully!")
-    print("\nKey features:")
-    print("  - Separate CUDA streams per LLM context")
+    print("\nPyGPUkit Multi-LLM features:")
+    print("  - Native GPT2-style transformer blocks")
+    print("  - CUTLASS TF32 TensorCore matmul (31+ TFLOPS)")
+    print("  - Native layernorm, gelu operations")
+    print("  - Separate CUDA streams per context")
     print("  - Independent VRAM budgets")
     print("  - asyncio-compatible execution")
-    print("  - Non-blocking parallel execution with asyncio.gather")
 
 
 if __name__ == "__main__":

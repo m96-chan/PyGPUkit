@@ -46,16 +46,18 @@ c = a @ b  # Uses CUTLASS TF32 TensorCore
 # PYGPUKIT_NO_TF32=1
 ```
 
-### Multi-LLM Async Execution
+### Multi-LLM Concurrent Execution
 Run multiple AI models (LLM, TTS, Vision) concurrently on a single GPU with independent CUDA streams and VRAM budgets.
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-LLM Scheduler** | Run TTS + LLM + Vision in parallel |
-| **Per-context CUDA Streams** | Independent stream isolation |
-| **VRAM Budgeting** | Per-model memory limits |
+| **Execution Control** | User controls execution order |
+| **Stream Isolation** | No implicit sync between streams |
+| **VRAM Budgeting** | Safe memory sharing per model |
+| **Concurrent Safety** | "Running simultaneously doesn't break" |
 | **asyncio Integration** | Native Python async/await support |
-| **3.37x Speedup** | Real GPT-2 parallel execution benchmark |
+
+> **Note:** On a single GPU, Multi-LLM scheduling enables **concurrent execution, not faster execution**, for compute-bound workloads. Speedup benefits apply to I/O-bound workloads or multi-GPU setups.
 
 ```python
 import asyncio
@@ -70,7 +72,7 @@ tts_ctx = create_context("tts", max_vram=2 * GB)
 
 async def run_parallel():
     async with context_session(llm_ctx), context_session(tts_ctx):
-        # Run models in parallel with asyncio.gather
+        # Run models concurrently with asyncio.gather
         llm_task = asyncio.create_task(run_llm_inference())
         tts_task = asyncio.create_task(run_tts_synthesis())
 
@@ -79,12 +81,6 @@ async def run_parallel():
 
 result = asyncio.run(run_parallel())
 ```
-
-**Benchmark (RTX 3090 Ti, GPT-2 + DistilGPT-2):**
-| Execution | Time | Speedup |
-|-----------|------|---------|
-| Sequential | 986.8ms | 1.0x |
-| Parallel | 292.6ms | **3.37x** |
 
 ### FP16/BF16 TensorCore (via CUTLASS)
 | Feature | Description |
@@ -314,7 +310,7 @@ manager.create_partition("inference", "Inference",
 | **QoS Policy** | Guaranteed/Burstable/BestEffort tiers |
 | **Kernel Pacing** | Bandwidth-based throttling per stream |
 | **GPU Partitioning** | Resource isolation, multi-tenant support |
-| **Multi-LLM Execution** | Parallel AI model execution with stream isolation |
+| **Multi-LLM Execution** | Concurrent AI model execution with stream isolation |
 | **asyncio Integration** | Native Python async/await for concurrent inference |
 
 ---
@@ -354,7 +350,7 @@ PyGPUkit/
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 28 TFLOPS |
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
 | **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
-| **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM async execution |
+| **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
 
 ### Planned
 
