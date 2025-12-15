@@ -264,7 +264,7 @@ PyGPUkit/
 | **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 28 TFLOPS |
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
-| **v0.2.5** | **FP16/BF16 support**, reduction ops (sum, mean, max), operator overloads |
+| **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
 
 ### Planned
 

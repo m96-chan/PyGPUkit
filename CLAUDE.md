@@ -503,6 +503,34 @@ If performance or correctness degrades:
 - Track performance changes over time
 - Preserve trial-and-error history
 
+### Benchmarking
+
+**Always use `benchmark.py` for performance measurement.**
+
+```bash
+# Full benchmark (all dtypes, all sizes)
+python benchmark.py
+
+# Quick mode (fewer warmup/iterations)
+python benchmark.py --quick
+
+# Specific sizes
+python benchmark.py --sizes 4096 8192
+
+# TF32 kernel version selection
+python benchmark.py --tf32-version v1   # WMMA API
+python benchmark.py --tf32-version v2   # PTX mma.sync (default)
+```
+
+**Output includes:**
+- Kernel-only timing (no D2H copy overhead)
+- Correctness verification (relative error)
+- README.md-ready table format
+
+**Environment Variables:**
+- `PYGPUKIT_ALLOW_TF32=1` - Enable TF32 TensorCore
+- `PYGPUKIT_TF32_V2=1` - Use PTX mma.sync kernel (default when TF32 enabled)
+
 ---
 
 ## Design Principles
