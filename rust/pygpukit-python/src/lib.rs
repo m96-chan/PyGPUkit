@@ -10,6 +10,7 @@ mod scheduler;
 mod transfer;
 mod dispatch;
 mod device;
+mod llm;
 
 /// PyGPUkit Rust module
 #[pymodule]
@@ -38,6 +39,11 @@ fn _pygpukit_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let device_module = PyModule::new(m.py(), "device")?;
     device::register(&device_module)?;
     m.add_submodule(&device_module)?;
+
+    // LLM submodule
+    let llm_module = PyModule::new(m.py(), "llm")?;
+    llm::register(&llm_module)?;
+    m.add_submodule(&llm_module)?;
 
     // Also export at top level for convenience
     m.add_class::<memory::PyMemoryPool>()?;
@@ -97,9 +103,25 @@ fn _pygpukit_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scheduler::PyPartitionUsage>()?;
     m.add_class::<scheduler::PyPartition>()?;
     m.add_class::<scheduler::PyPartitionStats>()?;
+    // Multi-LLM Controller (v0.2.6+)
+    m.add_class::<scheduler::PyContextState>()?;
+    m.add_class::<scheduler::PyContextStats>()?;
+    m.add_class::<scheduler::PyControllerStats>()?;
+    m.add_class::<scheduler::PyMultiLLMController>()?;
+    // Async Execution (v0.2.6+)
+    m.add_class::<scheduler::PyFutureState>()?;
+    m.add_class::<scheduler::PyKernelResult>()?;
+    m.add_class::<scheduler::PyAsyncKernelRequest>()?;
+    m.add_class::<scheduler::PyAsyncExecStats>()?;
+    m.add_class::<scheduler::PyKernelFuture>()?;
     // Device capabilities
     m.add_class::<device::PyKernelType>()?;
     m.add_class::<device::PyDeviceCapabilities>()?;
+    // LLM support
+    m.add_class::<llm::PyDtype>()?;
+    m.add_class::<llm::PyTensorInfo>()?;
+    m.add_class::<llm::PySafeTensorsFile>()?;
+    m.add_class::<llm::PyTokenizer>()?;
 
     Ok(())
 }

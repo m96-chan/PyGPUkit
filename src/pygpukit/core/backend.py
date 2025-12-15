@@ -480,3 +480,35 @@ def reset_backend() -> None:
     """Reset the backend to auto-detection."""
     global _backend
     _backend = None
+
+
+# Rust module (PyO3 bindings)
+_rust_module: Any = None
+_rust_import_attempted: bool = False
+
+
+def get_rust_module() -> Any | None:
+    """Get the Rust module (PyO3 bindings) if available.
+
+    Returns:
+        The _pygpukit_rust module if available, None otherwise.
+    """
+    global _rust_module, _rust_import_attempted
+
+    if _rust_import_attempted:
+        return _rust_module
+
+    _rust_import_attempted = True
+    try:
+        from pygpukit import _pygpukit_rust  # type: ignore[attr-defined]
+
+        _rust_module = _pygpukit_rust
+    except ImportError:
+        _rust_module = None
+
+    return _rust_module
+
+
+def has_rust_module() -> bool:
+    """Check if the Rust module (PyO3 bindings) is available."""
+    return get_rust_module() is not None

@@ -79,5 +79,20 @@ GPUArray matmul(const GPUArray& a, const GPUArray& b);
 void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c, bool use_tf32);
 GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32);
 
+// ============================================================================
+// Neural Network Operations
+// ============================================================================
+
+// GELU: Gaussian Error Linear Unit activation
+// y = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+GPUArray gelu(const GPUArray& input);
+
+// Bias Add: output[batch, features] += bias[features] (in-place)
+void bias_add_inplace(GPUArray& output, const GPUArray& bias);
+
+// LayerNorm: y = (x - mean) / sqrt(var + eps) * gamma + beta
+// input: [batch, features], gamma/beta: [features]
+GPUArray layernorm(const GPUArray& input, const GPUArray& gamma, const GPUArray& beta, float eps = 1e-5f);
+
 } // namespace ops
 } // namespace pygpukit

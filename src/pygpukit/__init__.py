@@ -1,7 +1,9 @@
 """PyGPUkit - A lightweight GPU runtime for Python."""
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
+# LLM support (safetensors loader)
+from pygpukit import llm
 from pygpukit.core.array import GPUArray
 from pygpukit.core.device import (
     DeviceInfo,
@@ -27,7 +29,21 @@ from pygpukit.jit.compiler import (
     jit,
     warmup,
 )
-from pygpukit.ops.basic import add, div, exp, log, matmul, max, mean, mul, relu, sub, sum
+from pygpukit.ops.basic import (
+    add,
+    div,
+    exp,
+    gelu,
+    layernorm,
+    log,
+    matmul,
+    max,
+    mean,
+    mul,
+    relu,
+    sub,
+    sum,
+)
 
 # Try to import Rust types, fallback to Python implementations
 try:
@@ -87,9 +103,13 @@ __all__ = [
     "exp",
     "log",
     "relu",
+    "gelu",
+    "layernorm",
     "matmul",
     # Reductions
     "sum",
     "mean",
     "max",
+    # LLM support
+    "llm",
 ]

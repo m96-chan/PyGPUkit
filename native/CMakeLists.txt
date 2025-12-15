@@ -53,6 +53,7 @@ pybind11_add_module(_pygpukit_native
     ops/unary/unary.cu
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
+    ops/nn/nn.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp

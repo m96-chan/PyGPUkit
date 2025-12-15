@@ -537,3 +537,138 @@ def _max_native(a: GPUArray) -> GPUArray:
     a_native = a._get_native()
     c_native = native.max(a_native)
     return GPUArray._wrap_native(c_native)
+
+
+# ============================================================================
+# Neural Network Operations
+# ============================================================================
+
+
+def gelu(a: GPUArray) -> GPUArray:
+    """GELU (Gaussian Error Linear Unit) activation.
+
+    Computes: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+
+    Args:
+        a: Input array (float32, float64, float16, or bfloat16).
+
+    Returns:
+        A new GPUArray containing gelu(a).
+
+    Raises:
+        ValueError: If dtype is not a float type.
+    """
+    _validate_float_dtype(a, "gelu")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _gelu_native(a)
+    else:
+        return _gelu_cpu(a)
+
+
+def _gelu_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of gelu."""
+    a_np = a.to_numpy()
+    # GELU approximation
+    x = a_np.astype(np.float32) if a_np.dtype in [np.float16] else a_np
+    c1 = 0.7978845608  # sqrt(2/pi)
+    c2 = 0.044715
+    result = x * 0.5 * (1 + np.tanh(c1 * (x + c2 * x**3)))
+    return from_numpy(result.astype(a_np.dtype))
+
+
+def _gelu_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of gelu (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.gelu(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def layernorm(
+    input: GPUArray,
+    gamma: GPUArray,
+    beta: GPUArray,
+    eps: float = 1e-5,
+) -> GPUArray:
+    """Layer normalization.
+
+    Computes: (x - mean) / sqrt(var + eps) * gamma + beta
+
+    Args:
+        input: Input array of shape [batch, features].
+        gamma: Scale parameter of shape [features].
+        beta: Bias parameter of shape [features].
+        eps: Small epsilon for numerical stability.
+
+    Returns:
+        A new GPUArray containing the normalized output.
+
+    Raises:
+        ValueError: If shapes or dtypes don't match.
+    """
+    _validate_float_dtype(input, "layernorm")
+
+    if input.ndim != 2:
+        raise ValueError(f"layernorm expects 2D input [batch, features], got {input.ndim}D")
+    if gamma.ndim != 1 or beta.ndim != 1:
+        raise ValueError("layernorm expects 1D gamma and beta")
+    if input.dtype != gamma.dtype or input.dtype != beta.dtype:
+        raise ValueError("layernorm: all inputs must have same dtype")
+
+    features = input.shape[1]
+    if gamma.shape[0] != features or beta.shape[0] != features:
+        raise ValueError(
+            f"layernorm: gamma/beta size {gamma.shape[0]} must match features {features}"
+        )
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _layernorm_native(input, gamma, beta, eps)
+    else:
+        return _layernorm_cpu(input, gamma, beta, eps)
+
+
+def _layernorm_cpu(
+    input: GPUArray,
+    gamma: GPUArray,
+    beta: GPUArray,
+    eps: float,
+) -> GPUArray:
+    """CPU implementation of layernorm."""
+    x = input.to_numpy()
+    g = gamma.to_numpy()
+    b = beta.to_numpy()
+
+    # Compute mean and variance along features axis
+    mean = x.mean(axis=1, keepdims=True)
+    var = x.var(axis=1, keepdims=True)
+
+    # Normalize
+    normalized = (x - mean) / np.sqrt(var + eps)
+
+    # Apply affine transform
+    result = normalized * g + b
+    return from_numpy(result)
+
+
+def _layernorm_native(
+    input: GPUArray,
+    gamma: GPUArray,
+    beta: GPUArray,
+    eps: float,
+) -> GPUArray:
+    """Native C++ CUDA implementation of layernorm (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    gamma_native = gamma._get_native()
+    beta_native = beta._get_native()
+    c_native = native.layernorm(input_native, gamma_native, beta_native, eps)
+    return GPUArray._wrap_native(c_native)

@@ -12,6 +12,8 @@ use pygpukit_core::scheduler::{
     QosClass, QosPolicy, QosTaskMeta, QosEvaluation, QosPolicyEvaluator, QosStats,
     ResourceRequirements,
     PartitionManager, PartitionConfig, Partition, PartitionLimits, PartitionUsage, PartitionStats,
+    MultiLLMController, ContextState, ContextStats, ControllerStats,
+    FutureState, KernelFuture, KernelResult, AsyncKernelRequest, AsyncExecStats,
 };
 
 /// Task state enum for Python
@@ -1730,6 +1732,671 @@ impl PyPartitionManager {
     }
 }
 
+// =============================================================================
+// Multi-LLM Controller Types
+// =============================================================================
+
+/// Context state enum for Python
+#[pyclass(name = "ContextState", eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PyContextState {
+    Idle = 0,
+    Running = 1,
+    Paused = 2,
+}
+
+impl From<ContextState> for PyContextState {
+    fn from(state: ContextState) -> Self {
+        match state {
+            ContextState::Idle => PyContextState::Idle,
+            ContextState::Running => PyContextState::Running,
+            ContextState::Paused => PyContextState::Paused,
+        }
+    }
+}
+
+impl From<PyContextState> for ContextState {
+    fn from(state: PyContextState) -> Self {
+        match state {
+            PyContextState::Idle => ContextState::Idle,
+            PyContextState::Running => ContextState::Running,
+            PyContextState::Paused => ContextState::Paused,
+        }
+    }
+}
+
+/// Execution context statistics for Python
+#[pyclass(name = "ContextStats")]
+#[derive(Clone)]
+pub struct PyContextStats {
+    inner: ContextStats,
+}
+
+#[pymethods]
+impl PyContextStats {
+    #[getter]
+    fn llm_id(&self) -> String {
+        self.inner.llm_id.clone()
+    }
+
+    #[getter]
+    fn state(&self) -> PyContextState {
+        self.inner.state.into()
+    }
+
+    #[getter]
+    fn stream_id(&self) -> u32 {
+        self.inner.stream_id
+    }
+
+    #[getter]
+    fn max_vram(&self) -> usize {
+        self.inner.max_vram
+    }
+
+    #[getter]
+    fn used_vram(&self) -> usize {
+        self.inner.used_vram
+    }
+
+    #[getter]
+    fn available_vram(&self) -> usize {
+        self.inner.available_vram
+    }
+
+    #[getter]
+    fn buffer_count(&self) -> usize {
+        self.inner.buffer_count
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ContextStats(llm_id='{}', state={:?}, stream={}, used_vram={})",
+            self.inner.llm_id, self.inner.state, self.inner.stream_id, self.inner.used_vram
+        )
+    }
+}
+
+/// Controller statistics for Python
+#[pyclass(name = "ControllerStats")]
+#[derive(Clone)]
+pub struct PyControllerStats {
+    inner: ControllerStats,
+}
+
+#[pymethods]
+impl PyControllerStats {
+    #[getter]
+    fn initialized(&self) -> bool {
+        self.inner.initialized
+    }
+
+    #[getter]
+    fn device_id(&self) -> i32 {
+        self.inner.device_id
+    }
+
+    #[getter]
+    fn total_vram_budget(&self) -> usize {
+        self.inner.total_vram_budget
+    }
+
+    #[getter]
+    fn device_total_memory(&self) -> usize {
+        self.inner.device_total_memory
+    }
+
+    #[getter]
+    fn used_vram(&self) -> usize {
+        self.inner.used_vram
+    }
+
+    #[getter]
+    fn available_vram(&self) -> usize {
+        self.inner.available_vram
+    }
+
+    #[getter]
+    fn context_count(&self) -> usize {
+        self.inner.context_count
+    }
+
+    #[getter]
+    fn stream_pool_size(&self) -> usize {
+        self.inner.stream_pool_size
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ControllerStats(initialized={}, contexts={}, used_vram={}, available_vram={})",
+            self.inner.initialized, self.inner.context_count,
+            self.inner.used_vram, self.inner.available_vram
+        )
+    }
+}
+
+/// Multi-LLM Dispatch Controller for Python
+///
+/// Manages execution contexts for multiple LLM instances on a single GPU.
+/// Uses stream-based isolation for concurrent execution.
+///
+/// Example:
+///     controller = MultiLLMController()
+///     controller.initialize(0, 8 * GB, 8 * GB)
+///     stream_id = controller.create_context("gpt2_a", 4 * GB)
+///     controller.start_session()
+///     # ... execute kernels ...
+///     controller.end_session()
+#[pyclass(name = "MultiLLMController")]
+pub struct PyMultiLLMController {
+    inner: Arc<MultiLLMController>,
+}
+
+#[pymethods]
+impl PyMultiLLMController {
+    /// Create a new controller (uninitialized)
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(MultiLLMController::new()),
+        }
+    }
+
+    /// Initialize the controller
+    ///
+    /// Args:
+    ///     device_id: CUDA device ID (default 0)
+    ///     device_total_memory: Total device memory in bytes
+    ///     total_vram_budget: VRAM budget for all contexts (0 = device total)
+    #[pyo3(signature = (device_id=0, device_total_memory=0, total_vram_budget=0))]
+    fn initialize(&self, device_id: i32, device_total_memory: usize, total_vram_budget: usize) {
+        // If device_total_memory is 0, use a sensible default (8GB)
+        let mem = if device_total_memory == 0 { 8 * 1024 * 1024 * 1024 } else { device_total_memory };
+        self.inner.initialize(device_id, mem, total_vram_budget);
+    }
+
+    /// Check if controller is initialized
+    fn is_initialized(&self) -> bool {
+        self.inner.is_initialized()
+    }
+
+    /// Create an execution context for an LLM
+    ///
+    /// Args:
+    ///     llm_id: Unique LLM identifier
+    ///     max_vram: Maximum VRAM for this LLM (0 = share global budget)
+    ///
+    /// Returns:
+    ///     The assigned stream ID for this context
+    #[pyo3(signature = (llm_id, max_vram=0))]
+    fn create_context(&self, llm_id: &str, max_vram: usize) -> PyResult<u32> {
+        self.inner.create_context(llm_id, max_vram)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    }
+
+    /// Get an existing context by LLM ID
+    fn get_context(&self, llm_id: &str) -> Option<PyContextStats> {
+        self.inner.get_context(llm_id).map(|s| PyContextStats { inner: s })
+    }
+
+    /// Destroy an execution context
+    fn destroy_context(&self, llm_id: &str) -> bool {
+        self.inner.destroy_context(llm_id)
+    }
+
+    /// List all active context IDs
+    fn list_contexts(&self) -> Vec<String> {
+        self.inner.list_contexts()
+    }
+
+    /// Get number of active contexts
+    fn context_count(&self) -> usize {
+        self.inner.context_count()
+    }
+
+    /// Get stream ID for a context
+    fn get_stream_id(&self, llm_id: &str) -> Option<u32> {
+        self.inner.get_stream_id(llm_id)
+    }
+
+    /// Track a memory allocation for a context
+    fn track_allocation(&self, llm_id: &str, buffer_id: u64, size: usize) -> bool {
+        self.inner.track_allocation(llm_id, buffer_id, size)
+    }
+
+    /// Track a memory deallocation for a context
+    fn track_deallocation(&self, llm_id: &str, buffer_id: u64) {
+        self.inner.track_deallocation(llm_id, buffer_id);
+    }
+
+    /// Get total VRAM used across all contexts
+    fn used_vram(&self) -> usize {
+        self.inner.used_vram()
+    }
+
+    /// Get available VRAM (global budget - used)
+    fn available_vram(&self) -> usize {
+        self.inner.available_vram()
+    }
+
+    /// Start a session (mark all contexts as running)
+    fn start_session(&self) {
+        self.inner.start_session();
+    }
+
+    /// End a session (synchronize and mark all contexts as idle)
+    fn end_session(&self) {
+        self.inner.end_session();
+    }
+
+    /// Check if a session is active
+    fn is_session_active(&self) -> bool {
+        self.inner.is_session_active()
+    }
+
+    /// Get controller statistics
+    fn stats(&self) -> PyControllerStats {
+        PyControllerStats { inner: self.inner.stats() }
+    }
+
+    /// Reset the controller (destroy all contexts)
+    fn reset(&self) {
+        self.inner.reset();
+    }
+
+    // --- Async Execution ---
+
+    /// Dispatch an async kernel for a specific LLM context
+    ///
+    /// Args:
+    ///     llm_id: LLM identifier
+    ///     request: Kernel dispatch request
+    ///
+    /// Returns:
+    ///     KernelFuture for tracking execution
+    ///
+    /// Example:
+    ///     request = AsyncKernelRequest.linear(kernel_handle, 1024, 256)
+    ///     future = controller.dispatch_async("llm", request)
+    ///     # Do other work...
+    ///     result = future.wait()
+    fn dispatch_async(&self, llm_id: &str, request: PyAsyncKernelRequest) -> PyResult<PyKernelFuture> {
+        self.inner.dispatch_async(llm_id, request.inner)
+            .map(|f| PyKernelFuture { inner: f })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
+    }
+
+    /// Get pending futures for a context
+    fn get_pending_futures(&self, llm_id: &str) -> Option<Vec<u64>> {
+        self.inner.get_pending_futures(llm_id)
+    }
+
+    /// Mark a future as launched
+    fn mark_future_launched(&self, llm_id: &str, future_id: u64) {
+        self.inner.mark_future_launched(llm_id, future_id);
+    }
+
+    /// Mark a future as completed
+    fn mark_future_completed(&self, llm_id: &str, future_id: u64, exec_time: f64) {
+        self.inner.mark_future_completed(llm_id, future_id, exec_time);
+    }
+
+    /// Mark a future as failed
+    fn mark_future_failed(&self, llm_id: &str, future_id: u64, error: String) {
+        self.inner.mark_future_failed(llm_id, future_id, error);
+    }
+
+    /// Cancel a pending future
+    fn cancel_future(&self, llm_id: &str, future_id: u64) -> bool {
+        self.inner.cancel_future(llm_id, future_id)
+    }
+
+    /// Get a future by ID from a context
+    fn get_future(&self, llm_id: &str, future_id: u64) -> Option<PyKernelFuture> {
+        self.inner.get_future(llm_id, future_id).map(|f| PyKernelFuture { inner: f })
+    }
+
+    /// Get async execution stats for a context
+    fn async_stats(&self, llm_id: &str) -> Option<PyAsyncExecStats> {
+        self.inner.async_stats(llm_id).map(|s| PyAsyncExecStats { inner: s })
+    }
+
+    // --- Per-Context Session Management ---
+
+    /// Start a session for a specific context
+    ///
+    /// Unlike global session(), per-context sessions allow independent
+    /// LLM execution. Each context can have its own session lifecycle.
+    ///
+    /// Example:
+    ///     # TTS and LLM run independently
+    ///     controller.start_context_session("tts")
+    ///     controller.start_context_session("llm")
+    ///
+    ///     # Dispatch async work
+    ///     tts_future = controller.dispatch_async("tts", tts_request)
+    ///     llm_future = controller.dispatch_async("llm", llm_request)
+    ///
+    ///     # Wait for results in any order
+    ///     llm_result = llm_future.wait()  # Get LLM first
+    ///     tts_result = tts_future.wait()  # Then TTS
+    fn start_context_session(&self, llm_id: &str) -> bool {
+        self.inner.start_context_session(llm_id)
+    }
+
+    /// End a session for a specific context
+    fn end_context_session(&self, llm_id: &str) -> bool {
+        self.inner.end_context_session(llm_id)
+    }
+
+    /// Check if a specific context has an active session
+    fn is_context_session_active(&self, llm_id: &str) -> Option<bool> {
+        self.inner.is_context_session_active(llm_id)
+    }
+
+    fn __repr__(&self) -> String {
+        let stats = self.inner.stats();
+        format!(
+            "MultiLLMController(initialized={}, contexts={}, used_vram={})",
+            stats.initialized, stats.context_count, stats.used_vram
+        )
+    }
+}
+
+// =============================================================================
+// Async Execution Types
+// =============================================================================
+
+/// Future state enum for Python
+#[pyclass(name = "FutureState", eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PyFutureState {
+    Pending = 0,
+    Running = 1,
+    Completed = 2,
+    Failed = 3,
+    Cancelled = 4,
+}
+
+impl From<FutureState> for PyFutureState {
+    fn from(state: FutureState) -> Self {
+        match state {
+            FutureState::Pending => PyFutureState::Pending,
+            FutureState::Running => PyFutureState::Running,
+            FutureState::Completed => PyFutureState::Completed,
+            FutureState::Failed => PyFutureState::Failed,
+            FutureState::Cancelled => PyFutureState::Cancelled,
+        }
+    }
+}
+
+/// Kernel execution result for Python
+#[pyclass(name = "KernelResult")]
+#[derive(Clone)]
+pub struct PyKernelResult {
+    inner: KernelResult,
+}
+
+#[pymethods]
+impl PyKernelResult {
+    /// Whether execution succeeded
+    #[getter]
+    fn success(&self) -> bool {
+        self.inner.success
+    }
+
+    /// Error message if failed
+    #[getter]
+    fn error(&self) -> Option<String> {
+        self.inner.error.clone()
+    }
+
+    /// Execution time in seconds
+    #[getter]
+    fn exec_time(&self) -> f64 {
+        self.inner.exec_time
+    }
+
+    /// Output data as bytes (if any)
+    #[getter]
+    fn output(&self) -> Option<Vec<u8>> {
+        self.inner.output.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        if self.inner.success {
+            format!("KernelResult(success=True, exec_time={:.4}s)", self.inner.exec_time)
+        } else {
+            format!("KernelResult(success=False, error='{}')", self.inner.error.as_deref().unwrap_or("unknown"))
+        }
+    }
+}
+
+/// Async kernel request for Python
+///
+/// Use this to specify kernel dispatch parameters.
+#[pyclass(name = "AsyncKernelRequest")]
+#[derive(Clone)]
+pub struct PyAsyncKernelRequest {
+    inner: AsyncKernelRequest,
+}
+
+#[pymethods]
+impl PyAsyncKernelRequest {
+    /// Create a new async kernel request
+    ///
+    /// Args:
+    ///     kernel_handle: Kernel function handle (CUfunction as int)
+    #[new]
+    fn new(kernel_handle: u64) -> Self {
+        Self {
+            inner: AsyncKernelRequest::new(kernel_handle),
+        }
+    }
+
+    /// Create a linear kernel request (1D grid)
+    ///
+    /// Args:
+    ///     kernel_handle: Kernel function handle
+    ///     n_elements: Number of elements to process
+    ///     block_size: Threads per block (default 256)
+    #[staticmethod]
+    #[pyo3(signature = (kernel_handle, n_elements, block_size=256))]
+    fn linear(kernel_handle: u64, n_elements: usize, block_size: u32) -> Self {
+        Self {
+            inner: AsyncKernelRequest::linear(kernel_handle, n_elements, block_size),
+        }
+    }
+
+    /// Set grid dimensions
+    fn with_grid(&self, x: u32, y: u32, z: u32) -> Self {
+        Self {
+            inner: self.inner.clone().with_grid(x, y, z),
+        }
+    }
+
+    /// Set block dimensions
+    fn with_block(&self, x: u32, y: u32, z: u32) -> Self {
+        Self {
+            inner: self.inner.clone().with_block(x, y, z),
+        }
+    }
+
+    /// Set shared memory size
+    fn with_shared_mem(&self, bytes: u32) -> Self {
+        Self {
+            inner: self.inner.clone().with_shared_mem(bytes),
+        }
+    }
+
+    /// Set kernel arguments (as list of u64 pointers)
+    fn with_args(&self, args: Vec<u64>) -> Self {
+        Self {
+            inner: self.inner.clone().with_args(args),
+        }
+    }
+
+    #[getter]
+    fn kernel_handle(&self) -> u64 {
+        self.inner.kernel_handle
+    }
+
+    #[getter]
+    fn grid(&self) -> (u32, u32, u32) {
+        self.inner.grid
+    }
+
+    #[getter]
+    fn block(&self) -> (u32, u32, u32) {
+        self.inner.block
+    }
+
+    #[getter]
+    fn shared_mem(&self) -> u32 {
+        self.inner.shared_mem
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncKernelRequest(handle=0x{:x}, grid={:?}, block={:?})",
+            self.inner.kernel_handle, self.inner.grid, self.inner.block
+        )
+    }
+}
+
+/// Async execution statistics for Python
+#[pyclass(name = "AsyncExecStats")]
+#[derive(Clone)]
+pub struct PyAsyncExecStats {
+    inner: AsyncExecStats,
+}
+
+#[pymethods]
+impl PyAsyncExecStats {
+    #[getter]
+    fn total_dispatched(&self) -> u64 {
+        self.inner.total_dispatched
+    }
+
+    #[getter]
+    fn pending_count(&self) -> usize {
+        self.inner.pending_count
+    }
+
+    #[getter]
+    fn running_count(&self) -> usize {
+        self.inner.running_count
+    }
+
+    #[getter]
+    fn completed_count(&self) -> u64 {
+        self.inner.completed_count
+    }
+
+    #[getter]
+    fn failed_count(&self) -> u64 {
+        self.inner.failed_count
+    }
+
+    #[getter]
+    fn cancelled_count(&self) -> u64 {
+        self.inner.cancelled_count
+    }
+
+    #[getter]
+    fn avg_exec_time(&self) -> f64 {
+        self.inner.avg_exec_time
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AsyncExecStats(dispatched={}, pending={}, running={}, completed={})",
+            self.inner.total_dispatched, self.inner.pending_count,
+            self.inner.running_count, self.inner.completed_count
+        )
+    }
+}
+
+/// Kernel future for Python
+///
+/// Handle for tracking async kernel execution. Use `wait()` to block
+/// until completion or `is_ready()` to check without blocking.
+///
+/// Example:
+///     request = AsyncKernelRequest(kernel_handle)
+///     future = controller.dispatch_async("llm", request)
+///
+///     # Do other work while kernel executes...
+///
+///     if future.is_ready():
+///         result = future.wait()
+#[pyclass(name = "KernelFuture")]
+#[derive(Clone)]
+pub struct PyKernelFuture {
+    inner: KernelFuture,
+}
+
+#[pymethods]
+impl PyKernelFuture {
+    /// Get future ID
+    #[getter]
+    fn id(&self) -> u64 {
+        self.inner.id()
+    }
+
+    /// Get stream ID where kernel is executing
+    #[getter]
+    fn stream_id(&self) -> u32 {
+        self.inner.stream_id()
+    }
+
+    /// Get context ID (LLM ID)
+    #[getter]
+    fn context_id(&self) -> String {
+        self.inner.context_id().to_string()
+    }
+
+    /// Get current state
+    #[getter]
+    fn state(&self) -> PyFutureState {
+        self.inner.state().into()
+    }
+
+    /// Check if kernel execution is complete (non-blocking)
+    fn is_ready(&self) -> bool {
+        self.inner.is_ready()
+    }
+
+    /// Wait for kernel completion (blocking)
+    ///
+    /// Returns the kernel result. If already complete, returns immediately.
+    /// If still running, blocks until completion.
+    fn wait(&self) -> PyKernelResult {
+        PyKernelResult {
+            inner: self.inner.wait(),
+        }
+    }
+
+    /// Try to get result without blocking
+    ///
+    /// Returns None if not ready yet.
+    fn try_get(&self) -> Option<PyKernelResult> {
+        self.inner.try_get().map(|r| PyKernelResult { inner: r })
+    }
+
+    /// Get execution time (if completed)
+    fn exec_time(&self) -> Option<f64> {
+        self.inner.exec_time()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "KernelFuture(id={}, context='{}', state={:?}, ready={})",
+            self.inner.id(), self.inner.context_id(), self.inner.state(), self.inner.is_ready()
+        )
+    }
+}
+
 /// Register scheduler module
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScheduler>()?;
@@ -1760,5 +2427,16 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPartitionConfig>()?;
     m.add_class::<PyPartitionStats>()?;
     m.add_class::<PyPartitionManager>()?;
+    // Multi-LLM Controller
+    m.add_class::<PyContextState>()?;
+    m.add_class::<PyContextStats>()?;
+    m.add_class::<PyControllerStats>()?;
+    m.add_class::<PyMultiLLMController>()?;
+    // Async Execution
+    m.add_class::<PyFutureState>()?;
+    m.add_class::<PyKernelResult>()?;
+    m.add_class::<PyAsyncKernelRequest>()?;
+    m.add_class::<PyAsyncExecStats>()?;
+    m.add_class::<PyKernelFuture>()?;
     Ok(())
 }
