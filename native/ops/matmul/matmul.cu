@@ -495,76 +495,69 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
         throw std::runtime_error("linear_bias_gelu: all inputs must have the same dtype");
     }
 
-    // Check CUTLASS compatibility
-    // For linear: M = batch, K = in_features, N = out_features
-    // But we compute: output = gelu(input @ weight^T + bias)
-    // Which is: [batch, in_features] @ [in_features, out_features] -> [batch, out_features]
-    // So for CUTLASS: M = batch, K = in_features, N = out_features
-    if (!cutlass_is_compatible(batch, out_features, in_features)) {
-        throw std::runtime_error("linear_bias_gelu: dimensions must be multiples of 16 for TensorCore");
+    // Check if CUTLASS fused kernel can be used
+    // Requirements: dimensions must be multiples of 16 for TensorCore
+    bool use_cutlass = cutlass_is_compatible(batch, out_features, in_features);
+
+    // Also check if CUTLASS is disabled via environment variable
+    const char* no_cutlass_env = std::getenv("PYGPUKIT_NO_CUTLASS");
+    if (no_cutlass_env && (no_cutlass_env[0] == '1' || no_cutlass_env[0] == 'y' || no_cutlass_env[0] == 'Y')) {
+        use_cutlass = false;
     }
+
+    // Transpose weight for both paths (needed for input @ weight^T)
+    GPUArray weight_T = transpose(weight);  // [in_features, out_features]
 
     // Allocate output
     GPUArray output({batch, out_features}, input.dtype());
 
-    // For linear y = gelu(x @ W^T + b), we need to compute:
-    // output [batch, out] = gelu(input [batch, in] @ weight^T [in, out] + bias [out])
-    //
-    // The BiasGELU kernel computes: D = gelu(A @ B + bias)
-    // With transpose trick: D^T = gelu(B^T @ A^T + bias)
-    //
-    // For weight [out, in] row-major = weight^T [in, out] col-major in memory
-    // We need to pass arguments such that the kernel computes the correct result.
-    //
-    // Using the existing gemm_*_bias_gelu(A, B, bias, D) which computes D = gelu(A @ B + bias):
-    // We need to transform our problem:
-    //   output = gelu(input @ weight^T + bias)
-    //
-    // Let A = input, B_needed = weight^T
-    // weight is [out, in], so weight^T is [in, out]
-    //
-    // Since weight [out, in] row-major != weight^T [in, out] row-major,
-    // we need to actually transpose weight.
-    //
-    // Efficient approach: transpose weight using the GPU transpose kernel
-    GPUArray weight_T = transpose(weight);  // [in_features, out_features]
+    if (use_cutlass) {
+        // CUTLASS fused BiasGELU kernel path
+        cudaError_t err = cudaSuccess;
 
-    cudaError_t err = cudaSuccess;
+        switch (input.dtype()) {
+            case DataType::Float32:
+                err = cutlass_gemm_tf32_bias_gelu(
+                    static_cast<const float*>(input.data()),
+                    static_cast<const float*>(weight_T.data()),
+                    static_cast<const float*>(bias.data()),
+                    static_cast<float*>(output.data()),
+                    batch, out_features, in_features, nullptr);
+                break;
+            case DataType::Float16:
+                err = cutlass_gemm_fp16_bias_gelu(
+                    static_cast<const __half*>(input.data()),
+                    static_cast<const __half*>(weight_T.data()),
+                    static_cast<const __half*>(bias.data()),
+                    static_cast<__half*>(output.data()),
+                    batch, out_features, in_features, nullptr);
+                break;
+            case DataType::BFloat16:
+                err = cutlass_gemm_bf16_bias_gelu(
+                    static_cast<const __nv_bfloat16*>(input.data()),
+                    static_cast<const __nv_bfloat16*>(weight_T.data()),
+                    static_cast<const __nv_bfloat16*>(bias.data()),
+                    static_cast<__nv_bfloat16*>(output.data()),
+                    batch, out_features, in_features, nullptr);
+                break;
+            default:
+                throw std::runtime_error("linear_bias_gelu only supports float32, float16, and bfloat16");
+        }
 
-    switch (input.dtype()) {
-        case DataType::Float32:
-            err = cutlass_gemm_tf32_bias_gelu(
-                static_cast<const float*>(input.data()),
-                static_cast<const float*>(weight_T.data()),
-                static_cast<const float*>(bias.data()),
-                static_cast<float*>(output.data()),
-                batch, out_features, in_features, nullptr);
-            break;
-        case DataType::Float16:
-            err = cutlass_gemm_fp16_bias_gelu(
-                static_cast<const __half*>(input.data()),
-                static_cast<const __half*>(weight_T.data()),
-                static_cast<const __half*>(bias.data()),
-                static_cast<__half*>(output.data()),
-                batch, out_features, in_features, nullptr);
-            break;
-        case DataType::BFloat16:
-            err = cutlass_gemm_bf16_bias_gelu(
-                static_cast<const __nv_bfloat16*>(input.data()),
-                static_cast<const __nv_bfloat16*>(weight_T.data()),
-                static_cast<const __nv_bfloat16*>(bias.data()),
-                static_cast<__nv_bfloat16*>(output.data()),
-                batch, out_features, in_features, nullptr);
-            break;
-        default:
-            throw std::runtime_error("linear_bias_gelu only supports float32, float16, and bfloat16");
+        // If CUTLASS fails (e.g., not compiled in), fall back to native path
+        if (err == cudaSuccess) {
+            sync_and_check("linear_bias_gelu CUTLASS kernel failed");
+            return output;
+        }
+        // Fall through to native path if CUTLASS returns error
     }
 
-    if (err != cudaSuccess) {
-        throw std::runtime_error("CUTLASS BiasGELU kernel failed");
-    }
+    // Native fallback path: matmul + bias_add_inplace + gelu
+    // This works for any dimensions and when CUTLASS is not available
+    matmul(input, weight_T, output);
+    bias_add_inplace(output, bias);
+    output = gelu(output);
 
-    sync_and_check("linear_bias_gelu kernel failed");
     return output;
 }
 

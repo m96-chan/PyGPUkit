@@ -787,8 +787,9 @@ def linear_bias_gelu(
 
     Computes: output = gelu(input @ weight^T + bias)
 
-    This uses CUTLASS TensorCore epilogue fusion for efficiency,
-    avoiding intermediate memory writes.
+    When dimensions are multiples of 16, this uses CUTLASS TensorCore
+    epilogue fusion for efficiency. Otherwise, falls back to separate
+    matmul + bias_add + gelu operations.
 
     Args:
         input: Input array of shape [batch, in_features].
@@ -800,12 +801,10 @@ def linear_bias_gelu(
 
     Raises:
         ValueError: If shapes or dtypes don't match.
-        RuntimeError: If dimensions are not multiples of 16 (TensorCore requirement).
 
     Note:
-        This operation requires dimensions to be multiples of 16 for
-        TensorCore compatibility. Use separate matmul + bias_add + gelu
-        for non-aligned dimensions.
+        Best performance when dimensions are multiples of 16 (uses TensorCore).
+        Non-aligned dimensions use native fallback path.
     """
     _validate_float_dtype(input, "linear_bias_gelu")
 
