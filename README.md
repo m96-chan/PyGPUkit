@@ -21,6 +21,33 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.6
+
+### FP16/BF16 TensorCore Optimization
+| Feature | Description |
+|---------|-------------|
+| **FP16 TensorCore** | 53 TFLOPS (22x faster than v0.2.5) |
+| **BF16 TensorCore** | 52 TFLOPS (22x faster than v0.2.5) |
+| **mma.sync.m16n8k16** | PTX-level TensorCore instructions |
+| **FP32 Accumulation** | Numerical stability maintained |
+
+```python
+import os
+os.environ["PYGPUKIT_ALLOW_FP16_TC"] = "1"  # Enable TensorCore
+
+import pygpukit as gpk
+import numpy as np
+
+# FP16 TensorCore matmul (53 TFLOPS on RTX 3090 Ti)
+a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
+b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
+c = a @ b  # Uses TensorCore when size is multiple of (128, 128, 32)
+```
+
+> **Note:** TensorCore path requires matrix dimensions divisible by (M=128, N=128, K=32).
+
+---
+
 ## What's New in v0.2.5
 
 ### FP16 / BF16 Support
@@ -99,23 +126,23 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 
 ### Benchmark Comparison (RTX 3090 Ti, 8192×8192)
 
-| Library | FP32 | TF32 | Requirements |
-|---------|------|------|--------------|
-| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only |
-| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** | 16.7 TFLOPS | 29.7 TFLOPS | GPU drivers only |
+| Library | FP32 | TF32 | FP16 | BF16 | Requirements |
+|---------|------|------|------|------|--------------|
+| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | — | — | CPU only |
+| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | ~75 TFLOPS | ~83 TFLOPS | CUDA Toolkit |
+| **PyGPUkit** | 16.7 TFLOPS | 29.7 TFLOPS | **53 TFLOPS** | **52 TFLOPS** | GPU drivers only |
 
 > Built-in matmul kernels are pre-compiled. Driver-Only and Full (JIT) modes have identical matmul performance. JIT is only needed for custom kernels.
 
 ### PyGPUkit Performance by Matrix Size
 
-| Matrix Size | FP32 | TF32 | FP16 | BF16 |
-|-------------|------|------|------|------|
-| 2048×2048 | 9.6 TFLOPS | 13.2 TFLOPS | 2.4 TFLOPS | 2.4 TFLOPS |
-| 4096×4096 | 14.7 TFLOPS | 22.8 TFLOPS | 2.4 TFLOPS | 2.3 TFLOPS |
-| 8192×8192 | 16.7 TFLOPS | 29.7 TFLOPS | 2.3 TFLOPS | 2.3 TFLOPS |
+| Matrix Size | FP32 | TF32 | FP16 (TC) | BF16 (TC) |
+|-------------|------|------|-----------|-----------|
+| 2048×2048 | 9.6 TFLOPS | 13.2 TFLOPS | 17.9 TFLOPS | 19.0 TFLOPS |
+| 4096×4096 | 14.7 TFLOPS | 22.8 TFLOPS | 37.8 TFLOPS | 31.2 TFLOPS |
+| 8192×8192 | 16.7 TFLOPS | 29.7 TFLOPS | **53.1 TFLOPS** | **52.2 TFLOPS** |
 
-> **Note:** FP16/BF16 matmul uses simple kernels with FP32 accumulation. TensorCore optimization planned for future releases (see [Issue #60](https://github.com/m96-chan/PyGPUkit/issues/60)).
+> **Note:** FP16/BF16 TensorCore requires `PYGPUKIT_ALLOW_FP16_TC=1` and matrix sizes divisible by (128, 128, 32).
 
 ---
 
@@ -270,7 +297,7 @@ PyGPUkit/
 
 | Version | Goals |
 |---------|-------|
-| **v0.2.6** | FP16/BF16 TensorCore optimization, Multi-GPU detection |
+| **v0.2.6** | ✅ FP16/BF16 TensorCore (53 TFLOPS), epilogue fusion (planned) |
 | **v0.2.7** | Full API review, documentation, backward compatibility |
 | **v0.3** | Triton backend, advanced ops (softmax, layernorm), MPS/MIG |
 
