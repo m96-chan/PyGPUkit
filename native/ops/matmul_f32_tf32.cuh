@@ -57,7 +57,7 @@ __device__ __forceinline__ void cp_async_wait_1() {
 }
 
 // ============================================================
-// 単一タイル検証用カーネル（実測マッピング使用）
+// Single tile verification kernel (using measured mapping)
 // ============================================================
 __global__ void sgemm_tf32_single_tile_verified(
     const float* __restrict__ A,
@@ -70,7 +70,7 @@ __global__ void sgemm_tf32_single_tile_verified(
 
     float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
 
-    // 実測マッピング
+    // Measured mapping
     int a_row_base = lane / 4;    // 0-7
     int a_col_base = lane % 4;    // 0-3
     
@@ -78,7 +78,7 @@ __global__ void sgemm_tf32_single_tile_verified(
     int b_col = lane / 4;         // 0-7
 
     for (int k = 0; k < K; k += WMMA_K) {
-        // A fragment (16×8)
+        // A fragment (16x8)
         // a[0] = A[a_row][a_col]
         // a[1] = A[a_row + 8][a_col]
         // a[2] = A[a_row][a_col + 4]
@@ -88,7 +88,7 @@ __global__ void sgemm_tf32_single_tile_verified(
         float a2 = A[(a_row_base) * K + k + a_col_base + 4];
         float a3 = A[(a_row_base + 8) * K + k + a_col_base + 4];
         
-        // B fragment (8×8)
+        // B fragment (8x8)
         // b[0] = B[b_row][b_col]
         // b[1] = B[b_row + 4][b_col]
         float b0 = B[(k + b_row_base) * N + b_col];
@@ -104,7 +104,7 @@ __global__ void sgemm_tf32_single_tile_verified(
         );
     }
 
-    // C fragment (16×8) - 実測マッピング (dump_c_fragment.cu で確認)
+    // C fragment (16x8) - Measured mapping (dump_c_fragment.cu verified)
     // c[0] = C[t/4][(t%4)*2]
     // c[1] = C[t/4][(t%4)*2 + 1]
     // c[2] = C[t/4 + 8][(t%4)*2]
@@ -132,7 +132,7 @@ inline cudaError_t launch_single_tile_verified(
 }
 
 // ============================================================
-// フルカーネル（cp.async + 2-stage pipeline + 正確なフラグメントマッピング）
+// Full kernel (cp.async + 2-stage pipeline + accurate fragment mapping)
 // ============================================================
 __global__ void __launch_bounds__(256, 2)
 sgemm_tf32_ampere_kernel(
@@ -254,9 +254,9 @@ sgemm_tf32_ampere_kernel(
         __syncthreads();
     }
 
-    // ====== Epilogue (実測マッピング) ======
-    // c[0] → C[row][col], c[1] → C[row][col+1]
-    // c[2] → C[row+8][col], c[3] → C[row+8][col+1]
+    // ====== Epilogue (Measured mapping) ======
+    // c[0] -> C[row][col], c[1] -> C[row][col+1]
+    // c[2] -> C[row+8][col], c[3] -> C[row+8][col+1]
     #pragma unroll
     for (int wm = 0; wm < WARP_TILES_M; ++wm) {
         #pragma unroll

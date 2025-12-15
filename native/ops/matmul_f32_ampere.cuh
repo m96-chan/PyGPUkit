@@ -66,8 +66,8 @@ constexpr int A_SMEM_STRIDE = BK + SMEM_PAD_A;    // 20 (row-major A: m rows, k 
 constexpr int B_SMEM_STRIDE = BN + SMEM_PAD_B;    // 136
 
 // Shared memory sizes per stage
-// A: BM rows × stride = 128 × 20 = 2560 floats per stage
-// B: BK rows × stride = 16 × 136 = 2176 floats per stage
+// A: BM rows x stride = 128 x 20 = 2560 floats per stage
+// B: BK rows x stride = 16 x 136 = 2176 floats per stage
 constexpr int A_STAGE_SIZE = BM * A_SMEM_STRIDE;  // 128 * 20 = 2560 floats
 constexpr int B_STAGE_SIZE = BK * B_SMEM_STRIDE;  // 16 * 136 = 2176 floats
 
@@ -134,10 +134,10 @@ __device__ __forceinline__ void cp_async_wait_group(int N) {
 // ============================================================================
 
 /**
- * C = A × B
- * A: M × K (row-major)
- * B: K × N (row-major)
- * C: M × N (row-major)
+ * C = A x B
+ * A: M x K (row-major)
+ * B: K x N (row-major)
+ * C: M x N (row-major)
  *
  * Grid:  ((N + BN - 1) / BN, (M + BM - 1) / BM)
  * Block: (16, 16) = 256 threads
@@ -185,7 +185,7 @@ sgemm_128x128x32_3stage(
     // ========================================================================
     // Register Allocation
     // ========================================================================
-    // Accumulators: 8×8 = 64 floats per thread
+    // Accumulators: 8x8 = 64 floats per thread
     float acc[TM][TN];
     #pragma unroll
     for (int i = 0; i < TM; ++i) {
@@ -203,8 +203,8 @@ sgemm_128x128x32_3stage(
     // Load Configuration
     // ========================================================================
     // Each thread loads multiple elements per tile
-    // A tile: BM × BK = 128 × 32 = 4096 elements, 256 threads → 16 per thread
-    // B tile: BK × BN = 32 × 128 = 4096 elements, 256 threads → 16 per thread
+    // A tile: BM x BK = 128 x 32 = 4096 elements, 256 threads -> 16 per thread
+    // B tile: BK x BN = 32 x 128 = 4096 elements, 256 threads -> 16 per thread
 
     // For warp-contiguous loads, organize by warps
     const int warp_id = tid / 32;      // 0-7 (8 warps)
@@ -220,11 +220,11 @@ sgemm_128x128x32_3stage(
     // CRITICAL for performance:
     // - A is row-major (MxK): A[m,k] = A[m*K + k]
     //   Consecutive K values are contiguous in memory
-    //   → Organize so consecutive THREADS load consecutive K values
+    //   -> Organize so consecutive THREADS load consecutive K values
     //
     // - B is row-major (KxN): B[k,n] = B[k*N + n]
     //   Consecutive N values are contiguous in memory
-    //   → Already using float4 for consecutive N values (good)
+    //   -> Already using float4 for consecutive N values (good)
     //
     // Pattern: elem_idx = tid + i * NUM_THREADS ensures consecutive threads
     //          load consecutive elements in each iteration.
@@ -233,8 +233,8 @@ sgemm_128x128x32_3stage(
     // A is row-major in global memory: A[m][k] = A[m*K + k]
     // Store to shared memory ROW-MAJOR: AM[m][k] with stride=20
     //
-    // Tile: 128 × 16 = 2048 elements = 512 float4s
-    // 256 threads × 2 float4s/thread = 512 float4s
+    // Tile: 128 x 16 = 2048 elements = 512 float4s
+    // 256 threads x 2 float4s/thread = 512 float4s
     //
     // CRITICAL: cp.async.cg.16 requires 16-byte aligned source address
     // When K % 4 != 0, row stride is not 16-byte aligned, must use scalar loads
@@ -278,8 +278,8 @@ sgemm_128x128x32_3stage(
     };
 
     // Load B tile with COALESCED float4 access
-    // 16 × 128 = 2048 elements = 512 float4s (BK=16)
-    // 256 threads × 2 float4s/thread = 512 float4s
+    // 16 x 128 = 2048 elements = 512 float4s (BK=16)
+    // 256 threads x 2 float4s/thread = 512 float4s
     //
     // CRITICAL: cp.async.cg.16 requires 16-byte aligned source address
     // When N % 4 != 0, row stride is not 16-byte aligned, must use scalar loads
@@ -362,7 +362,7 @@ sgemm_128x128x32_3stage(
         cp_async_commit();
 
         // Step 3: Wait for compute stage to be ready
-        // wait_group(STAGES-2) means wait until ≤(STAGES-2) groups outstanding
+        // wait_group(STAGES-2) means wait until <=(STAGES-2) groups outstanding
         // With STAGES=3, wait_group(1) ensures tile k_tile is ready
         cp_async_wait_group(STAGES - 2);
 
@@ -477,8 +477,8 @@ sgemm_128x128x16_4stage(
     // Load functions for BK=16 with FULLY ASYNC cp.async
     auto load_A = [&](int stage, int k_tile) {
         const int k_base = k_tile * BK_SMALL;
-        // 128 × 16 = 2048 elements
-        // 256 threads × 8 elements/thread = 2048 elements
+        // 128 x 16 = 2048 elements
+        // 256 threads x 8 elements/thread = 2048 elements
 
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
@@ -507,7 +507,7 @@ sgemm_128x128x16_4stage(
 
     auto load_B = [&](int stage, int k_tile) {
         const int k_base = k_tile * BK_SMALL;
-        // 16 × 128 = 2048 elements = 512 float4s, 256 threads → 2 float4 per thread
+        // 16 x 128 = 2048 elements = 512 float4s, 256 threads -> 2 float4 per thread
         #pragma unroll
         for (int i = 0; i < 2; ++i) {
             const int float4_idx = tid + i * NUM_THREADS;
@@ -609,7 +609,7 @@ inline cudaError_t launch_sgemm_ampere(
     int M, int N, int K,
     cudaStream_t stream = 0
 ) {
-    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);  // 16×16 = 256 threads
+    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);  // 16x16 = 256 threads
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
 
     // Calculate shared memory sizes

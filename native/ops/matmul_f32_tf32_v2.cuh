@@ -4,8 +4,8 @@
  * Target: 90%+ of cuBLAS performance (37.6+ TFLOPS on RTX 3090 Ti)
  *
  * Key insight from CUTLASS:
- * - Outer pipeline: GMEM → SMEM (cp.async)
- * - Inner pipeline: SMEM → RMEM (software pipelined)
+ * - Outer pipeline: GMEM -> SMEM (cp.async)
+ * - Inner pipeline: SMEM -> RMEM (software pipelined)
  */
 
 #pragma once
@@ -147,7 +147,7 @@ sgemm_tf32_v2_kernel(
     cp_async_wait_0();
     __syncthreads();
 
-    // Main loop with outer pipeline (GMEM→SMEM)
+    // Main loop with outer pipeline (GMEM->SMEM)
     for (int kt = 0; kt < num_k_tiles; ++kt) {
         int curr = kt & 1;
         int next = curr ^ 1;

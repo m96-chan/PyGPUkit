@@ -29,8 +29,8 @@ namespace cutlass_gemm {
 
 // TF32 GEMM: FP32 in -> TF32 TensorCore -> FP32 out
 // For row-major inputs, use all-ColumnMajor with transpose trick:
-//   C (M×N row) = A (M×K row) @ B (K×N row)
-//   becomes: C^T (N×M col) = B^T (N×K col) @ A^T (K×M col)
+//   C (MxN row) = A (MxK row) @ B (KxN row)
+//   becomes: C^T (NxM col) = B^T (NxK col) @ A^T (KxM col)
 // where row-major X = col-major X^T in memory
 using TF32Gemm = cutlass::gemm::device::Gemm<
     float,                                      // ElementA (will be B^T)
@@ -120,20 +120,20 @@ using BF16Gemm = cutlass::gemm::device::Gemm<
  * @param stream CUDA stream
  * @return cudaError_t
  *
- * Layout trick for row-major inputs with RowMajor×ColumnMajor kernel:
- * - CUTLASS kernel: D (M×N row) = A (M×K row) @ B (K×N col)
- * - Our inputs: C (M×N row) = A (M×K row) @ B (K×N row)
+ * Layout trick for row-major inputs with RowMajorxColumnMajor kernel:
+ * - CUTLASS kernel: D (MxN row) = A (MxK row) @ B (KxN col)
+ * - Our inputs: C (MxN row) = A (MxK row) @ B (KxN row)
  *
- * Key insight: row-major B (K×N) = column-major B^T (N×K) in memory
+ * Key insight: row-major B (KxN) = column-major B^T (NxK) in memory
  *
- * We compute: C^T (N×M row) = B^T (N×K row) @ A^T (K×M col)
- * Which is equivalent to: C (M×N row) = A (M×K row) @ B (K×N row)
+ * We compute: C^T (NxM row) = B^T (NxK row) @ A^T (KxM col)
+ * Which is equivalent to: C (MxN row) = A (MxK row) @ B (KxN row)
  *
  * For the kernel:
  * - M' = N, N' = M, K' = K
- * - A' = B^T (N×K row-major), pointer = B, ld = N (stride between rows)
- * - B' = A^T (K×M col-major) = A (M×K row-major) in memory, pointer = A, ld = K
- * - C' = C^T (N×M row-major), pointer = C, ld = M (stride between rows)
+ * - A' = B^T (NxK row-major), pointer = B, ld = N (stride between rows)
+ * - B' = A^T (KxM col-major) = A (MxK row-major) in memory, pointer = A, ld = K
+ * - C' = C^T (NxM row-major), pointer = C, ld = M (stride between rows)
  */
 inline cudaError_t gemm_tf32(
     const float* A,
@@ -145,27 +145,27 @@ inline cudaError_t gemm_tf32(
     cudaStream_t stream = nullptr
 ) {
     // Transpose trick for row-major inputs with all-ColumnMajor kernel:
-    //   C (M×N row) = A (M×K row) @ B (K×N row)
-    //   becomes: C^T (N×M col) = B^T (N×K col) @ A^T (K×M col)
+    //   C (MxN row) = A (MxK row) @ B (KxN row)
+    //   becomes: C^T (NxM col) = B^T (NxK col) @ A^T (KxM col)
     //
-    // Memory equivalence: row-major X (R×C) = col-major X^T (C×R)
+    // Memory equivalence: row-major X (RxC) = col-major X^T (CxR)
     // So we reinterpret pointers without copying:
-    //   - B (K×N row) in memory = B^T (N×K col), which is our "A" operand
-    //   - A (M×K row) in memory = A^T (K×M col), which is our "B" operand
-    //   - C (M×N row) in memory = C^T (N×M col), which is our output
+    //   - B (KxN row) in memory = B^T (NxK col), which is our "A" operand
+    //   - A (MxK row) in memory = A^T (KxM col), which is our "B" operand
+    //   - C (MxN row) in memory = C^T (NxM col), which is our output
     //
-    // problem_size(M', N', K') for output M'×N' = (N, M, K)
+    // problem_size(M', N', K') for output M'xN' = (N, M, K)
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
     // For column-major matrices, leading dimension = number of rows
-    // - B^T is N×K col-major, ld = N (num rows)
-    // - A^T is K×M col-major, ld = K (num rows)
-    // - C^T is N×M col-major, ld = N (num rows)
+    // - B^T is NxK col-major, ld = N (num rows)
+    // - A^T is KxM col-major, ld = K (num rows)
+    // - C^T is NxM col-major, ld = N (num rows)
     typename TF32Gemm::Arguments arguments{
         problem_size,
-        {B, N},         // "A" operand: B^T (N×K col-major), ld = N
-        {A, K},         // "B" operand: A^T (K×M col-major), ld = K
-        {C, N},         // "C" operand: C^T (N×M col-major), ld = N
+        {B, N},         // "A" operand: B^T (NxK col-major), ld = N
+        {A, K},         // "B" operand: A^T (KxM col-major), ld = K
+        {C, N},         // "C" operand: C^T (NxM col-major), ld = N
         {C, N},         // D = C
         {alpha, beta}   // Epilogue params
     };
@@ -221,9 +221,9 @@ inline cudaError_t gemm_fp16(
     // Leading dimensions for col-major transpose trick (ld = num rows)
     typename FP16Gemm::Arguments arguments{
         problem_size,
-        {B_cutlass, N},  // "A" = B^T (N×K col-major), ld = N
-        {A_cutlass, K},  // "B" = A^T (K×M col-major), ld = K
-        {C_cutlass, N},  // "C" = C^T (N×M col-major), ld = N
+        {B_cutlass, N},  // "A" = B^T (NxK col-major), ld = N
+        {A_cutlass, K},  // "B" = A^T (KxM col-major), ld = K
+        {C_cutlass, N},  // "C" = C^T (NxM col-major), ld = N
         {C_cutlass, N},  // D = C
         {alpha, beta}
     };
@@ -274,9 +274,9 @@ inline cudaError_t gemm_bf16(
     // Leading dimensions for col-major transpose trick (ld = num rows)
     typename BF16Gemm::Arguments arguments{
         problem_size,
-        {B_cutlass, N},  // "A" = B^T (N×K col-major), ld = N
-        {A_cutlass, K},  // "B" = A^T (K×M col-major), ld = K
-        {C_cutlass, N},  // "C" = C^T (N×M col-major), ld = N
+        {B_cutlass, N},  // "A" = B^T (NxK col-major), ld = N
+        {A_cutlass, K},  // "B" = A^T (KxM col-major), ld = K
+        {C_cutlass, N},  // "C" = C^T (NxM col-major), ld = N
         {C_cutlass, N},  // D = C
         {alpha, beta}
     };
