@@ -3,7 +3,7 @@
 __version__ = "0.2.6"
 
 # LLM support (safetensors loader)
-from pygpukit import llm
+from pygpukit import llm, ops
 from pygpukit.core.array import GPUArray
 from pygpukit.core.device import (
     DeviceInfo,
@@ -31,10 +31,12 @@ from pygpukit.jit.compiler import (
 )
 from pygpukit.ops.basic import (
     add,
+    bias_add_inplace,
     div,
     exp,
     gelu,
     layernorm,
+    linear_bias_gelu,
     log,
     matmul,
     max,
@@ -43,6 +45,7 @@ from pygpukit.ops.basic import (
     relu,
     sub,
     sum,
+    transpose,
 )
 
 # Try to import Rust types, fallback to Python implementations
@@ -96,6 +99,7 @@ __all__ = [
     "get_driver_requirements",
     "check_driver_compatibility",
     # Operations
+    "ops",  # ops module for advanced usage
     "add",
     "sub",
     "mul",
@@ -106,6 +110,10 @@ __all__ = [
     "gelu",
     "layernorm",
     "matmul",
+    "transpose",
+    # Fused operations
+    "bias_add_inplace",
+    "linear_bias_gelu",
     # Reductions
     "sum",
     "mean",
