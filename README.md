@@ -7,6 +7,18 @@
 
 ---
 
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/getting-started.md) | Installation, quick start, basic usage |
+| [API Reference](docs/api.md) | Complete API documentation with examples |
+| [LLM Guide](docs/llm.md) | SafeTensors, Tokenizer, GPT-2 model loading |
+| [Performance Tuning](docs/performance.md) | TF32, FP16, CUTLASS optimization |
+| [Scheduler Guide](docs/scheduler.md) | Multi-LLM concurrent execution |
+
+---
+
 ## Overview
 **PyGPUkit** is a lightweight GPU runtime for Python that provides:
 - **Single-binary distribution** — works with just GPU drivers, no CUDA Toolkit needed
@@ -62,98 +74,27 @@ Runtime SM detection with optimized kernel variants:
 ## LLM Support
 
 PyGPUkit includes built-in support for loading and running LLM models.
-
-### SafeTensors Loading
+See the [LLM Guide](docs/llm.md) for detailed documentation.
 
 ```python
-from pygpukit.llm import SafeTensorsFile, load_safetensors
+from pygpukit.llm import SafeTensorsFile, Tokenizer
 
-# Load a safetensors file (memory-mapped, zero-copy)
-st = load_safetensors("model.safetensors")
-
-# Inspect tensors
+# Load safetensors (memory-mapped, zero-copy)
+st = SafeTensorsFile("model.safetensors")
 print(f"Tensors: {st.num_tensors}, Size: {st.file_size / 1e9:.2f} GB")
-print(f"Names: {st.tensor_names[:5]}...")
 
-# Get tensor metadata
-info = st.tensor_info("model.embed_tokens.weight")
-print(f"Shape: {info.shape}, Dtype: {info.dtype_name}")
-
-# Load tensor data
-data = st.tensor_bytes("model.embed_tokens.weight")
-```
-
-### Tokenizer
-
-```python
-from pygpukit.llm import Tokenizer
-
-# Load tokenizer.json (HuggingFace format)
+# Tokenizer (HuggingFace format)
 tok = Tokenizer("tokenizer.json")
-
-# Encode text to token IDs
 ids = tok.encode("Hello, world!")
-print(f"Token IDs: {ids}")
-
-# Decode back to text
 text = tok.decode(ids)
-print(f"Decoded: {text}")
-
-# Access special tokens
-print(f"Vocab size: {tok.vocab_size}")
-print(f"EOS token ID: {tok.eos_token_id}")
 ```
 
-### GPT-2 Model (MLP-only MVP)
-
-```python
-from pygpukit.llm import (
-    GPT2Config,
-    GPT2Model,
-    Tokenizer,
-    load_gpt2_from_safetensors,
-)
-
-# Load model from safetensors
-config = GPT2Config(vocab_size=50257, n_embd=768, n_layer=12)
-model = load_gpt2_from_safetensors("gpt2.safetensors", config)
-
-# Load tokenizer
-tok = Tokenizer("tokenizer.json")
-
-# Tokenize input
-input_ids = tok.encode("The quick brown fox")
-
-# Forward pass
-hidden = model(input_ids)  # [seq_len, n_embd]
-logits = model.lm_head(hidden)  # [seq_len, vocab_size]
-
-# Generate tokens (greedy decoding)
-output_ids = model.generate(input_ids, max_new_tokens=20)
-print(tok.decode(output_ids))
-```
-
-> **Note:** The current GPT-2 implementation is MLP-only (no attention) for MVP.
-> It demonstrates the model loading and inference pipeline but won't produce coherent text.
-
-### Model Components
-
-Build custom models using PyGPUkit primitives:
-
-```python
-from pygpukit.llm import Linear, LayerNorm, MLP
-import pygpukit as gpk
-import numpy as np
-
-# Create Linear layer
-weight = gpk.from_numpy(np.random.randn(3072, 768).astype(np.float32))
-bias = gpk.from_numpy(np.random.randn(3072).astype(np.float32))
-linear = Linear(weight, bias)
-
-# Forward pass: y = xW^T + b
-x = gpk.from_numpy(np.random.randn(32, 768).astype(np.float32))
-y = linear(x)  # [32, 3072]
-```
+| Component | Description |
+|-----------|-------------|
+| `SafeTensorsFile` | Memory-mapped .safetensors loading |
+| `Tokenizer` | BPE tokenizer (HuggingFace format) |
+| `GPT2Model` | GPT-2 model (MLP-only MVP) |
+| `Linear`, `LayerNorm`, `MLP` | Model building blocks |
 
 ---
 
