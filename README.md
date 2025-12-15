@@ -21,6 +21,44 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.7
+
+### CUTLASS Epilogue Fusion
+Fused Linear + Bias + GELU operations using CUTLASS epilogue fusion for improved performance in transformer workloads.
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# Create tensors
+batch, in_feat, out_feat = 512, 768, 3072
+input = gpk.from_numpy(np.random.randn(batch, in_feat).astype(np.float32))
+weight = gpk.from_numpy(np.random.randn(out_feat, in_feat).astype(np.float32))
+bias = gpk.from_numpy(np.random.randn(out_feat).astype(np.float32))
+
+# Fused linear + bias + GELU (single kernel, no intermediate memory)
+output = gpk.linear_bias_gelu(input, weight, bias)
+```
+
+### Multi-SM CUTLASS Kernels
+Runtime SM detection with optimized kernel variants:
+- **SM80 (A100)**: 4-stage pipeline optimized for 48KB shared memory
+- **SM86+ (RTX 30xx/40xx, H100)**: 5-stage pipeline for 100KB+ shared memory
+
+### New Operations
+| Operation | Description |
+|-----------|-------------|
+| `gpk.transpose(a)` | GPU-native matrix transpose |
+| `gpk.bias_add_inplace(out, bias)` | In-place bias addition |
+| `gpk.linear_bias_gelu(x, w, b)` | Fused linear + bias + GELU |
+
+### API Improvements
+- Complete public API exports (all operations accessible via `gpk.*`)
+- Consistent snake_case naming convention
+- Full docstrings for all public functions
+
+---
+
 ## What's New in v0.2.6
 
 ### CUTLASS Backend (Default)
@@ -351,13 +389,13 @@ PyGPUkit/
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
 | **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
 | **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
+| **v0.2.7** | **Epilogue fusion** (linear+bias+gelu), Multi-SM kernels, API review |
 
 ### Planned
 
 | Version | Goals |
 |---------|-------|
-| **v0.2.7** | Full API review, documentation, backward compatibility |
-| **v0.3** | Triton backend, advanced ops (softmax, layernorm), MPS/MIG |
+| **v0.3** | Triton backend, advanced ops (softmax), MPS/MIG |
 
 ---
 
