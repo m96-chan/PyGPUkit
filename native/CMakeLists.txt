@@ -48,8 +48,11 @@ pybind11_add_module(_pygpukit_native
     jit/compiler.cpp
     jit/kernel.cpp
     jit/nvrtc_loader.cpp
-    # Ops
-    ops/basic.cu
+    # Ops - Modular structure
+    ops/elementwise/elementwise.cu
+    ops/unary/unary.cu
+    ops/reduction/reduction.cu
+    ops/matmul/matmul.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp

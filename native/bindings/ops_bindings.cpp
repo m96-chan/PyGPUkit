@@ -1,7 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "../ops/basic.cuh"
+#include "../ops/ops.cuh"
 
 namespace py = pybind11;
 using namespace pygpukit;
