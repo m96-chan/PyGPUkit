@@ -443,6 +443,7 @@ PyGPUkit/
 | **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
 | **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
 | **v0.2.7** | **Epilogue fusion** (linear+bias+gelu), Multi-SM kernels, API review |
+| **v0.2.8** | CUTLASS v4.3.3 update, auto-update workflow |
 
 ### Planned
 
