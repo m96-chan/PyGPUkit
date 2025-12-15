@@ -449,6 +449,7 @@ PyGPUkit/
 
 | Version | Goals |
 |---------|-------|
+| **v0.2.9** | **General LLM Execution** — Attention layer, GPT-2 E2E inference, GPT-2/GPT-Neo/LLaMA architecture support |
 | **v0.3** | Triton backend, advanced ops (softmax), MPS/MIG |
 
 ---
