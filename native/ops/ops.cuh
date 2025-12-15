@@ -83,6 +83,10 @@ GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32);
 // Neural Network Operations
 // ============================================================================
 
+// Transpose: c = a.T
+// input: [rows, cols], output: [cols, rows]
+GPUArray transpose(const GPUArray& input);
+
 // GELU: Gaussian Error Linear Unit activation
 // y = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 GPUArray gelu(const GPUArray& input);

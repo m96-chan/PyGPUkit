@@ -672,3 +672,102 @@ def _layernorm_native(
     beta_native = beta._get_native()
     c_native = native.layernorm(input_native, gamma_native, beta_native, eps)
     return GPUArray._wrap_native(c_native)
+
+
+def transpose(a: GPUArray) -> GPUArray:
+    """Matrix transpose.
+
+    Args:
+        a: Input array of shape [rows, cols].
+
+    Returns:
+        A new GPUArray of shape [cols, rows] containing a.T.
+
+    Raises:
+        ValueError: If input is not 2D or dtype is not a float type.
+    """
+    _validate_float_dtype(a, "transpose")
+
+    if a.ndim != 2:
+        raise ValueError(f"transpose expects 2D input [rows, cols], got {a.ndim}D")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _transpose_native(a)
+    else:
+        return _transpose_cpu(a)
+
+
+def _transpose_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of transpose."""
+    a_np = a.to_numpy()
+    return from_numpy(a_np.T.copy())
+
+
+def _transpose_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of transpose (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.transpose(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def bias_add_inplace(output: GPUArray, bias: GPUArray) -> None:
+    """Add bias to output in-place.
+
+    Computes: output[batch, features] += bias[features]
+
+    Args:
+        output: Output array of shape [batch, features] (modified in-place).
+        bias: Bias array of shape [features].
+
+    Raises:
+        ValueError: If shapes don't match or dtypes don't match.
+    """
+    _validate_float_dtype(output, "bias_add_inplace")
+
+    if output.ndim != 2:
+        raise ValueError(
+            f"bias_add_inplace expects 2D output [batch, features], got {output.ndim}D"
+        )
+    if bias.ndim != 1:
+        raise ValueError(f"bias_add_inplace expects 1D bias [features], got {bias.ndim}D")
+    if output.dtype != bias.dtype:
+        raise ValueError("bias_add_inplace: output and bias must have same dtype")
+
+    features = output.shape[1]
+    if bias.shape[0] != features:
+        raise ValueError(
+            f"bias_add_inplace: bias size {bias.shape[0]} must match features {features}"
+        )
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        _bias_add_inplace_native(output, bias)
+    else:
+        _bias_add_inplace_cpu(output, bias)
+
+
+def _bias_add_inplace_cpu(output: GPUArray, bias: GPUArray) -> None:
+    """CPU implementation of bias_add_inplace."""
+    # For CPU backend, we need to get numpy arrays, modify, and update
+    output_np = output.to_numpy()
+    bias_np = bias.to_numpy()
+    output_np += bias_np
+    # Note: This creates a new array - for CPU backend, in-place is not truly in-place
+    # The native backend does true in-place modification
+    output._data = from_numpy(output_np)._data
+
+
+def _bias_add_inplace_native(output: GPUArray, bias: GPUArray) -> None:
+    """Native C++ CUDA implementation of bias_add_inplace (true in-place)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    output_native = output._get_native()
+    bias_native = bias._get_native()
+    native.bias_add_inplace(output_native, bias_native)

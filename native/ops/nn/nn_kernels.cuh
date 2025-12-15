@@ -477,6 +477,124 @@ __global__ void layernorm_bf16_kernel(const __nv_bfloat16* __restrict__ input,
     }
 }
 
+// ============================================================================
+// Matrix Transpose
+// ============================================================================
+
+// Transpose kernel using shared memory for coalesced access
+// Input: [rows, cols], Output: [cols, rows]
+// Uses 32x32 tile with padding to avoid bank conflicts
+
+constexpr int TILE_DIM = 32;
+constexpr int BLOCK_ROWS = 8;
+
+__global__ void transpose_f32_kernel(const float* __restrict__ input,
+                                      float* __restrict__ output,
+                                      int rows, int cols) {
+    __shared__ float tile[TILE_DIM][TILE_DIM + 1];  // +1 to avoid bank conflicts
+
+    int x = blockIdx.x * TILE_DIM + threadIdx.x;
+    int y = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    // Load tile into shared memory (coalesced read)
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < rows && x < cols) {
+            tile[threadIdx.y + j][threadIdx.x] = input[(y + j) * cols + x];
+        }
+    }
+
+    __syncthreads();
+
+    // Transpose indices for output
+    x = blockIdx.y * TILE_DIM + threadIdx.x;  // swapped
+    y = blockIdx.x * TILE_DIM + threadIdx.y;  // swapped
+
+    // Write transposed tile (coalesced write)
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < cols && x < rows) {
+            output[(y + j) * rows + x] = tile[threadIdx.x][threadIdx.y + j];
+        }
+    }
+}
+
+__global__ void transpose_f64_kernel(const double* __restrict__ input,
+                                      double* __restrict__ output,
+                                      int rows, int cols) {
+    __shared__ double tile[TILE_DIM][TILE_DIM + 1];
+
+    int x = blockIdx.x * TILE_DIM + threadIdx.x;
+    int y = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < rows && x < cols) {
+            tile[threadIdx.y + j][threadIdx.x] = input[(y + j) * cols + x];
+        }
+    }
+
+    __syncthreads();
+
+    x = blockIdx.y * TILE_DIM + threadIdx.x;
+    y = blockIdx.x * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < cols && x < rows) {
+            output[(y + j) * rows + x] = tile[threadIdx.x][threadIdx.y + j];
+        }
+    }
+}
+
+__global__ void transpose_f16_kernel(const __half* __restrict__ input,
+                                      __half* __restrict__ output,
+                                      int rows, int cols) {
+    __shared__ __half tile[TILE_DIM][TILE_DIM + 1];
+
+    int x = blockIdx.x * TILE_DIM + threadIdx.x;
+    int y = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < rows && x < cols) {
+            tile[threadIdx.y + j][threadIdx.x] = input[(y + j) * cols + x];
+        }
+    }
+
+    __syncthreads();
+
+    x = blockIdx.y * TILE_DIM + threadIdx.x;
+    y = blockIdx.x * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < cols && x < rows) {
+            output[(y + j) * rows + x] = tile[threadIdx.x][threadIdx.y + j];
+        }
+    }
+}
+
+__global__ void transpose_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                       __nv_bfloat16* __restrict__ output,
+                                       int rows, int cols) {
+    __shared__ __nv_bfloat16 tile[TILE_DIM][TILE_DIM + 1];
+
+    int x = blockIdx.x * TILE_DIM + threadIdx.x;
+    int y = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < rows && x < cols) {
+            tile[threadIdx.y + j][threadIdx.x] = input[(y + j) * cols + x];
+        }
+    }
+
+    __syncthreads();
+
+    x = blockIdx.y * TILE_DIM + threadIdx.x;
+    y = blockIdx.x * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
+        if ((y + j) < cols && x < rows) {
+            output[(y + j) * rows + x] = tile[threadIdx.x][threadIdx.y + j];
+        }
+    }
+}
+
 } // namespace nn
 } // namespace ops
 } // namespace pygpukit

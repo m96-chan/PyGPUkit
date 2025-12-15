@@ -119,6 +119,11 @@ void init_ops_bindings(py::module_& m) {
     // Neural Network operations
     // ========================================================================
 
+    // Transpose
+    m.def("transpose", &ops::transpose,
+          py::arg("input"),
+          "Matrix transpose: input [rows, cols] -> output [cols, rows]");
+
     // GELU activation
     m.def("gelu", &ops::gelu,
           py::arg("input"),
