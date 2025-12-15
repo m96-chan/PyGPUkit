@@ -120,27 +120,27 @@ class TestDeviceCapabilities:
 
     def test_device_capabilities_exists(self):
         """Test that DeviceCapabilities class is available."""
-        assert hasattr(gp, 'DeviceCapabilities') or hasattr(gp, 'get_device_capabilities')
+        assert hasattr(gp, "DeviceCapabilities") or hasattr(gp, "get_device_capabilities")
 
     def test_device_capabilities_tensorcore_field(self):
         """Test that DeviceCapabilities has tensorcore field."""
         # Get capabilities for current device
         caps = gp.get_device_capabilities()
 
-        assert hasattr(caps, 'tensorcore')
+        assert hasattr(caps, "tensorcore")
         assert isinstance(caps.tensorcore, bool)
 
     def test_device_capabilities_sm_version(self):
         """Test that DeviceCapabilities has SM version info."""
         caps = gp.get_device_capabilities()
 
-        assert hasattr(caps, 'sm_version') or hasattr(caps, 'compute_capability')
+        assert hasattr(caps, "sm_version") or hasattr(caps, "compute_capability")
 
     def test_tensorcore_requires_sm80(self):
         """Test that tensorcore is True only for SM >= 80."""
         caps = gp.get_device_capabilities()
 
-        sm_version = getattr(caps, 'sm_version', None) or getattr(caps, 'compute_capability', 0)
+        sm_version = getattr(caps, "sm_version", None) or getattr(caps, "compute_capability", 0)
         if sm_version >= 80:
             # Ampere or newer should have tensor cores
             assert caps.tensorcore is True
@@ -157,7 +157,8 @@ class TestKernelTypeRust:
         # This should be exposed via pygpukit._pygpukit_rust
         try:
             from pygpukit._pygpukit_rust import KernelType
-            assert hasattr(KernelType, 'Tf32Mma') or hasattr(KernelType, 'TF32_MMA')
+
+            assert hasattr(KernelType, "Tf32Mma") or hasattr(KernelType, "TF32_MMA")
         except ImportError:
             # Rust module may not be built yet - skip
             pytest.skip("Rust module not available")
@@ -166,7 +167,8 @@ class TestKernelTypeRust:
         """Test that FP32 kernel type exists."""
         try:
             from pygpukit._pygpukit_rust import KernelType
-            assert hasattr(KernelType, 'Fp32Fma') or hasattr(KernelType, 'FP32_FMA')
+
+            assert hasattr(KernelType, "Fp32Fma") or hasattr(KernelType, "FP32_FMA")
         except ImportError:
             pytest.skip("Rust module not available")
 

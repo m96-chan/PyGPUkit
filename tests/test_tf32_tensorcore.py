@@ -14,6 +14,7 @@ Ampere TensorCore:
 - mma.sync.aligned.m16n8k8.row.col.tf32.tf32.f32
 - 256 TFLOPS theoretical (TF32)
 """
+
 import os
 import time
 
@@ -21,9 +22,7 @@ import numpy as np
 import pytest
 
 # Setup CUDA DLL path (if CUDA is installed)
-cuda_path = os.environ.get(
-    "CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
-)
+cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4")
 cuda_bin = os.path.join(cuda_path, "bin")
 if os.path.isdir(cuda_bin):
     if cuda_bin not in os.environ.get("PATH", ""):
@@ -75,7 +74,9 @@ def check_tensorcore():
     if not has_tensorcore_support():
         pytest.skip("TensorCore (SM >= 80) not available")
     props = native.get_device_properties(0)
-    print(f"\nGPU: {props.name} (SM {props.compute_capability_major}{props.compute_capability_minor})")
+    print(
+        f"\nGPU: {props.name} (SM {props.compute_capability_major}{props.compute_capability_minor})"
+    )
     return props
 
 
@@ -282,7 +283,9 @@ class TestTF32VsFP32:
         tf32_tflops = compute_tflops(m, n, k, tf32_time)
 
         status = "PASS" if tf32_tflops >= target else "BELOW_TARGET"
-        print(f"\nTF32 4096x4096: {tf32_tflops:.2f} TFLOPS (target: {target}, FP32 baseline: ~18) [{status}]")
+        print(
+            f"\nTF32 4096x4096: {tf32_tflops:.2f} TFLOPS (target: {target}, FP32 baseline: ~18) [{status}]"
+        )
         # Always pass - performance is informational
 
 

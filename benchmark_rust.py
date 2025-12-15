@@ -25,7 +25,7 @@ def benchmark_rust():
         block_ids.append(block_id)
     alloc_time = time.perf_counter() - start
     print(
-        f"Allocate {n_allocs} blocks:  {alloc_time*1000:.2f} ms ({n_allocs/alloc_time:.0f} ops/sec)"
+        f"Allocate {n_allocs} blocks:  {alloc_time * 1000:.2f} ms ({n_allocs / alloc_time:.0f} ops/sec)"
     )
 
     # Free benchmark
@@ -34,7 +34,7 @@ def benchmark_rust():
         pool.free(block_id)
     free_time = time.perf_counter() - start
     print(
-        f"Free {n_allocs} blocks:      {free_time*1000:.2f} ms ({n_allocs/free_time:.0f} ops/sec)"
+        f"Free {n_allocs} blocks:      {free_time * 1000:.2f} ms ({n_allocs / free_time:.0f} ops/sec)"
     )
 
     # Reuse benchmark (allocate from free list)
@@ -45,7 +45,7 @@ def benchmark_rust():
         block_ids.append(block_id)
     reuse_time = time.perf_counter() - start
     print(
-        f"Reuse {n_allocs} blocks:     {reuse_time*1000:.2f} ms ({n_allocs/reuse_time:.0f} ops/sec)"
+        f"Reuse {n_allocs} blocks:     {reuse_time * 1000:.2f} ms ({n_allocs / reuse_time:.0f} ops/sec)"
     )
 
     stats = pool.stats()
@@ -70,14 +70,14 @@ def benchmark_rust():
         sched.submit(task)
     submit_time = time.perf_counter() - start
     print(
-        f"Submit {n_tasks} tasks:      {submit_time*1000:.2f} ms ({n_tasks/submit_time:.0f} ops/sec)"
+        f"Submit {n_tasks} tasks:      {submit_time * 1000:.2f} ms ({n_tasks / submit_time:.0f} ops/sec)"
     )
 
     # Get runnable benchmark
     start = time.perf_counter()
     runnable = sched.get_runnable_tasks(n_tasks)
     get_runnable_time = time.perf_counter() - start
-    print(f"Get runnable {len(runnable)} tasks: {get_runnable_time*1000:.2f} ms")
+    print(f"Get runnable {len(runnable)} tasks: {get_runnable_time * 1000:.2f} ms")
 
     # Complete benchmark
     start = time.perf_counter()
@@ -85,7 +85,7 @@ def benchmark_rust():
         sched.complete_task(task_id)
     complete_time = time.perf_counter() - start
     print(
-        f"Complete {len(runnable)} tasks:   {complete_time*1000:.2f} ms ({len(runnable)/complete_time:.0f} ops/sec)"
+        f"Complete {len(runnable)} tasks:   {complete_time * 1000:.2f} ms ({len(runnable) / complete_time:.0f} ops/sec)"
     )
 
     stats = sched.stats()
@@ -115,7 +115,7 @@ def benchmark_python():
         blocks.append(block)
     alloc_time = time.perf_counter() - start
     print(
-        f"Allocate {n_allocs} blocks:  {alloc_time*1000:.2f} ms ({n_allocs/alloc_time:.0f} ops/sec)"
+        f"Allocate {n_allocs} blocks:  {alloc_time * 1000:.2f} ms ({n_allocs / alloc_time:.0f} ops/sec)"
     )
 
     # Free benchmark
@@ -124,7 +124,7 @@ def benchmark_python():
         pool.free(block)
     free_time = time.perf_counter() - start
     print(
-        f"Free {n_allocs} blocks:      {free_time*1000:.2f} ms ({n_allocs/free_time:.0f} ops/sec)"
+        f"Free {n_allocs} blocks:      {free_time * 1000:.2f} ms ({n_allocs / free_time:.0f} ops/sec)"
     )
 
     # Reuse benchmark (allocate from free list)
@@ -135,7 +135,7 @@ def benchmark_python():
         blocks.append(block)
     reuse_time = time.perf_counter() - start
     print(
-        f"Reuse {n_allocs} blocks:     {reuse_time*1000:.2f} ms ({n_allocs/reuse_time:.0f} ops/sec)"
+        f"Reuse {n_allocs} blocks:     {reuse_time * 1000:.2f} ms ({n_allocs / reuse_time:.0f} ops/sec)"
     )
 
     stats = pool.stats()
@@ -162,7 +162,7 @@ def benchmark_python():
         tasks.append(task)
     submit_time = time.perf_counter() - start
     print(
-        f"Submit {n_tasks} tasks:      {submit_time*1000:.2f} ms ({n_tasks/submit_time:.0f} ops/sec)"
+        f"Submit {n_tasks} tasks:      {submit_time * 1000:.2f} ms ({n_tasks / submit_time:.0f} ops/sec)"
     )
 
     # Note: Python scheduler has different API (run_once, etc.)

@@ -7,7 +7,60 @@
 namespace py = pybind11;
 using namespace pygpukit;
 
+// Custom exception for NVRTC errors with structured info
+static PyObject* NvrtcErrorType = nullptr;
+
 void init_jit_bindings(py::module_& m) {
+    // NvrtcErrorCode enum
+    py::enum_<NvrtcErrorCode>(m, "NvrtcErrorCode")
+        .value("Success", NvrtcErrorCode::Success)
+        .value("OutOfMemory", NvrtcErrorCode::OutOfMemory)
+        .value("ProgramCreationFailure", NvrtcErrorCode::ProgramCreationFailure)
+        .value("InvalidInput", NvrtcErrorCode::InvalidInput)
+        .value("InvalidProgram", NvrtcErrorCode::InvalidProgram)
+        .value("InvalidOption", NvrtcErrorCode::InvalidOption)
+        .value("Compilation", NvrtcErrorCode::Compilation)
+        .value("BuiltinOperationFailure", NvrtcErrorCode::BuiltinOperationFailure)
+        .value("NoNameExpressionsAfterCompilation", NvrtcErrorCode::NoNameExpressionsAfterCompilation)
+        .value("NoLoweredNamesBeforeCompilation", NvrtcErrorCode::NoLoweredNamesBeforeCompilation)
+        .value("NameExpressionNotValid", NvrtcErrorCode::NameExpressionNotValid)
+        .value("InternalError", NvrtcErrorCode::InternalError)
+        .value("NotLoaded", NvrtcErrorCode::NotLoaded)
+        .value("PtxLoadFailed", NvrtcErrorCode::PtxLoadFailed)
+        .value("FunctionNotFound", NvrtcErrorCode::FunctionNotFound)
+        .value("LaunchFailed", NvrtcErrorCode::LaunchFailed)
+        .export_values();
+
+    // Create custom NvrtcError exception type with code and log attributes
+    NvrtcErrorType = PyErr_NewExceptionWithDoc(
+        "_pygpukit_native.NvrtcError",
+        "NVRTC JIT compilation error with structured error information.\n\n"
+        "Attributes:\n"
+        "    code (NvrtcErrorCode): Structured error code\n"
+        "    compilation_log (str): NVRTC compiler output (if available)",
+        PyExc_RuntimeError,
+        nullptr
+    );
+    m.attr("NvrtcError") = py::handle(NvrtcErrorType);
+
+    // Register exception translator
+    py::register_exception_translator([](std::exception_ptr p) {
+        try {
+            if (p) std::rethrow_exception(p);
+        } catch (const NvrtcError& e) {
+            // Create exception with attributes
+            PyObject* exc = PyObject_CallFunction(NvrtcErrorType, "s", e.what());
+            if (exc) {
+                PyObject_SetAttrString(exc, "code", py::cast(e.code()).ptr());
+                PyObject_SetAttrString(exc, "compilation_log", py::cast(e.log()).ptr());
+                PyErr_SetObject(NvrtcErrorType, exc);
+                Py_DECREF(exc);
+            } else {
+                PyErr_SetString(NvrtcErrorType, e.what());
+            }
+        }
+    });
+
     // CompiledPTX struct
     py::class_<CompiledPTX>(m, "CompiledPTX")
         .def_readonly("ptx", &CompiledPTX::ptx)

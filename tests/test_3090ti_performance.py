@@ -13,6 +13,7 @@ Performance Targets:
 - Target: 35.6 TFLOPS (90% of theoretical)
 - Minimum: 22 TFLOPS (must beat PyTorch baseline)
 """
+
 import os
 import time
 
@@ -20,9 +21,7 @@ import numpy as np
 import pytest
 
 # Setup CUDA DLL path (if CUDA is installed)
-cuda_path = os.environ.get(
-    "CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
-)
+cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4")
 cuda_bin = os.path.join(cuda_path, "bin")
 if os.path.isdir(cuda_bin):
     if cuda_bin not in os.environ.get("PATH", ""):
@@ -256,7 +255,9 @@ class TestEfficiencyMetrics:
         _, tflops = benchmark_matmul(8192, 8192, 8192, warmup=2, iterations=5)
         efficiency = tflops / RTX_3090TI_THEORETICAL_TFLOPS
         status = "PASS" if efficiency >= target_efficiency else "BELOW_TARGET"
-        print(f"\n8192x8192: {tflops:.2f} TFLOPS, efficiency: {efficiency*100:.1f}% (target: {target_efficiency*100:.0f}%) [{status}]")
+        print(
+            f"\n8192x8192: {tflops:.2f} TFLOPS, efficiency: {efficiency * 100:.1f}% (target: {target_efficiency * 100:.0f}%) [{status}]"
+        )
         # Always pass - performance is informational
 
     def test_memory_bandwidth_utilization(self, check_3090ti):
@@ -271,7 +272,9 @@ class TestEfficiencyMetrics:
         bandwidth_gbps = bytes_transferred / time_sec / 1e9
 
         status = "PASS" if bandwidth_gbps >= target_bw else "BELOW_TARGET"
-        print(f"\n{m}x{n}x{k} bandwidth: {bandwidth_gbps:.1f} GB/s (target: {target_bw}) [{status}]")
+        print(
+            f"\n{m}x{n}x{k} bandwidth: {bandwidth_gbps:.1f} GB/s (target: {target_bw}) [{status}]"
+        )
         # Always pass - performance is informational
 
 

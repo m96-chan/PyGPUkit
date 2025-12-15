@@ -21,6 +21,14 @@ def _validate_same_dtype(a: GPUArray, b: GPUArray, op_name: str) -> None:
         raise ValueError(f"{op_name} requires arrays of same dtype, got {a.dtype} and {b.dtype}")
 
 
+def _validate_float_dtype(a: GPUArray, op_name: str) -> None:
+    """Validate that array has float dtype."""
+    from pygpukit.core.dtypes import bfloat16, float16, float32, float64
+
+    if a.dtype not in (float32, float64, float16, bfloat16):
+        raise ValueError(f"{op_name} requires float dtype, got {a.dtype}")
+
+
 def add(a: GPUArray, b: GPUArray) -> GPUArray:
     """Element-wise addition of two arrays.
 
@@ -121,6 +129,211 @@ def _mul_native(a: GPUArray, b: GPUArray) -> GPUArray:
     return GPUArray._wrap_native(c_native)
 
 
+def sub(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Element-wise subtraction of two arrays.
+
+    Args:
+        a: First input array.
+        b: Second input array.
+
+    Returns:
+        A new GPUArray containing the element-wise difference.
+
+    Raises:
+        ValueError: If shapes don't match.
+    """
+    _validate_same_shape(a, b, "sub")
+    _validate_same_dtype(a, b, "sub")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _sub_native(a, b)
+    else:
+        return _sub_cpu(a, b)
+
+
+def _sub_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
+    """CPU implementation of sub."""
+    a_np = a.to_numpy()
+    b_np = b.to_numpy()
+    result_np = a_np - b_np
+    return from_numpy(result_np)
+
+
+def _sub_native(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of sub (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    c_native = native.sub(a_native, b_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def div(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Element-wise division of two arrays.
+
+    Args:
+        a: First input array (dividend).
+        b: Second input array (divisor).
+
+    Returns:
+        A new GPUArray containing the element-wise quotient.
+
+    Raises:
+        ValueError: If shapes don't match.
+    """
+    _validate_same_shape(a, b, "div")
+    _validate_same_dtype(a, b, "div")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _div_native(a, b)
+    else:
+        return _div_cpu(a, b)
+
+
+def _div_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
+    """CPU implementation of div."""
+    a_np = a.to_numpy()
+    b_np = b.to_numpy()
+    result_np = a_np / b_np
+    return from_numpy(result_np)
+
+
+def _div_native(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of div (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    c_native = native.div(a_native, b_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def exp(a: GPUArray) -> GPUArray:
+    """Element-wise exponential.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A new GPUArray containing exp(a).
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "exp")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _exp_native(a)
+    else:
+        return _exp_cpu(a)
+
+
+def _exp_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of exp."""
+    a_np = a.to_numpy()
+    result_np = np.exp(a_np)
+    return from_numpy(result_np)
+
+
+def _exp_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of exp (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.exp(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def log(a: GPUArray) -> GPUArray:
+    """Element-wise natural logarithm.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A new GPUArray containing log(a).
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "log")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _log_native(a)
+    else:
+        return _log_cpu(a)
+
+
+def _log_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of log."""
+    a_np = a.to_numpy()
+    result_np = np.log(a_np)
+    return from_numpy(result_np)
+
+
+def _log_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of log (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.log(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def relu(a: GPUArray) -> GPUArray:
+    """Element-wise ReLU (Rectified Linear Unit).
+
+    Computes max(0, x) for each element.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A new GPUArray containing relu(a).
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "relu")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _relu_native(a)
+    else:
+        return _relu_cpu(a)
+
+
+def _relu_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of relu."""
+    a_np = a.to_numpy()
+    result_np = np.maximum(0, a_np)
+    return from_numpy(result_np)
+
+
+def _relu_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of relu (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.relu(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
 def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArray:
     """Matrix multiplication of two 2D arrays.
 
@@ -155,6 +368,7 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
     # Check TF32 dtype requirement early (before backend dispatch)
     if use_tf32 is True:
         from pygpukit.core.dtypes import float32
+
         if a.dtype != float32:
             raise RuntimeError("TF32 matmul requires float32 dtype")
 
@@ -200,4 +414,126 @@ def _matmul_native(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) ->
         c_native = native.matmul(a_native, b_native)
 
     # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
+
+
+# ============================================================================
+# Reduction Operations
+# ============================================================================
+
+
+def sum(a: GPUArray) -> GPUArray:
+    """Sum of all elements.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the sum.
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "sum")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _sum_native(a)
+    else:
+        return _sum_cpu(a)
+
+
+def _sum_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of sum."""
+    a_np = a.to_numpy()
+    result_np = np.array([np.sum(a_np)], dtype=a_np.dtype)
+    return from_numpy(result_np)
+
+
+def _sum_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of sum (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.sum(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def mean(a: GPUArray) -> GPUArray:
+    """Mean of all elements.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the mean.
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "mean")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _mean_native(a)
+    else:
+        return _mean_cpu(a)
+
+
+def _mean_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of mean."""
+    a_np = a.to_numpy()
+    result_np = np.array([np.mean(a_np)], dtype=a_np.dtype)
+    return from_numpy(result_np)
+
+
+def _mean_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of mean (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.mean(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def max(a: GPUArray) -> GPUArray:
+    """Max of all elements.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the maximum value.
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "max")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _max_native(a)
+    else:
+        return _max_cpu(a)
+
+
+def _max_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of max."""
+    a_np = a.to_numpy()
+    result_np = np.array([np.max(a_np)], dtype=a_np.dtype)
+    return from_numpy(result_np)
+
+
+def _max_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of max (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.max(a_native)
     return GPUArray._wrap_native(c_native)

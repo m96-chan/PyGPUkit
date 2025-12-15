@@ -1,12 +1,15 @@
 //! Python bindings for the kernel dispatch controller
 
 use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use pygpukit_core::dispatch::{
     KernelDispatcher, KernelLaunchRequest, KernelState, DispatchStats, LaunchConfig,
     KernelPacingEngine, PacingConfig, PacingDecision, PacingStats, StreamPacingStats,
-    SliceScheduler, SliceConfig, SlicedKernel, KernelSlice, SliceInfo, SliceStats,
+    SliceScheduler, SliceConfig, KernelSlice, SliceInfo, SliceStats,
     KernelCache, CacheConfig, CachedKernel, CompileOptions, CacheStats,
+    PersistentCache, PersistentCacheConfig, PersistentCacheStats, PersistentEntry, ArchFingerprint,
 };
 
 /// Python wrapper for KernelState enum
@@ -1346,6 +1349,426 @@ impl PyKernelCache {
     }
 }
 
+// =============================================================================
+// Persistent Kernel Cache Types
+// =============================================================================
+
+/// Architecture fingerprint for cache keys
+///
+/// Contains GPU characteristics that affect PTX validity.
+#[pyclass(name = "ArchFingerprint")]
+#[derive(Clone)]
+pub struct PyArchFingerprint {
+    inner: ArchFingerprint,
+}
+
+#[pymethods]
+impl PyArchFingerprint {
+    /// Create a new architecture fingerprint
+    ///
+    /// Args:
+    ///     sm_version: SM version (e.g., 86 for RTX 3090)
+    ///     global_memory: Global memory in bytes
+    ///     shared_memory_per_sm: Shared memory per SM in bytes
+    ///     max_registers_per_block: Max registers per block
+    ///     l2_cache_size: L2 cache size in bytes
+    ///     driver_version: CUDA driver version
+    #[new]
+    fn new(
+        sm_version: u32,
+        global_memory: u64,
+        shared_memory_per_sm: u32,
+        max_registers_per_block: u32,
+        l2_cache_size: u32,
+        driver_version: u32,
+    ) -> Self {
+        Self {
+            inner: ArchFingerprint::new(
+                sm_version,
+                global_memory,
+                shared_memory_per_sm,
+                max_registers_per_block,
+                l2_cache_size,
+                driver_version,
+            ),
+        }
+    }
+
+    #[getter]
+    fn sm_version(&self) -> u32 {
+        self.inner.sm_version
+    }
+
+    #[getter]
+    fn global_memory(&self) -> u64 {
+        self.inner.global_memory
+    }
+
+    #[getter]
+    fn shared_memory_per_sm(&self) -> u32 {
+        self.inner.shared_memory_per_sm
+    }
+
+    #[getter]
+    fn max_registers_per_block(&self) -> u32 {
+        self.inner.max_registers_per_block
+    }
+
+    #[getter]
+    fn l2_cache_size(&self) -> u32 {
+        self.inner.l2_cache_size
+    }
+
+    #[getter]
+    fn driver_version(&self) -> u32 {
+        self.inner.driver_version
+    }
+
+    /// Compute hash for this fingerprint
+    fn hash(&self) -> u64 {
+        self.inner.hash()
+    }
+
+    /// Check if this fingerprint is compatible with another
+    fn is_compatible(&self, other: &PyArchFingerprint) -> bool {
+        self.inner.is_compatible(&other.inner)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ArchFingerprint(sm={}, memory={}GB, driver={})",
+            self.inner.sm_version,
+            self.inner.global_memory / (1024 * 1024 * 1024),
+            self.inner.driver_version
+        )
+    }
+}
+
+/// Persistent cache configuration
+#[pyclass(name = "PersistentCacheConfig")]
+#[derive(Clone)]
+pub struct PyPersistentCacheConfig {
+    inner: PersistentCacheConfig,
+}
+
+#[pymethods]
+impl PyPersistentCacheConfig {
+    /// Create a new persistent cache configuration
+    ///
+    /// Args:
+    ///     cache_dir: Directory path for cache storage (default: ~/.pygpukit/cache)
+    ///     max_size: Maximum total cache size in bytes (default: 512MB)
+    ///     max_entries: Maximum number of cached entries (default: 1000)
+    ///     auto_cleanup: Enable automatic cleanup (default: True)
+    ///     ttl_seconds: Time-to-live in seconds, 0.0 for unlimited (default: 0.0)
+    #[new]
+    #[pyo3(signature = (cache_dir=None, max_size=536870912, max_entries=1000, auto_cleanup=true, ttl_seconds=0.0))]
+    fn new(
+        cache_dir: Option<String>,
+        max_size: usize,
+        max_entries: usize,
+        auto_cleanup: bool,
+        ttl_seconds: f64,
+    ) -> Self {
+        let cache_dir = cache_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".pygpukit")
+                    .join("cache")
+            });
+
+        Self {
+            inner: PersistentCacheConfig {
+                cache_dir,
+                max_size,
+                max_entries,
+                auto_cleanup,
+                ttl_seconds,
+            },
+        }
+    }
+
+    #[getter]
+    fn cache_dir(&self) -> String {
+        self.inner.cache_dir.to_string_lossy().to_string()
+    }
+
+    #[getter]
+    fn max_size(&self) -> usize {
+        self.inner.max_size
+    }
+
+    #[getter]
+    fn max_entries(&self) -> usize {
+        self.inner.max_entries
+    }
+
+    #[getter]
+    fn auto_cleanup(&self) -> bool {
+        self.inner.auto_cleanup
+    }
+
+    #[getter]
+    fn ttl_seconds(&self) -> f64 {
+        self.inner.ttl_seconds
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PersistentCacheConfig(dir='{}', max_size={}MB, max_entries={})",
+            self.inner.cache_dir.display(),
+            self.inner.max_size / (1024 * 1024),
+            self.inner.max_entries
+        )
+    }
+}
+
+/// Persistent cache statistics
+#[pyclass(name = "PersistentCacheStats")]
+#[derive(Clone)]
+pub struct PyPersistentCacheStats {
+    inner: PersistentCacheStats,
+}
+
+#[pymethods]
+impl PyPersistentCacheStats {
+    #[getter]
+    fn entries(&self) -> usize {
+        self.inner.entries
+    }
+
+    #[getter]
+    fn total_size(&self) -> usize {
+        self.inner.total_size
+    }
+
+    #[getter]
+    fn hits(&self) -> usize {
+        self.inner.hits
+    }
+
+    #[getter]
+    fn misses(&self) -> usize {
+        self.inner.misses
+    }
+
+    #[getter]
+    fn evictions(&self) -> usize {
+        self.inner.evictions
+    }
+
+    #[getter]
+    fn load_errors(&self) -> usize {
+        self.inner.load_errors
+    }
+
+    #[getter]
+    fn save_errors(&self) -> usize {
+        self.inner.save_errors
+    }
+
+    /// Calculate hit rate (0.0 - 1.0)
+    fn hit_rate(&self) -> f64 {
+        self.inner.hit_rate()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PersistentCacheStats(entries={}, size={}KB, hit_rate={:.1}%)",
+            self.inner.entries,
+            self.inner.total_size / 1024,
+            self.inner.hit_rate() * 100.0
+        )
+    }
+}
+
+/// Persistent cache entry
+#[pyclass(name = "PersistentEntry")]
+#[derive(Clone)]
+pub struct PyPersistentEntry {
+    inner: PersistentEntry,
+}
+
+#[pymethods]
+impl PyPersistentEntry {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    #[getter]
+    fn ptx(&self) -> &str {
+        &self.inner.ptx
+    }
+
+    #[getter]
+    fn source_hash(&self) -> u64 {
+        self.inner.source_hash
+    }
+
+    #[getter]
+    fn options_hash(&self) -> u64 {
+        self.inner.options_hash
+    }
+
+    #[getter]
+    fn created_at(&self) -> f64 {
+        self.inner.created_at
+    }
+
+    #[getter]
+    fn last_access(&self) -> f64 {
+        self.inner.last_access
+    }
+
+    #[getter]
+    fn access_count(&self) -> usize {
+        self.inner.access_count
+    }
+
+    /// Get PTX size in bytes
+    fn ptx_size(&self) -> usize {
+        self.inner.ptx_size()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PersistentEntry(name='{}', ptx_size={}KB, accesses={})",
+            self.inner.name,
+            self.inner.ptx_size() / 1024,
+            self.inner.access_count
+        )
+    }
+}
+
+/// Persistent kernel cache
+///
+/// Caches compiled PTX to disk for fast startup across sessions.
+/// Uses GPU architecture fingerprinting to ensure cache validity.
+#[pyclass(name = "PersistentCache")]
+pub struct PyPersistentCache {
+    inner: PersistentCache,
+}
+
+#[pymethods]
+impl PyPersistentCache {
+    /// Create a new persistent cache
+    ///
+    /// Args:
+    ///     config: Cache configuration
+    ///     arch: Architecture fingerprint for the current GPU
+    #[new]
+    fn new(config: PyPersistentCacheConfig, arch: PyArchFingerprint) -> Self {
+        Self {
+            inner: PersistentCache::new(config.inner, arch.inner),
+        }
+    }
+
+    /// Initialize the cache (creates directories, loads index)
+    fn initialize(&mut self) -> PyResult<()> {
+        self.inner.initialize()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Compute cache key from components
+    #[staticmethod]
+    fn compute_key(source_hash: u64, name: &str, options_hash: u64, arch_hash: u64) -> u64 {
+        PersistentCache::compute_key(source_hash, name, options_hash, arch_hash)
+    }
+
+    /// Compute hash for source code
+    #[staticmethod]
+    fn hash_source(source: &str) -> u64 {
+        PersistentCache::hash_source(source)
+    }
+
+    /// Compute hash for compile options
+    #[staticmethod]
+    fn hash_options(options: Vec<String>) -> u64 {
+        PersistentCache::hash_options(&options)
+    }
+
+    /// Get entry by key
+    fn get(&mut self, key: u64) -> PyResult<Option<PyPersistentEntry>> {
+        self.inner.get(key)
+            .map(|opt| opt.map(|e| PyPersistentEntry { inner: e }))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Insert a new entry
+    ///
+    /// Args:
+    ///     source: CUDA source code
+    ///     name: Kernel name
+    ///     options: Compile options
+    ///     ptx: Compiled PTX code
+    ///
+    /// Returns:
+    ///     Cache key for the entry
+    fn insert(
+        &mut self,
+        source: &str,
+        name: &str,
+        options: Vec<String>,
+        ptx: String,
+    ) -> PyResult<u64> {
+        self.inner.insert(source, name, &options, ptx)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove an entry by key
+    fn remove(&mut self, key: u64) -> PyResult<bool> {
+        self.inner.remove(key)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Clear all entries
+    fn clear(&mut self) -> PyResult<()> {
+        self.inner.clear()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Run cleanup (remove expired entries)
+    fn cleanup(&mut self) -> PyResult<usize> {
+        self.inner.cleanup()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Check if key exists
+    fn contains(&self, key: u64) -> bool {
+        self.inner.contains(key)
+    }
+
+    /// Get number of entries
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Check if empty
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Get statistics
+    fn stats(&self) -> PyPersistentCacheStats {
+        PyPersistentCacheStats {
+            inner: self.inner.stats().clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        let stats = self.inner.stats();
+        format!(
+            "PersistentCache(entries={}, size={}KB, hit_rate={:.1}%)",
+            stats.entries,
+            stats.total_size / 1024,
+            stats.hit_rate() * 100.0
+        )
+    }
+}
+
 /// Register dispatch module
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKernelState>()?;
@@ -1365,11 +1788,17 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySliceInfo>()?;
     m.add_class::<PySliceStats>()?;
     m.add_class::<PySliceScheduler>()?;
-    // Cache
+    // Cache (in-memory)
     m.add_class::<PyCompileOptions>()?;
     m.add_class::<PyCacheConfig>()?;
     m.add_class::<PyCachedKernel>()?;
     m.add_class::<PyCacheStats>()?;
     m.add_class::<PyKernelCache>()?;
+    // Persistent cache (disk)
+    m.add_class::<PyArchFingerprint>()?;
+    m.add_class::<PyPersistentCacheConfig>()?;
+    m.add_class::<PyPersistentCacheStats>()?;
+    m.add_class::<PyPersistentEntry>()?;
+    m.add_class::<PyPersistentCache>()?;
     Ok(())
 }

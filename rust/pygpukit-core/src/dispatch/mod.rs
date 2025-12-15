@@ -15,6 +15,7 @@ mod controller;
 mod pacing;
 mod slicing;
 mod cache;
+mod persistent_cache;
 
 pub use controller::{KernelDispatcher, KernelLaunchRequest, KernelState, DispatchStats, LaunchConfig};
 pub use pacing::{
@@ -25,4 +26,8 @@ pub use slicing::{
 };
 pub use cache::{
     KernelCache, CacheConfig, CachedKernel, CompileOptions, CacheStats,
+};
+pub use persistent_cache::{
+    PersistentCache, PersistentCacheConfig, PersistentCacheStats,
+    PersistentEntry, ArchFingerprint, CacheIndex, CacheError,
 };

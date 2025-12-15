@@ -8,3 +8,6 @@ description = "Core Rust implementation for PyGPUkit memory pool and scheduler"
 [dependencies]
 parking_lot.workspace = true
 indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true

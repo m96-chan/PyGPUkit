@@ -10,17 +10,24 @@ from pygpukit.core.device import (
     get_device_info,
     is_cuda_available,
 )
-from pygpukit.core.dtypes import DataType, float32, float64, int32, int64
+from pygpukit.core.dtypes import DataType, bfloat16, float16, float32, float64, int32, int64
 from pygpukit.core.factory import empty, from_numpy, ones, zeros
 from pygpukit.core.stream import Stream, StreamManager, default_stream
 from pygpukit.jit.compiler import (
     JITKernel,
+    NvrtcError,
+    NvrtcErrorCode,
+    check_driver_compatibility,
+    get_driver_requirements,
     get_nvrtc_path,
     get_nvrtc_version,
+    get_warmup_error,
     is_nvrtc_available,
+    is_warmup_done,
     jit,
+    warmup,
 )
-from pygpukit.ops.basic import add, matmul, mul
+from pygpukit.ops.basic import add, div, exp, log, matmul, max, mean, mul, relu, sub, sum
 
 # Try to import Rust types, fallback to Python implementations
 try:
@@ -46,6 +53,8 @@ __all__ = [
     "DataType",
     "float32",
     "float64",
+    "float16",
+    "bfloat16",
     "int32",
     "int64",
     # Factory functions
@@ -60,11 +69,27 @@ __all__ = [
     # JIT
     "jit",
     "JITKernel",
+    "NvrtcError",
+    "NvrtcErrorCode",
     "is_nvrtc_available",
     "get_nvrtc_version",
     "get_nvrtc_path",
+    "warmup",
+    "is_warmup_done",
+    "get_warmup_error",
+    "get_driver_requirements",
+    "check_driver_compatibility",
     # Operations
     "add",
+    "sub",
     "mul",
+    "div",
+    "exp",
+    "log",
+    "relu",
     "matmul",
+    # Reductions
+    "sum",
+    "mean",
+    "max",
 ]

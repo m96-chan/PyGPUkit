@@ -9,8 +9,6 @@ This demo shows the three runtime modes of PyGPUkit:
 Run this script to see which mode your system supports.
 """
 
-import sys
-
 
 def print_header(title: str) -> None:
     """Print a section header."""
@@ -50,7 +48,7 @@ def demo_full_jit_mode() -> bool:
     # Demo: Custom JIT kernel
     print("\n  [Demo] Custom JIT Kernel:")
 
-    kernel_source = '''
+    kernel_source = """
     extern "C" __global__
     void scale_array(float* data, float factor, int n) {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -58,7 +56,7 @@ def demo_full_jit_mode() -> bool:
             data[idx] *= factor;
         }
     }
-    '''
+    """
 
     try:
         kernel = gp.jit(kernel_source, func="scale_array")
@@ -164,7 +162,6 @@ def demo_cpu_simulation_mode() -> bool:
 
     # Demo: Operations work via NumPy
     print("\n  [Demo] CPU-Simulated Operations:")
-    import numpy as np
 
     # Create arrays (backed by NumPy in simulation mode)
     A = gp.zeros((128, 128), dtype="float32")
@@ -178,10 +175,10 @@ def demo_cpu_simulation_mode() -> bool:
     print(f"    - add(128x128): OK (CPU), result shape {C.shape}")
 
     # JIT also works in simulation (just marks as compiled)
-    kernel_source = '''
+    kernel_source = """
     extern "C" __global__
     void dummy(float* x) {}
-    '''
+    """
     kernel = gp.jit(kernel_source, func="dummy")
     print(f"    - jit kernel: OK (simulated), compiled={kernel.is_compiled}")
 

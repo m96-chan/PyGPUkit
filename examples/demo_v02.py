@@ -29,17 +29,21 @@ import numpy as np
 # Header
 # =============================================================================
 
+
 def print_header(title: str):
     print("\n" + "=" * 70)
     print(f" {title}")
     print("=" * 70)
 
+
 def print_section(title: str):
     print(f"\n--- {title} ---")
+
 
 # =============================================================================
 # Main Demo
 # =============================================================================
+
 
 def main():
     print_header("PyGPUkit v0.2 Full Feature Demo")
@@ -47,8 +51,10 @@ def main():
     # Import modules
     try:
         import pygpukit
+
         native = pygpukit._pygpukit_native
         import _pygpukit_rust as rust
+
         print(f"PyGPUkit version: {pygpukit.__version__}")
         print("Native module loaded: OK")
         print("Rust module loaded: OK")
@@ -77,9 +83,9 @@ def main():
 
     pool = rust.MemoryPool(
         quota=100 * 1024 * 1024,  # 100 MB quota
-        enable_eviction=True
+        enable_eviction=True,
     )
-    print(f"Created pool with 100 MB quota, eviction enabled")
+    print("Created pool with 100 MB quota, eviction enabled")
 
     # Allocate blocks
     block_ids = []
@@ -90,7 +96,7 @@ def main():
         print(f"  Allocated block {block.id}: {block.size} bytes")
 
     stats = pool.stats()
-    print(f"\nPool stats:")
+    print("\nPool stats:")
     print(f"  Active: {stats.active_blocks} blocks, {stats.used} bytes")
     print(f"  Allocations: {stats.allocation_count}")
     print(f"  Quota usage: {stats.used / stats.quota:.1%}")
@@ -113,7 +119,7 @@ def main():
     scheduler = rust.Scheduler(
         sched_tick_ms=10.0,
         window_ms=100.0,
-        total_memory=1024 * 1024 * 1024  # 1 GB
+        total_memory=1024 * 1024 * 1024,  # 1 GB
     )
     print("Created scheduler (10ms tick, 100ms window, 1GB memory)")
 
@@ -124,7 +130,7 @@ def main():
             id=f"task_{i}",
             name=f"Layer {i}",
             memory_estimate=100 * 1024 * 1024,  # 100 MB
-            priority=i % 3
+            priority=i % 3,
         )
         task_id = scheduler.submit(task)
         task_ids.append(task_id)
@@ -147,7 +153,7 @@ def main():
         print(f"\nCompleted: {runnable_ids[0]}")
 
     sched_stats = scheduler.stats()
-    print(f"\nScheduler stats:")
+    print("\nScheduler stats:")
     print(f"  Total submitted: {sched_stats.total_submitted}")
     print(f"  Completed: {sched_stats.completed_count}")
     print(f"  Pending: {sched_stats.pending_count}")
@@ -170,7 +176,7 @@ def main():
             src_ptr=0x1000 + i * 0x1000,
             dst_ptr=0x2000 + i * 0x1000,
             size=1024 * 1024,  # 1 MB
-            priority=i % 3
+            priority=i % 3,
         )
         transfer_ids.append(op_id)
         print(f"  Queued transfer {op_id}: {type_name.upper()}, priority={i % 3}")
@@ -188,7 +194,7 @@ def main():
         print(f"  Completed transfer {op.id}")
 
     transfer_stats = transfer_engine.stats()
-    print(f"\nTransfer stats:")
+    print("\nTransfer stats:")
     print(f"  Total queued: {transfer_stats.total_queued}")
     print(f"  Completed: {transfer_stats.completed_count}")
     print(f"  Pending: {transfer_stats.pending_count}")
@@ -207,13 +213,9 @@ def main():
             grid=(128, 1, 1),
             block=(256, 1, 1),
             shared_mem=0,
-            stream_id=i % 2  # Alternate between stream 0 and 1
+            stream_id=i % 2,  # Alternate between stream 0 and 1
         )
-        req_id = dispatcher.queue(
-            kernel_handle=0xDEADBEEF + i,
-            config=config,
-            priority=i % 3
-        )
+        req_id = dispatcher.queue(kernel_handle=0xDEADBEEF + i, config=config, priority=i % 3)
         print(f"  Queued kernel {req_id}: stream={i % 2}, priority={i % 3}")
 
     # Get ready kernels
@@ -228,7 +230,7 @@ def main():
         dispatcher.mark_completed(req.id)
 
     dispatch_stats = dispatcher.stats()
-    print(f"\nDispatch stats:")
+    print("\nDispatch stats:")
     print(f"  Total queued: {dispatch_stats.total_queued}")
     print(f"  Completed: {dispatch_stats.completed_count}")
     print(f"  Pending: {dispatch_stats.pending_count}")
@@ -285,23 +287,29 @@ def main():
         C_result = C_gpu.to_numpy()
         rel_error = np.max(np.abs(C_result - C_cpu)) / np.max(np.abs(C_cpu))
 
-        results.append({
-            'size': size,
-            'kernel': kernel,
-            'time_ms': avg_time * 1000,
-            'gflops': gflops,
-            'speedup': speedup,
-            'error': rel_error
-        })
+        results.append(
+            {
+                "size": size,
+                "kernel": kernel,
+                "time_ms": avg_time * 1000,
+                "gflops": gflops,
+                "speedup": speedup,
+                "error": rel_error,
+            }
+        )
 
         status = "OK" if rel_error < 1e-3 else f"ERR:{rel_error:.1e}"
-        print(f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time*1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x ({status})")
+        print(
+            f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time * 1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x ({status})"
+        )
 
     print("-" * 60)
 
     # Peak performance
-    peak = max(results, key=lambda x: x['gflops'])
-    print(f"\nPeak: {peak['gflops']:.1f} GFLOPS at {peak['size']}x{peak['size']} ({peak['kernel']})")
+    peak = max(results, key=lambda x: x["gflops"])
+    print(
+        f"\nPeak: {peak['gflops']:.1f} GFLOPS at {peak['size']}x{peak['size']} ({peak['kernel']})"
+    )
 
     # =========================================================================
     # 6. Integrated Demo - Full Pipeline
@@ -335,29 +343,24 @@ def main():
             id=f"layer_{layer}",
             name=f"Layer {layer}",
             memory_estimate=batch_size * hidden_dim * 4 * 2,  # input + output
-            priority=0
+            priority=0,
         )
         task_id = scheduler.submit(task)
 
         # Allocate memory
         input_block_id = pool.allocate(batch_size * hidden_dim * 4)
         weight_block_id = pool.allocate(hidden_dim * hidden_dim * 4)
-        output_block_id = pool.allocate(batch_size * hidden_dim * 4)
+        pool.allocate(batch_size * hidden_dim * 4)
 
         # Queue transfer
-        h2d_id = transfer_engine.enqueue_h2d(
-            host_ptr=0x1000,
-            device_ptr=input_block_id,
-            size=batch_size * hidden_dim * 4
+        transfer_engine.enqueue_h2d(
+            host_ptr=0x1000, device_ptr=input_block_id, size=batch_size * hidden_dim * 4
         )
 
         # Queue kernel
         config = rust.LaunchConfig.linear(batch_size * hidden_dim, 256)
-        kernel_id = dispatcher.queue(
-            kernel_handle=0xFFFF0000 + layer,
-            config=config,
-            task_id=task_id,
-            priority=0
+        dispatcher.queue(
+            kernel_handle=0xFFFF0000 + layer, config=config, task_id=task_id, priority=0
         )
 
         # Actual compute
@@ -368,7 +371,7 @@ def main():
         W_gpu = native.from_numpy(W)
 
         start = time.perf_counter()
-        out_gpu = native.matmul(A_gpu, W_gpu)
+        native.matmul(A_gpu, W_gpu)
         layer_time = time.perf_counter() - start
 
         total_time += layer_time
@@ -383,8 +386,8 @@ def main():
 
     throughput = total_flops / total_time / 1e9
 
-    print(f"\nPipeline completed:")
-    print(f"  Total time: {total_time*1000:.2f} ms")
+    print("\nPipeline completed:")
+    print(f"  Total time: {total_time * 1000:.2f} ms")
     print(f"  Throughput: {throughput:.1f} GFLOPS")
     print(f"  Tasks completed: {scheduler.stats().completed_count}")
     print(f"  Memory allocations: {pool.stats().allocation_count}")
@@ -433,6 +436,7 @@ def main():
     print("=" * 70)
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

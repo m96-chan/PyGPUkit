@@ -3,6 +3,7 @@ PyGPUkit Stress Test Script for v0.2.1
 Tests Rust backend components under sustained load.
 Default: 5 minutes runtime.
 """
+
 import argparse
 import random
 import threading
@@ -19,6 +20,7 @@ except ImportError:
 
 class StressTestStats:
     """Thread-safe statistics collector."""
+
     def __init__(self):
         self.lock = threading.Lock()
         self.operations = 0
@@ -176,14 +178,14 @@ def stress_qos_evaluator(stats: StressTestStats, duration_sec: float):
 
             if qos_type == "guaranteed":
                 task = rust.QosTaskMeta.guaranteed(
-                    task_id, f"Guaranteed {task_counter}",
-                    random.randint(1024, 50 * 1024 * 1024)
+                    task_id, f"Guaranteed {task_counter}", random.randint(1024, 50 * 1024 * 1024)
                 )
             elif qos_type == "burstable":
                 task = rust.QosTaskMeta.burstable(
-                    task_id, f"Burstable {task_counter}",
+                    task_id,
+                    f"Burstable {task_counter}",
                     random.randint(1024, 30 * 1024 * 1024),
-                    random.uniform(1.5, 3.0)
+                    random.uniform(1.5, 3.0),
                 )
             else:
                 task = rust.QosTaskMeta.best_effort(task_id, f"BestEffort {task_counter}")
@@ -222,9 +224,11 @@ def stress_partition_manager(stats: StressTestStats, duration_sec: float):
 
             if action == "create" and len(partitions) < 10:
                 pid = f"partition-{partition_counter}"
-                limits = rust.PartitionLimits().memory(
-                    random.randint(100 * 1024 * 1024, 500 * 1024 * 1024)
-                ).compute(random.uniform(0.05, 0.3))
+                limits = (
+                    rust.PartitionLimits()
+                    .memory(random.randint(100 * 1024 * 1024, 500 * 1024 * 1024))
+                    .compute(random.uniform(0.05, 0.3))
+                )
                 manager.create_partition(pid, f"Partition {partition_counter}", limits)
                 partitions.append(pid)
                 partition_counter += 1
@@ -292,8 +296,10 @@ def run_stress_test(duration_minutes: float = 5.0, workers: int = 4):
                 elapsed = now - start_time
                 current_stats = stats.get_stats()
                 ops_per_sec = current_stats["operations"] / elapsed if elapsed > 0 else 0
-                print(f"[{elapsed:.0f}s] Ops: {current_stats['operations']:,} "
-                      f"({ops_per_sec:.0f}/s) | Errors: {current_stats['errors']}")
+                print(
+                    f"[{elapsed:.0f}s] Ops: {current_stats['operations']:,} "
+                    f"({ops_per_sec:.0f}/s) | Errors: {current_stats['errors']}"
+                )
                 last_report = now
 
         # Wait for all to complete
@@ -321,7 +327,7 @@ def run_stress_test(duration_minutes: float = 5.0, workers: int = 4):
     print(f"  Partitioning:   {final_stats['partition_ops']:,}")
     print("-" * 50)
 
-    if final_stats['errors'] > 0:
+    if final_stats["errors"] > 0:
         print(f"WARNING: {final_stats['errors']} errors occurred during test")
         return 1
     else:
@@ -331,10 +337,10 @@ def run_stress_test(duration_minutes: float = 5.0, workers: int = 4):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PyGPUkit Stress Test")
-    parser.add_argument("--duration", type=float, default=5.0,
-                        help="Test duration in minutes (default: 5)")
-    parser.add_argument("--workers", type=int, default=4,
-                        help="Workers per component (default: 4)")
+    parser.add_argument(
+        "--duration", type=float, default=5.0, help="Test duration in minutes (default: 5)"
+    )
+    parser.add_argument("--workers", type=int, default=4, help="Workers per component (default: 4)")
     args = parser.parse_args()
 
     exit(run_stress_test(args.duration, args.workers))

@@ -21,6 +21,51 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.5
+
+### FP16 / BF16 Support
+| Feature | Description |
+|---------|-------------|
+| **FP16 (float16)** | Half-precision floating point |
+| **BF16 (bfloat16)** | Brain floating point (better dynamic range) |
+| **FP32 Accumulation** | Numerical stability via FP32 intermediate |
+| **Type Conversion** | `astype()` for seamless dtype conversion |
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# FP16 operations
+a = gpk.from_numpy(np.random.randn(1024, 1024).astype(np.float16))
+b = gpk.from_numpy(np.random.randn(1024, 1024).astype(np.float16))
+c = a @ b  # FP16 matmul
+
+# BF16 operations
+arr = np.random.randn(1024, 1024).astype(np.float32)
+a_bf16 = gpk.from_numpy(arr).astype(gpk.bfloat16)
+b_bf16 = gpk.from_numpy(arr).astype(gpk.bfloat16)
+c_bf16 = a_bf16 @ b_bf16  # BF16 matmul
+result = c_bf16.astype(gpk.float32)  # Convert back to FP32
+```
+
+### Reduction Operations
+| Operation | Description |
+|-----------|-------------|
+| `gpk.sum(a)` | Sum of all elements |
+| `gpk.mean(a)` | Mean of all elements |
+| `gpk.max(a)` | Maximum element |
+
+### Operator Overloads
+```python
+c = a + b   # Element-wise add
+c = a - b   # Element-wise subtract
+c = a * b   # Element-wise multiply
+c = a / b   # Element-wise divide
+c = a @ b   # Matrix multiplication
+```
+
+---
+
 ## What's New in v0.2.4
 
 ### Single-Binary Distribution
@@ -58,18 +103,19 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 |---------|------|------|--------------|
 | **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only |
 | **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** (Driver-Only) | 17.7 TFLOPS | 28.2 TFLOPS | GPU drivers only |
-| **PyGPUkit** (Full) | 17.7 TFLOPS | 30.3 TFLOPS | GPU drivers + CUDA Toolkit |
+| **PyGPUkit** | 16.7 TFLOPS | 29.7 TFLOPS | GPU drivers only |
 
-> Driver-Only mode uses pre-compiled kernels. Full mode adds JIT compilation for custom kernels with slightly better TF32 optimization.
+> Built-in matmul kernels are pre-compiled. Driver-Only and Full (JIT) modes have identical matmul performance. JIT is only needed for custom kernels.
 
 ### PyGPUkit Performance by Matrix Size
 
-| Matrix Size | FP32 | TF32 (Driver-Only) | TF32 (Full) |
-|-------------|------|-------------------|-------------|
-| 2048×2048 | 8.7 TFLOPS | 12.2 TFLOPS | 13.0 TFLOPS |
-| 4096×4096 | 14.2 TFLOPS | 22.0 TFLOPS | 23.5 TFLOPS |
-| 8192×8192 | 17.7 TFLOPS | 28.2 TFLOPS | **30.3 TFLOPS** |
+| Matrix Size | FP32 | TF32 | FP16 | BF16 |
+|-------------|------|------|------|------|
+| 2048×2048 | 9.6 TFLOPS | 13.2 TFLOPS | 2.4 TFLOPS | 2.4 TFLOPS |
+| 4096×4096 | 14.7 TFLOPS | 22.8 TFLOPS | 2.4 TFLOPS | 2.3 TFLOPS |
+| 8192×8192 | 16.7 TFLOPS | 29.7 TFLOPS | 2.3 TFLOPS | 2.3 TFLOPS |
+
+> **Note:** FP16/BF16 matmul uses simple kernels with FP32 accumulation. TensorCore optimization planned for future releases (see [Issue #60](https://github.com/m96-chan/PyGPUkit/issues/60)).
 
 ---
 
@@ -218,13 +264,14 @@ PyGPUkit/
 | **v0.2.2** | Ampere SGEMM (cp.async, float4), 18 TFLOPS FP32 |
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 28 TFLOPS |
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
+| **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
 
 ### Planned
 
 | Version | Goals |
 |---------|-------|
-| **v0.2.5** | Multi-GPU detection, NCCL preliminary support |
-| **v0.2.6** | Full API review, documentation, backward compatibility |
+| **v0.2.6** | FP16/BF16 TensorCore optimization, Multi-GPU detection |
+| **v0.2.7** | Full API review, documentation, backward compatibility |
 | **v0.3** | Triton backend, advanced ops (softmax, layernorm), MPS/MIG |
 
 ---

@@ -14,6 +14,8 @@ void init_core_bindings(py::module_& m) {
     py::enum_<DataType>(m, "DataType")
         .value("Float32", DataType::Float32)
         .value("Float64", DataType::Float64)
+        .value("Float16", DataType::Float16)
+        .value("BFloat16", DataType::BFloat16)
         .value("Int32", DataType::Int32)
         .value("Int64", DataType::Int64)
         .export_values();
@@ -49,6 +51,12 @@ void init_core_bindings(py::module_& m) {
     m.def("validate_compute_capability", &validate_compute_capability,
           py::arg("device_id") = 0,
           "Validate device compute capability (requires SM >= 80)");
+    m.def("get_recommended_arch", &get_recommended_arch, py::arg("device_id") = 0,
+          "Get recommended -arch option for JIT compilation (e.g., 'sm_86')");
+    m.def("get_fallback_archs", &get_fallback_archs, py::arg("device_id") = 0,
+          "Get fallback -arch options for older drivers (in order of preference)");
+    m.def("is_arch_supported", &is_arch_supported, py::arg("arch"),
+          "Check if driver supports a given PTX architecture");
 
     // GPUArray class
     py::class_<GPUArray>(m, "GPUArray")
@@ -77,6 +85,15 @@ void init_core_bindings(py::module_& m) {
                     break;
                 case DataType::Float64:
                     result = py::array_t<double>(py_shape);
+                    break;
+                case DataType::Float16:
+                    // NumPy has native float16 support
+                    result = py::array(py::dtype("float16"), py_shape);
+                    break;
+                case DataType::BFloat16:
+                    // NumPy doesn't have native bfloat16, use uint16 as storage
+                    // Users can convert using ml_dtypes or similar libraries
+                    result = py::array(py::dtype("uint16"), py_shape);
                     break;
                 case DataType::Int32:
                     result = py::array_t<int32_t>(py_shape);
@@ -111,16 +128,35 @@ void init_core_bindings(py::module_& m) {
         // Ensure contiguous
         arr = py::array::ensure(arr, py::array::c_style);
 
-        // Determine dtype
+        // Determine dtype based on numpy dtype
         DataType dtype;
-        if (py::isinstance<py::array_t<float>>(arr)) {
-            dtype = DataType::Float32;
-        } else if (py::isinstance<py::array_t<double>>(arr)) {
-            dtype = DataType::Float64;
-        } else if (py::isinstance<py::array_t<int32_t>>(arr)) {
-            dtype = DataType::Int32;
-        } else if (py::isinstance<py::array_t<int64_t>>(arr)) {
-            dtype = DataType::Int64;
+        py::dtype np_dtype = arr.dtype();
+        char kind = np_dtype.kind();
+        size_t itemsize = np_dtype.itemsize();
+
+        if (kind == 'f') {
+            // Floating point types
+            if (itemsize == 4) {
+                dtype = DataType::Float32;
+            } else if (itemsize == 8) {
+                dtype = DataType::Float64;
+            } else if (itemsize == 2) {
+                dtype = DataType::Float16;
+            } else {
+                throw std::runtime_error("Unsupported float dtype size: " + std::to_string(itemsize));
+            }
+        } else if (kind == 'i') {
+            // Signed integer types
+            if (itemsize == 4) {
+                dtype = DataType::Int32;
+            } else if (itemsize == 8) {
+                dtype = DataType::Int64;
+            } else {
+                throw std::runtime_error("Unsupported int dtype size: " + std::to_string(itemsize));
+            }
+        } else if (kind == 'u' && itemsize == 2) {
+            // uint16 can be used for bfloat16 storage
+            dtype = DataType::BFloat16;
         } else {
             throw std::runtime_error("Unsupported numpy dtype");
         }

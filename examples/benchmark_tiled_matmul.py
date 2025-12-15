@@ -77,7 +77,9 @@ try:
             C_result = C_gpu.to_numpy()
             rel_error = np.max(np.abs(C_result - C_cpu)) / np.max(np.abs(C_cpu))
 
-            print(f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time*1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x")
+            print(
+                f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time * 1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x"
+            )
 
             if rel_error > 1e-3:
                 print(f"  WARNING: High relative error: {rel_error:.2e}")

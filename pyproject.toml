@@ -110,6 +110,10 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "B", "C4", "UP"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"examples/*" = ["E402", "B007", "F841"]
+"src/pygpukit/jit/compiler.py" = ["E402", "F841"]
+
 [tool.mypy]
 python_version = "3.9"
 warn_return_any = true

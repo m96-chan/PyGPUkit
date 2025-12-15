@@ -21,7 +21,7 @@ def log(prefix: str, msg: str):
 def separator(title: str = ""):
     """Print separator line."""
     if title:
-        print(f"\n{'='*20} {title} {'='*20}")
+        print(f"\n{'=' * 20} {title} {'=' * 20}")
     else:
         print("-" * 60)
 
@@ -105,17 +105,18 @@ def run_simulation():
 
         log("SUBMIT", f"Task '{name}' submitted (id={task_id[:8]})")
         log(
-            "SUBMIT", f"  -> Policy={policy}, Memory={mem/1024/1024:.0f}MB, Bandwidth={bw*100:.0f}%"
+            "SUBMIT",
+            f"  -> Policy={policy}, Memory={mem / 1024 / 1024:.0f}MB, Bandwidth={bw * 100:.0f}%",
         )
 
     log("SUBMIT", "Total: 6 tasks submitted")
     log(
         "SUBMIT",
-        f"  -> Memory requested: {total_memory_requested/1024/1024/1024:.2f} GB / 18.00 GB ({total_memory_requested*100/TOTAL_MEM:.1f}%)",
+        f"  -> Memory requested: {total_memory_requested / 1024 / 1024 / 1024:.2f} GB / 18.00 GB ({total_memory_requested * 100 / TOTAL_MEM:.1f}%)",
     )
     log(
         "SUBMIT",
-        f"  -> Bandwidth requested: {total_bandwidth_requested*100:.0f}% (OVERCOMMIT DETECTED)",
+        f"  -> Bandwidth requested: {total_bandwidth_requested * 100:.0f}% (OVERCOMMIT DETECTED)",
     )
 
     # ========== Phase 4: Admission Control ==========
@@ -129,18 +130,18 @@ def run_simulation():
         log("ADMISSION", f"Evaluating task '{name}' (policy={policy})")
 
         if policy == "GUARANTEED":
-            log("ADMISSION", f"  [CHECK] Memory: {mem/1024/1024:.0f}MB <= available (PASS)")
-            log("ADMISSION", f"  [CHECK] Bandwidth: {bw*100:.0f}% guaranteed reservation (PASS)")
+            log("ADMISSION", f"  [CHECK] Memory: {mem / 1024 / 1024:.0f}MB <= available (PASS)")
+            log("ADMISSION", f"  [CHECK] Bandwidth: {bw * 100:.0f}% guaranteed reservation (PASS)")
             log("ADMISSION", "  [CHECK] Priority: 100 (highest tier)")
             log("ADMISSION", "  -> ADMIT (guaranteed resources reserved)")
         elif policy == "BURSTABLE":
-            log("ADMISSION", f"  [CHECK] Memory: {mem/1024/1024:.0f}MB <= available (PASS)")
-            log("ADMISSION", f"  [CHECK] Bandwidth: {bw*100:.0f}% soft limit (may throttle)")
+            log("ADMISSION", f"  [CHECK] Memory: {mem / 1024 / 1024:.0f}MB <= available (PASS)")
+            log("ADMISSION", f"  [CHECK] Bandwidth: {bw * 100:.0f}% soft limit (may throttle)")
             log("ADMISSION", "  [CHECK] Priority: 50 (mid tier)")
             log("ADMISSION", "  -> ADMIT (burst capacity available)")
         else:  # BEST_EFFORT
-            log("ADMISSION", f"  [CHECK] Memory: {mem/1024/1024:.0f}MB (opportunistic)")
-            log("ADMISSION", f"  [CHECK] Bandwidth: {bw*100:.0f}% (no guarantee)")
+            log("ADMISSION", f"  [CHECK] Memory: {mem / 1024 / 1024:.0f}MB (opportunistic)")
+            log("ADMISSION", f"  [CHECK] Bandwidth: {bw * 100:.0f}% (no guarantee)")
             log("ADMISSION", "  [CHECK] Priority: 10 (lowest tier)")
             log("ADMISSION", "  -> ADMIT (best-effort, may be preempted)")
 
@@ -182,15 +183,18 @@ def run_simulation():
         log("ALLOC", f"Block {block_id}: {size_mb}MB for '{name}'")
         log(
             "ALLOC",
-            f"  -> Size class: {size_class/1024/1024:.0f}MB, Internal frag: {(size_class-size_bytes)*100/size_class:.1f}%",
+            f"  -> Size class: {size_class / 1024 / 1024:.0f}MB, Internal frag: {(size_class - size_bytes) * 100 / size_class:.1f}%",
         )
 
     stats = pool.stats()
     separator()
     log("MEMPOOL", f"Allocation complete: {stats.active_blocks} active blocks")
-    log("MEMPOOL", f"  -> Used: {stats.used/1024/1024/1024:.2f} GB ({stats.used*100/QUOTA:.1f}%)")
-    log("MEMPOOL", f"  -> Cached: {stats.cached/1024/1024:.0f} MB")
-    log("MEMPOOL", f"  -> Available: {stats.available/1024/1024/1024:.2f} GB")
+    log(
+        "MEMPOOL",
+        f"  -> Used: {stats.used / 1024 / 1024 / 1024:.2f} GB ({stats.used * 100 / QUOTA:.1f}%)",
+    )
+    log("MEMPOOL", f"  -> Cached: {stats.cached / 1024 / 1024:.0f} MB")
+    log("MEMPOOL", f"  -> Available: {stats.available / 1024 / 1024 / 1024:.2f} GB")
     log("MEMPOOL", f"  -> cudaMalloc count: {stats.cudamalloc_count}")
     log("MEMPOOL", f"  -> Reuse count: {stats.reuse_count}")
 
@@ -279,7 +283,7 @@ def run_simulation():
         if start_ms + duration_ms <= 65:
             log(
                 "COMPLETE",
-                f"T+{start_ms+duration_ms:03d}ms: '{name}' FINISH (duration={duration_ms}ms)",
+                f"T+{start_ms + duration_ms:03d}ms: '{name}' FINISH (duration={duration_ms}ms)",
             )
             if tid:
                 sched.complete_task(tid)
@@ -298,10 +302,10 @@ def run_simulation():
     # Memory stats
     log("STATS", "=== Memory Pool Statistics ===")
     final_stats = pool.stats()
-    log("STATS", f"  Quota:           {final_stats.quota/1024/1024/1024:.2f} GB")
+    log("STATS", f"  Quota:           {final_stats.quota / 1024 / 1024 / 1024:.2f} GB")
     log("STATS", "  Peak Used:       13.86 GB (77.0%)")
-    log("STATS", f"  Final Used:      {final_stats.used/1024/1024/1024:.2f} GB")
-    log("STATS", f"  Cached:          {final_stats.cached/1024/1024/1024:.2f} GB")
+    log("STATS", f"  Final Used:      {final_stats.used / 1024 / 1024 / 1024:.2f} GB")
+    log("STATS", f"  Cached:          {final_stats.cached / 1024 / 1024 / 1024:.2f} GB")
     log("STATS", f"  Allocations:     {final_stats.allocation_count}")
     log("STATS", f"  cudaMalloc:      {final_stats.cudamalloc_count}")
     log("STATS", f"  Reuse:           {final_stats.reuse_count}")
@@ -314,7 +318,7 @@ def run_simulation():
     log("STATS", f"  Tasks Submitted: {sched_stats.total_submitted}")
     log("STATS", f"  Tasks Completed: {sched_stats.completed_count}")
     log("STATS", f"  Tasks Failed:    {sched_stats.failed_count}")
-    log("STATS", f"  Avg Wait Time:   {sched_stats.avg_wait_time*1000:.2f} ms")
+    log("STATS", f"  Avg Wait Time:   {sched_stats.avg_wait_time * 1000:.2f} ms")
     log("STATS", "  Avg Exec Time:   12.5 ms")
 
     separator()

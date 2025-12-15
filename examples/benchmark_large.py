@@ -34,5 +34,5 @@ for size in sizes:
     gflops = flops / (gpu_ms / 1000) / 1e9
 
     print(
-        f"{size}x{size}: NumPy={numpy_ms:.1f}ms, GPU={gpu_ms:.1f}ms, Speedup={numpy_ms/gpu_ms:.1f}x, {gflops:.0f} GFLOPS"
+        f"{size}x{size}: NumPy={numpy_ms:.1f}ms, GPU={gpu_ms:.1f}ms, Speedup={numpy_ms / gpu_ms:.1f}x, {gflops:.0f} GFLOPS"
     )

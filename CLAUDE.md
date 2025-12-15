@@ -362,6 +362,99 @@ store_matrix_sync(C, c_frag, N, mem_row_major);
 
 ---
 
+## TF32 Optimization Research (Issue #53)
+
+### Current Performance Status
+
+| Metric | Value |
+|--------|-------|
+| Current | **27.38 TFLOPS** (8192×8192) |
+| RTX 3090 Ti TF32 Theoretical | ~40 TFLOPS |
+| cuBLAS Reference | ~59 TFLOPS |
+| Gap to cuBLAS | **47%** |
+
+### Current Implementation Parameters
+
+```
+Block Tile: BM=128, BN=128, BK=16
+Warp Tile: WARP_TILES_M=2, WARP_TILES_N=8 (32×64 per warp)
+MMA Instruction: mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32
+Pipeline: 2-stage double buffering
+Thread Block: 256 threads (8 warps)
+Shared Memory: ~37KB/block → occupancy ~16.7%
+```
+
+### CUTLASS Optimization Techniques
+
+#### 1. Swizzled Shared Memory Layout (High Priority)
+
+Current implementation uses simple padding (`A_PAD=4, B_PAD=4`) but bank conflicts are not fully eliminated.
+
+**CUTLASS Approach:**
+```cpp
+// XOR-based swizzle pattern
+int store_column = (lane_id % 8) ^ (lane_id / 8);
+```
+
+- Store and Load phases use transposed index relationship
+- XOR operation applied per 8×8 block unit
+- Combined with `ldmatrix` for fully bank conflict-free access
+
+**Key Insight:**
+> "the indexing in the 'Loading from Shared Memory to Registers' slide is transposed from the indexing in 'Load from Global/Store to Shared' slide."
+
+#### 2. ldmatrix Instruction (High Priority)
+
+Current implementation manually loads from shared memory to registers:
+```cpp
+// Current implementation
+float a0 = smA[curr][tile_m + a_row_base][kk + a_col_base];
+```
+
+**CUTLASS Approach:**
+- Uses `ldmatrix.sync.aligned.m8n8.x4.shared.b16`
+- Single instruction loads four 8×8 matrices (entire warp)
+
+**TF32 Limitation:**
+> "ldmatrix cannot transpose 32-bit data. CUTLASS uses 32-bit shared memory load to load data from shared memory to the registers to do the transpose right before calling tf32 tensor core."
+
+#### 3. Multi-stage Pipeline (Medium-High Priority)
+
+Current: 2-stage → CUTLASS default: **4-stage**
+
+**Past Failed Attempt:**
+> "3-stage pipeline: -28% (50% more smem reduced occupancy)"
+
+**Considerations:**
+- Trade-off between shared memory usage and occupancy
+- RTX 3090 Ti: 100KB/SM available
+- Current 37KB → 4-stage at ~74KB should fit
+
+### Recommended Implementation Order
+
+| Priority | Optimization | Expected Gain | Difficulty |
+|----------|-------------|---------------|------------|
+| 1 | Swizzled shared memory layout | +10-15% | Medium |
+| 2 | 4-stage pipeline (proper smem sizing) | +5-10% | Medium |
+| 3 | Warp tile tuning (BM/BN/BK re-tuning) | +5-10% | Low |
+| 4 | Epilogue fusion (bias + activation) | Memory reduction | Medium |
+
+### Path to 35 TFLOPS
+
+- Current: 27.38 TFLOPS (68% of target)
+- Swizzle + 4-stage: 32-34 TFLOPS expected
+- Fine-tuning: 35+ TFLOPS
+
+### Reference Materials
+
+- [CUTLASS TF32 GEMM Example](https://github.com/NVIDIA/cutlass/blob/main/examples/14_ampere_tf32_tensorop_gemm/ampere_tf32_tensorop_gemm.cu)
+- [CUTLASS Efficient GEMM Documentation](https://docs.nvidia.com/cutlass/latest/media/docs/cpp/efficient_gemm.html)
+- [CUTLASS Swizzled Layouts Discussion](https://github.com/NVIDIA/cutlass/discussions/1130)
+- [Understanding CUTLASS Permuted Shared Memory](https://forums.developer.nvidia.com/t/understanding-cutlass-permuted-shared-memory-layout/303697)
+- [Dissecting Tensor Cores (Academic Paper)](https://arxiv.org/pdf/2206.02874)
+
+---
+
 ## Development Workflow
 
 ### Kernel Development Cycle
@@ -372,12 +465,48 @@ Edit → Build → Validate → Benchmark → Commit
 
 **Always commit after validation and benchmark, regardless of results.**
 
+### Pre-Commit Checks (MANDATORY)
+
+**Before EVERY commit, run these checks:**
+
+```bash
+# 1. Ruff lint check (auto-fix and format)
+git ls-files "*.py" | xargs python -m ruff check --fix
+git ls-files "*.py" | xargs python -m ruff format
+
+# 2. Mypy type check
+python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined
+```
+
+**NEVER commit without passing ALL checks.** CI will reject PRs with lint/type errors.
+
+### PR Checklist (MANDATORY before `gh pr create`)
+
+Before creating a PR, verify ALL of the following:
+
+```bash
+# 1. Lint passes
+git ls-files "*.py" | xargs python -m ruff check
+
+# 2. Mypy passes
+python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined
+
+# 3. Tests pass
+python -m pytest tests/ -v
+
+# 4. Benchmark runs (optional but recommended)
+python benchmark.py --quick
+```
+
+**DO NOT create PR until all checks pass locally.**
+
 ### Commit Rules
 
-1. Commit after every validation/benchmark completion, regardless of outcome
-2. Include benchmark results in commit message
-3. Never proceed to next kernel edit until commit is complete
-4. Never overwrite a working kernel without committing first
+1. **Run lint check before commit** (see above)
+2. Commit after every validation/benchmark completion, regardless of outcome
+3. Include benchmark results in commit message
+4. Never proceed to next kernel edit until commit is complete
+5. Never overwrite a working kernel without committing first
 
 ### Commit Message Format
 
@@ -409,6 +538,34 @@ If performance or correctness degrades:
 - Prevent losing fast kernel versions
 - Track performance changes over time
 - Preserve trial-and-error history
+
+### Benchmarking
+
+**Always use `benchmark.py` for performance measurement.**
+
+```bash
+# Full benchmark (all dtypes, all sizes)
+python benchmark.py
+
+# Quick mode (fewer warmup/iterations)
+python benchmark.py --quick
+
+# Specific sizes
+python benchmark.py --sizes 4096 8192
+
+# TF32 kernel version selection
+python benchmark.py --tf32-version v1   # WMMA API
+python benchmark.py --tf32-version v2   # PTX mma.sync (default)
+```
+
+**Output includes:**
+- Kernel-only timing (no D2H copy overhead)
+- Correctness verification (relative error)
+- README.md-ready table format
+
+**Environment Variables:**
+- `PYGPUKIT_ALLOW_TF32=1` - Enable TF32 TensorCore
+- `PYGPUKIT_TF32_V2=1` - Use PTX mma.sync kernel (default when TF32 enabled)
 
 ---
 

@@ -70,9 +70,9 @@ try:
 
     max_diff = np.max(np.abs(result_np - expected))
     print(f"   Elements: {n:,}")
-    print(f"   GPU time: {gpu_time*1000:.3f} ms")
-    print(f"   CPU time: {cpu_time*1000:.3f} ms")
-    print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+    print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+    print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+    print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
     print(f"   Max diff: {max_diff:.2e}")
 
     # Test 2: Matrix multiplication chain
@@ -99,9 +99,9 @@ try:
 
     rel_error = np.max(np.abs(result_np - expected)) / np.max(np.abs(expected))
     print(f"   Size: {M}x{M}")
-    print(f"   GPU time: {gpu_time*1000:.3f} ms")
-    print(f"   CPU time: {cpu_time*1000:.3f} ms")
-    print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+    print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+    print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+    print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
     print(f"   Rel error: {rel_error:.2e}")
 
     # Test 3: Large single operation (where data transfer dominates)
@@ -139,12 +139,12 @@ try:
     gflops = 2 * M * M * M / gpu_compute / 1e9
     transfer_overhead = (gpu_total - gpu_compute) / gpu_total * 100
 
-    print(f"   GPU total: {gpu_total*1000:.3f} ms (with H<->D transfer)")
-    print(f"   GPU compute: {gpu_compute*1000:.3f} ms (data on GPU)")
-    print(f"   CPU time: {cpu_time*1000:.3f} ms")
+    print(f"   GPU total: {gpu_total * 1000:.3f} ms (with H<->D transfer)")
+    print(f"   GPU compute: {gpu_compute * 1000:.3f} ms (data on GPU)")
+    print(f"   CPU time: {cpu_time * 1000:.3f} ms")
     print(f"   Transfer overhead: {transfer_overhead:.1f}%")
     print(f"   GPU GFLOPS: {gflops:.1f}")
-    print(f"   Speedup (compute only): {cpu_time/gpu_compute:.2f}x")
+    print(f"   Speedup (compute only): {cpu_time / gpu_compute:.2f}x")
 
     # Test 4: Many small operations
     print("\n4. Many Small Operations: 100x add of 10K elements")
@@ -171,9 +171,9 @@ try:
         result_cpu = result_cpu + b_np
     cpu_time = time.perf_counter() - start
 
-    print(f"   GPU time: {gpu_time*1000:.3f} ms")
-    print(f"   CPU time: {cpu_time*1000:.3f} ms")
-    print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+    print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+    print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+    print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
 
     print("\n" + "=" * 70)
     print("Summary: Zero-copy operations significantly reduce overhead for")

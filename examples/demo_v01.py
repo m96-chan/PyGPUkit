@@ -119,9 +119,9 @@ result = C.to_numpy()  # Force sync
 elapsed = time.perf_counter() - start
 
 print(f"Matrix multiplication {size}x{size}:")
-print(f"  Time: {elapsed*1000:.2f} ms")
+print(f"  Time: {elapsed * 1000:.2f} ms")
 print(f"  Result shape: {C.shape}")
-print(f"  Result sample [0,0]: {result[0,0]:.4f}")
+print(f"  Result sample [0,0]: {result[0, 0]:.4f}")
 
 # Verify correctness
 A_np = A.to_numpy()

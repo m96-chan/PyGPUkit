@@ -6,9 +6,17 @@ namespace pygpukit {
 
 namespace {
 
+// Convert nvrtc::Result to NvrtcErrorCode
+NvrtcErrorCode to_error_code(nvrtc::Result result) {
+    return static_cast<NvrtcErrorCode>(static_cast<int>(result));
+}
+
 void check_nvrtc_error(nvrtc::Result result, const char* msg) {
     if (result != nvrtc::Result::Success) {
-        throw NvrtcError(std::string(msg) + ": " + nvrtc::get_error_string(result));
+        throw NvrtcError(
+            std::string(msg) + ": " + nvrtc::get_error_string(result),
+            to_error_code(result)
+        );
     }
 }
 
@@ -17,7 +25,8 @@ void ensure_nvrtc_available() {
         throw NvrtcError(
             "NVRTC is not available. JIT compilation of custom kernels requires NVRTC. "
             "Pre-compiled GPU operations (matmul, add, mul) work without NVRTC. "
-            "For custom kernels, see: https://developer.nvidia.com/cuda-downloads"
+            "For custom kernels, see: https://developer.nvidia.com/cuda-downloads",
+            NvrtcErrorCode::NotLoaded
         );
     }
 }
@@ -76,7 +85,11 @@ CompiledPTX compile_to_ptx(
 
     if (result != nvrtc::Result::Success) {
         nvrtc::destroy_program(&prog);
-        throw NvrtcError("Compilation failed: " + log);
+        throw NvrtcError(
+            "Compilation failed: " + log,
+            NvrtcErrorCode::Compilation,
+            log
+        );
     }
 
     // Get PTX

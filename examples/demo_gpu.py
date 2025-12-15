@@ -69,9 +69,9 @@ try:
 
         # Verify
         max_diff = np.max(np.abs(c_result - c_cpu))
-        print(f"   GPU time: {gpu_time*1000:.3f} ms")
-        print(f"   CPU time: {cpu_time*1000:.3f} ms")
-        print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+        print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+        print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+        print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
         print(f"   Max diff: {max_diff:.2e} (should be ~0)")
 
         # Test 2: Element-wise Multiply
@@ -88,9 +88,9 @@ try:
         cpu_time = time.perf_counter() - start
 
         max_diff = np.max(np.abs(c_result - c_cpu))
-        print(f"   GPU time: {gpu_time*1000:.3f} ms")
-        print(f"   CPU time: {cpu_time*1000:.3f} ms")
-        print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+        print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+        print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+        print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
         print(f"   Max diff: {max_diff:.2e}")
 
         # Test 3: Matrix Multiplication
@@ -114,9 +114,9 @@ try:
 
         max_diff = np.max(np.abs(C_result - C_cpu))
         rel_error = max_diff / np.max(np.abs(C_cpu))
-        print(f"   GPU time: {gpu_time*1000:.3f} ms")
-        print(f"   CPU time: {cpu_time*1000:.3f} ms")
-        print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+        print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+        print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+        print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
         print(f"   Max diff: {max_diff:.2e}")
         print(f"   Rel error: {rel_error:.2e}")
 
@@ -136,7 +136,7 @@ try:
         kernel = native.JITKernel(kernel_src, "scale_add")
         compile_time = time.perf_counter() - start
 
-        print(f"   Compilation time: {compile_time*1000:.3f} ms")
+        print(f"   Compilation time: {compile_time * 1000:.3f} ms")
         print(f"   Kernel compiled: {kernel.is_compiled}")
         print(f"   PTX length: {len(kernel.ptx)} bytes")
 
@@ -164,9 +164,9 @@ try:
         cpu_time = time.perf_counter() - start
 
         gflops = 2 * M * N * K / gpu_time / 1e9
-        print(f"   GPU time: {gpu_time*1000:.3f} ms")
-        print(f"   CPU time: {cpu_time*1000:.3f} ms")
-        print(f"   Speedup: {cpu_time/gpu_time:.2f}x")
+        print(f"   GPU time: {gpu_time * 1000:.3f} ms")
+        print(f"   CPU time: {cpu_time * 1000:.3f} ms")
+        print(f"   Speedup: {cpu_time / gpu_time:.2f}x")
         print(f"   GPU GFLOPS: {gflops:.1f}")
 
         print("\n" + "=" * 60)
