@@ -24,7 +24,6 @@ Output format matches README.md tables for easy updates.
 
 import argparse
 import os
-import sys
 import time
 from dataclasses import dataclass
 
@@ -33,9 +32,7 @@ import numpy as np
 # =============================================================================
 # Setup CUDA DLL path (Windows)
 # =============================================================================
-cuda_path = os.environ.get(
-    "CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
-)
+cuda_path = os.environ.get("CUDA_PATH", r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4")
 cuda_bin = os.path.join(cuda_path, "bin")
 if os.path.isdir(cuda_bin):
     if cuda_bin not in os.environ.get("PATH", ""):
@@ -79,9 +76,11 @@ def get_native_module():
         return _native_module
     try:
         import _pygpukit_native as native
+
         _native_module = native
     except ImportError:
         from pygpukit import _pygpukit_native as native
+
         _native_module = native
     return _native_module
 
@@ -96,8 +95,9 @@ def get_gpu_info() -> GPUInfo:
 
     try:
         import pygpukit as gpk
+
         nvrtc = gpk.is_nvrtc_available()
-    except:
+    except Exception:
         nvrtc = False
 
     return GPUInfo(
@@ -152,7 +152,9 @@ def benchmark_fp32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
     )
 
 
-def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10, use_v2: bool = True) -> BenchmarkResult:
+def benchmark_tf32(
+    size: int, warmup: int = 5, iterations: int = 10, use_v2: bool = True
+) -> BenchmarkResult:
     """Benchmark TF32 TensorCore matmul.
 
     Uses environment variables to control kernel selection:
@@ -434,14 +436,26 @@ def print_readme_table(results: list, sizes: list):
 # =============================================================================
 def main():
     parser = argparse.ArgumentParser(description="PyGPUkit Comprehensive Benchmark")
-    parser.add_argument("--sizes", type=str, default="2048,4096,8192",
-                        help="Comma-separated matrix sizes (default: 2048,4096,8192)")
-    parser.add_argument("--quick", action="store_true",
-                        help="Quick mode: fewer iterations")
-    parser.add_argument("--dtypes", type=str, default="fp32,tf32,fp16,bf16",
-                        help="Comma-separated dtypes to benchmark")
-    parser.add_argument("--tf32-version", type=str, default="v2", choices=["v1", "v2"],
-                        help="TF32 kernel version: v1 (WMMA) or v2 (PTX mma.sync, default)")
+    parser.add_argument(
+        "--sizes",
+        type=str,
+        default="2048,4096,8192",
+        help="Comma-separated matrix sizes (default: 2048,4096,8192)",
+    )
+    parser.add_argument("--quick", action="store_true", help="Quick mode: fewer iterations")
+    parser.add_argument(
+        "--dtypes",
+        type=str,
+        default="fp32,tf32,fp16,bf16",
+        help="Comma-separated dtypes to benchmark",
+    )
+    parser.add_argument(
+        "--tf32-version",
+        type=str,
+        default="v2",
+        choices=["v1", "v2"],
+        help="TF32 kernel version: v1 (WMMA) or v2 (PTX mma.sync, default)",
+    )
     args = parser.parse_args()
 
     sizes = [int(s.strip()) for s in args.sizes.split(",")]
