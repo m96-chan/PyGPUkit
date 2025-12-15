@@ -399,6 +399,30 @@ PyGPUkit/
 
 ---
 
+## API Stability & Backward Compatibility
+
+### Version Policy
+- **v0.2.x**: Backward compatible within minor versions. New features may be added, but existing APIs remain stable.
+- **v0.3+**: May introduce breaking changes with deprecation warnings in prior version.
+
+### Stable Public API (v0.2.x)
+All functions exported via `pygpukit.*` are part of the stable public API:
+
+| Category | Functions |
+|----------|-----------|
+| **Factory** | `zeros`, `ones`, `empty`, `from_numpy` |
+| **Elementwise** | `add`, `sub`, `mul`, `div` |
+| **Math** | `exp`, `log`, `relu`, `gelu` |
+| **Matrix** | `matmul`, `transpose` |
+| **Reductions** | `sum`, `mean`, `max` |
+| **Neural** | `layernorm`, `bias_add_inplace`, `linear_bias_gelu` |
+| **Types** | `GPUArray`, `DataType`, `float32`, `float64`, `float16`, `bfloat16` |
+
+### Deprecation Policy
+APIs to be removed will emit `DeprecationWarning` for at least one minor version before removal.
+
+---
+
 ## Contributing
 Contributions and discussions are welcome!
 Please open Issues for feature requests, bugs, or design proposals.
