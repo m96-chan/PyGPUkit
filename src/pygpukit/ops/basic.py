@@ -771,3 +771,111 @@ def _bias_add_inplace_native(output: GPUArray, bias: GPUArray) -> None:
     output_native = output._get_native()
     bias_native = bias._get_native()
     native.bias_add_inplace(output_native, bias_native)
+
+
+# ============================================================================
+# Fused Operations (CUTLASS Epilogue Fusion)
+# ============================================================================
+
+
+def linear_bias_gelu(
+    input: GPUArray,
+    weight: GPUArray,
+    bias: GPUArray,
+) -> GPUArray:
+    """Fused linear + bias + GELU operation.
+
+    Computes: output = gelu(input @ weight^T + bias)
+
+    This uses CUTLASS TensorCore epilogue fusion for efficiency,
+    avoiding intermediate memory writes.
+
+    Args:
+        input: Input array of shape [batch, in_features].
+        weight: Weight array of shape [out_features, in_features].
+        bias: Bias array of shape [out_features].
+
+    Returns:
+        A new GPUArray of shape [batch, out_features].
+
+    Raises:
+        ValueError: If shapes or dtypes don't match.
+        RuntimeError: If dimensions are not multiples of 16 (TensorCore requirement).
+
+    Note:
+        This operation requires dimensions to be multiples of 16 for
+        TensorCore compatibility. Use separate matmul + bias_add + gelu
+        for non-aligned dimensions.
+    """
+    _validate_float_dtype(input, "linear_bias_gelu")
+
+    if input.ndim != 2:
+        raise ValueError(
+            f"linear_bias_gelu expects 2D input [batch, in_features], got {input.ndim}D"
+        )
+    if weight.ndim != 2:
+        raise ValueError(
+            f"linear_bias_gelu expects 2D weight [out_features, in_features], got {weight.ndim}D"
+        )
+    if bias.ndim != 1:
+        raise ValueError(f"linear_bias_gelu expects 1D bias [out_features], got {bias.ndim}D")
+
+    if input.dtype != weight.dtype or input.dtype != bias.dtype:
+        raise ValueError("linear_bias_gelu: all inputs must have same dtype")
+
+    in_features = input.shape[1]
+    out_features = weight.shape[0]
+
+    if weight.shape[1] != in_features:
+        raise ValueError(
+            f"linear_bias_gelu: weight.shape[1]={weight.shape[1]} must match "
+            f"input.shape[1]={in_features}"
+        )
+    if bias.shape[0] != out_features:
+        raise ValueError(
+            f"linear_bias_gelu: bias.shape[0]={bias.shape[0]} must match "
+            f"weight.shape[0]={out_features}"
+        )
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _linear_bias_gelu_native(input, weight, bias)
+    else:
+        return _linear_bias_gelu_cpu(input, weight, bias)
+
+
+def _linear_bias_gelu_cpu(
+    input: GPUArray,
+    weight: GPUArray,
+    bias: GPUArray,
+) -> GPUArray:
+    """CPU implementation of linear_bias_gelu."""
+    x = input.to_numpy()
+    w = weight.to_numpy()
+    b = bias.to_numpy()
+
+    # Linear: y = x @ w.T + b
+    y = x @ w.T + b
+
+    # GELU approximation (same as GPU kernel)
+    sqrt_2_over_pi = np.sqrt(2.0 / np.pi)
+    result = y * 0.5 * (1.0 + np.tanh(sqrt_2_over_pi * (y + 0.044715 * y**3)))
+
+    return from_numpy(result.astype(x.dtype))
+
+
+def _linear_bias_gelu_native(
+    input: GPUArray,
+    weight: GPUArray,
+    bias: GPUArray,
+) -> GPUArray:
+    """Native C++ CUDA implementation of linear_bias_gelu (CUTLASS fused kernel)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    weight_native = weight._get_native()
+    bias_native = bias._get_native()
+    c_native = native.linear_bias_gelu(input_native, weight_native, bias_native)
+    return GPUArray._wrap_native(c_native)

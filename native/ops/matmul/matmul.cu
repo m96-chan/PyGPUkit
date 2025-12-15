@@ -5,6 +5,7 @@
 #include "../common/error.cuh"
 #include "../common/device.cuh"
 #include "../../core/memory.hpp"
+#include "../ops.cuh"  // For transpose()
 
 // Include existing optimized kernels
 #include "../matmul_f32_ampere.cuh"
@@ -23,6 +24,11 @@ extern "C" {
     cudaError_t cutlass_gemm_fp16(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream);
     cudaError_t cutlass_gemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K, cudaStream_t stream);
     bool cutlass_is_compatible(int M, int N, int K);
+
+    // BiasGELU fused operations
+    cudaError_t cutlass_gemm_tf32_bias_gelu(const float* A, const float* B, const float* bias, float* D, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_fp16_bias_gelu(const __half* A, const __half* B, const __half* bias, __half* D, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_bf16_bias_gelu(const __nv_bfloat16* A, const __nv_bfloat16* B, const __nv_bfloat16* bias, __nv_bfloat16* D, int M, int N, int K, cudaStream_t stream);
 }
 
 namespace pygpukit {
@@ -455,6 +461,111 @@ GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32) {
     GPUArray c({M, N}, a.dtype());
     matmul_impl(a, b, c, use_tf32);
     return c;
+}
+
+// ============================================================================
+// Fused Operations (CUTLASS Epilogue Fusion)
+// ============================================================================
+
+GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias) {
+    // Validate shapes: input [batch, in_features], weight [out_features, in_features], bias [out_features]
+    if (input.ndim() != 2) {
+        throw std::runtime_error("linear_bias_gelu: input must be 2D [batch, in_features]");
+    }
+    if (weight.ndim() != 2) {
+        throw std::runtime_error("linear_bias_gelu: weight must be 2D [out_features, in_features]");
+    }
+    if (bias.ndim() != 1) {
+        throw std::runtime_error("linear_bias_gelu: bias must be 1D [out_features]");
+    }
+
+    size_t batch = input.shape()[0];
+    size_t in_features = input.shape()[1];
+    size_t out_features = weight.shape()[0];
+
+    if (weight.shape()[1] != in_features) {
+        throw std::runtime_error("linear_bias_gelu: weight.shape[1] must match input.shape[1]");
+    }
+    if (bias.shape()[0] != out_features) {
+        throw std::runtime_error("linear_bias_gelu: bias.shape[0] must match weight.shape[0]");
+    }
+
+    // Validate dtypes
+    if (input.dtype() != weight.dtype() || input.dtype() != bias.dtype()) {
+        throw std::runtime_error("linear_bias_gelu: all inputs must have the same dtype");
+    }
+
+    // Check CUTLASS compatibility
+    // For linear: M = batch, K = in_features, N = out_features
+    // But we compute: output = gelu(input @ weight^T + bias)
+    // Which is: [batch, in_features] @ [in_features, out_features] -> [batch, out_features]
+    // So for CUTLASS: M = batch, K = in_features, N = out_features
+    if (!cutlass_is_compatible(batch, out_features, in_features)) {
+        throw std::runtime_error("linear_bias_gelu: dimensions must be multiples of 16 for TensorCore");
+    }
+
+    // Allocate output
+    GPUArray output({batch, out_features}, input.dtype());
+
+    // For linear y = gelu(x @ W^T + b), we need to compute:
+    // output [batch, out] = gelu(input [batch, in] @ weight^T [in, out] + bias [out])
+    //
+    // The BiasGELU kernel computes: D = gelu(A @ B + bias)
+    // With transpose trick: D^T = gelu(B^T @ A^T + bias)
+    //
+    // For weight [out, in] row-major = weight^T [in, out] col-major in memory
+    // We need to pass arguments such that the kernel computes the correct result.
+    //
+    // Using the existing gemm_*_bias_gelu(A, B, bias, D) which computes D = gelu(A @ B + bias):
+    // We need to transform our problem:
+    //   output = gelu(input @ weight^T + bias)
+    //
+    // Let A = input, B_needed = weight^T
+    // weight is [out, in], so weight^T is [in, out]
+    //
+    // Since weight [out, in] row-major != weight^T [in, out] row-major,
+    // we need to actually transpose weight.
+    //
+    // Efficient approach: transpose weight using the GPU transpose kernel
+    GPUArray weight_T = transpose(weight);  // [in_features, out_features]
+
+    cudaError_t err = cudaSuccess;
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            err = cutlass_gemm_tf32_bias_gelu(
+                static_cast<const float*>(input.data()),
+                static_cast<const float*>(weight_T.data()),
+                static_cast<const float*>(bias.data()),
+                static_cast<float*>(output.data()),
+                batch, out_features, in_features, nullptr);
+            break;
+        case DataType::Float16:
+            err = cutlass_gemm_fp16_bias_gelu(
+                static_cast<const __half*>(input.data()),
+                static_cast<const __half*>(weight_T.data()),
+                static_cast<const __half*>(bias.data()),
+                static_cast<__half*>(output.data()),
+                batch, out_features, in_features, nullptr);
+            break;
+        case DataType::BFloat16:
+            err = cutlass_gemm_bf16_bias_gelu(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<const __nv_bfloat16*>(weight_T.data()),
+                static_cast<const __nv_bfloat16*>(bias.data()),
+                static_cast<__nv_bfloat16*>(output.data()),
+                batch, out_features, in_features, nullptr);
+            break;
+        default:
+            throw std::runtime_error("linear_bias_gelu only supports float32, float16, and bfloat16");
+    }
+
+    if (err != cudaSuccess) {
+        throw std::runtime_error("CUTLASS BiasGELU kernel failed");
+    }
+
+    sync_and_check("linear_bias_gelu kernel failed");
+    return output;
 }
 
 } // namespace ops

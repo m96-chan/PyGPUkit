@@ -138,4 +138,15 @@ void init_ops_bindings(py::module_& m) {
     m.def("layernorm", &ops::layernorm,
           py::arg("input"), py::arg("gamma"), py::arg("beta"), py::arg("eps") = 1e-5f,
           "Layer normalization: (x - mean) / sqrt(var + eps) * gamma + beta");
+
+    // ========================================================================
+    // Fused Operations (CUTLASS Epilogue Fusion)
+    // ========================================================================
+
+    // Linear + BiasGELU (fused kernel)
+    m.def("linear_bias_gelu", &ops::linear_bias_gelu,
+          py::arg("input"), py::arg("weight"), py::arg("bias"),
+          "Fused linear + bias + GELU: output = gelu(input @ weight^T + bias)\n"
+          "Uses CUTLASS TensorCore epilogue fusion for efficiency.\n"
+          "input: [batch, in_features], weight: [out_features, in_features], bias: [out_features]");
 }

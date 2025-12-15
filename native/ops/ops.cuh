@@ -98,5 +98,15 @@ void bias_add_inplace(GPUArray& output, const GPUArray& bias);
 // input: [batch, features], gamma/beta: [features]
 GPUArray layernorm(const GPUArray& input, const GPUArray& gamma, const GPUArray& beta, float eps = 1e-5f);
 
+// ============================================================================
+// Fused Operations (CUTLASS Epilogue Fusion)
+// ============================================================================
+
+// Linear + BiasGELU: output = gelu(input @ weight^T + bias)
+// Fused kernel for efficient MLP layers
+// input: [batch, in_features], weight: [out_features, in_features], bias: [out_features]
+// output: [batch, out_features]
+GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias);
+
 } // namespace ops
 } // namespace pygpukit

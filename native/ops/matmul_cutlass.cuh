@@ -8,6 +8,11 @@
  * - FP32 (with TF32 TensorCore acceleration)
  * - FP16 (native TensorCore)
  * - BF16 (native TensorCore)
+ *
+ * Epilogue variants:
+ * - Default: D = alpha * A @ B + beta * C
+ * - Bias: D = A @ B + bias (with broadcast)
+ * - BiasGELU: D = gelu(A @ B + bias)
  */
 #pragma once
 
@@ -17,6 +22,8 @@
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/device/gemm.h"
+#include "cutlass/epilogue/thread/linear_combination.h"
+#include "cutlass/epilogue/thread/linear_combination_gelu.h"
 #include "cutlass/util/device_memory.h"
 
 namespace pygpukit {
@@ -98,6 +105,75 @@ using BF16Gemm = cutlass::gemm::device::Gemm<
     cutlass::epilogue::thread::LinearCombination<
         cutlass::bfloat16_t, 128 / cutlass::sizeof_bits<cutlass::bfloat16_t>::value,
         float, float>,                          // EpilogueOp (128-bit aligned)
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    4                                           // Stages
+>;
+
+// ============================================================================
+// BiasGELU GEMM Types (Epilogue Fusion: D = gelu(A @ B + bias))
+// ============================================================================
+
+// TF32 GEMM with BiasGELU epilogue
+// D = gelu(alpha * A @ B + beta * bias)
+// For bias broadcast: set bias stride = 0
+using TF32GemmBiasGELU = cutlass::gemm::device::Gemm<
+    float,                                      // ElementA
+    cutlass::layout::ColumnMajor,               // LayoutA
+    float,                                      // ElementB
+    cutlass::layout::ColumnMajor,               // LayoutB
+    float,                                      // ElementC (bias)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Ampere)
+    cutlass::gemm::GemmShape<128, 128, 16>,     // ThreadBlockShape
+    cutlass::gemm::GemmShape<64, 64, 16>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 8>,         // InstructionShape
+    cutlass::epilogue::thread::LinearCombinationGELU<
+        float, 128 / cutlass::sizeof_bits<float>::value,
+        float, float>,                          // BiasGELU epilogue
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    4                                           // Stages
+>;
+
+// FP16 GEMM with BiasGELU epilogue
+using FP16GemmBiasGELU = cutlass::gemm::device::Gemm<
+    cutlass::half_t,                            // ElementA
+    cutlass::layout::ColumnMajor,               // LayoutA
+    cutlass::half_t,                            // ElementB
+    cutlass::layout::ColumnMajor,               // LayoutB
+    cutlass::half_t,                            // ElementC (bias)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator (FP32 for precision)
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Ampere)
+    cutlass::gemm::GemmShape<128, 128, 32>,     // ThreadBlockShape
+    cutlass::gemm::GemmShape<64, 64, 32>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 16>,        // InstructionShape
+    cutlass::epilogue::thread::LinearCombinationGELU<
+        cutlass::half_t, 128 / cutlass::sizeof_bits<cutlass::half_t>::value,
+        float, float>,                          // BiasGELU epilogue
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    4                                           // Stages
+>;
+
+// BF16 GEMM with BiasGELU epilogue
+using BF16GemmBiasGELU = cutlass::gemm::device::Gemm<
+    cutlass::bfloat16_t,                        // ElementA
+    cutlass::layout::ColumnMajor,               // LayoutA
+    cutlass::bfloat16_t,                        // ElementB
+    cutlass::layout::ColumnMajor,               // LayoutB
+    cutlass::bfloat16_t,                        // ElementC (bias)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator (FP32 for precision)
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Ampere)
+    cutlass::gemm::GemmShape<128, 128, 32>,     // ThreadBlockShape
+    cutlass::gemm::GemmShape<64, 64, 32>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 16>,        // InstructionShape
+    cutlass::epilogue::thread::LinearCombinationGELU<
+        cutlass::bfloat16_t, 128 / cutlass::sizeof_bits<cutlass::bfloat16_t>::value,
+        float, float>,                          // BiasGELU epilogue
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     4                                           // Stages
 >;
@@ -288,6 +364,170 @@ inline cudaError_t gemm_bf16(
     }
 
     size_t workspace_size = BF16Gemm::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    status = gemm_op.initialize(arguments, workspace.get(), stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    status = gemm_op(stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    return cudaSuccess;
+}
+
+// ============================================================================
+// BiasGELU Wrapper functions
+// ============================================================================
+
+/**
+ * TF32 GEMM with fused BiasGELU: D = gelu(A @ B + bias)
+ *
+ * @param A Input matrix A (M x K), row-major, FP32
+ * @param B Input matrix B (K x N), row-major, FP32
+ * @param bias Bias vector (N), FP32 - broadcast across M dimension
+ * @param D Output matrix D (M x N), row-major, FP32
+ * @param M Number of rows in A and D
+ * @param N Number of columns in B and D (and length of bias)
+ * @param K Number of columns in A and rows in B
+ * @param stream CUDA stream
+ * @return cudaError_t
+ *
+ * Uses same transpose trick as base GEMM.
+ * Bias is broadcast using stride=0 in CUTLASS.
+ */
+inline cudaError_t gemm_tf32_bias_gelu(
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* D,
+    int M, int N, int K,
+    cudaStream_t stream = nullptr
+) {
+    // Transpose trick: D^T (NxM col) = B^T (NxK col) @ A^T (KxM col) + bias
+    // Bias is broadcast across all M columns (stride=0)
+    cutlass::gemm::GemmCoord problem_size(N, M, K);
+
+    // alpha=1, beta=1 for D = gelu(AB + bias)
+    typename TF32GemmBiasGELU::Arguments arguments{
+        problem_size,
+        {B, N},           // "A" operand: B^T (NxK col-major), ld = N
+        {A, K},           // "B" operand: A^T (KxM col-major), ld = K
+        {bias, 0},        // "C" operand: bias (N), stride=0 for broadcast
+        {D, N},           // D = output D^T (NxM col-major), ld = N
+        {1.0f, 1.0f}      // alpha=1, beta=1
+    };
+
+    TF32GemmBiasGELU gemm_op;
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    size_t workspace_size = TF32GemmBiasGELU::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    status = gemm_op.initialize(arguments, workspace.get(), stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    status = gemm_op(stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    return cudaSuccess;
+}
+
+/**
+ * FP16 GEMM with fused BiasGELU: D = gelu(A @ B + bias)
+ * Uses same transpose trick as TF32
+ */
+inline cudaError_t gemm_fp16_bias_gelu(
+    const __half* A,
+    const __half* B,
+    const __half* bias,
+    __half* D,
+    int M, int N, int K,
+    cudaStream_t stream = nullptr
+) {
+    cutlass::gemm::GemmCoord problem_size(N, M, K);
+
+    const cutlass::half_t* A_cutlass = reinterpret_cast<const cutlass::half_t*>(A);
+    const cutlass::half_t* B_cutlass = reinterpret_cast<const cutlass::half_t*>(B);
+    const cutlass::half_t* bias_cutlass = reinterpret_cast<const cutlass::half_t*>(bias);
+    cutlass::half_t* D_cutlass = reinterpret_cast<cutlass::half_t*>(D);
+
+    typename FP16GemmBiasGELU::Arguments arguments{
+        problem_size,
+        {B_cutlass, N},      // "A" = B^T (NxK col-major), ld = N
+        {A_cutlass, K},      // "B" = A^T (KxM col-major), ld = K
+        {bias_cutlass, 0},   // "C" = bias, stride=0 for broadcast
+        {D_cutlass, N},      // D = output
+        {1.0f, 1.0f}
+    };
+
+    FP16GemmBiasGELU gemm_op;
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    size_t workspace_size = FP16GemmBiasGELU::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    status = gemm_op.initialize(arguments, workspace.get(), stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    status = gemm_op(stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    return cudaSuccess;
+}
+
+/**
+ * BF16 GEMM with fused BiasGELU: D = gelu(A @ B + bias)
+ * Uses same transpose trick as TF32
+ */
+inline cudaError_t gemm_bf16_bias_gelu(
+    const __nv_bfloat16* A,
+    const __nv_bfloat16* B,
+    const __nv_bfloat16* bias,
+    __nv_bfloat16* D,
+    int M, int N, int K,
+    cudaStream_t stream = nullptr
+) {
+    cutlass::gemm::GemmCoord problem_size(N, M, K);
+
+    const cutlass::bfloat16_t* A_cutlass = reinterpret_cast<const cutlass::bfloat16_t*>(A);
+    const cutlass::bfloat16_t* B_cutlass = reinterpret_cast<const cutlass::bfloat16_t*>(B);
+    const cutlass::bfloat16_t* bias_cutlass = reinterpret_cast<const cutlass::bfloat16_t*>(bias);
+    cutlass::bfloat16_t* D_cutlass = reinterpret_cast<cutlass::bfloat16_t*>(D);
+
+    typename BF16GemmBiasGELU::Arguments arguments{
+        problem_size,
+        {B_cutlass, N},      // "A" = B^T (NxK col-major), ld = N
+        {A_cutlass, K},      // "B" = A^T (KxM col-major), ld = K
+        {bias_cutlass, 0},   // "C" = bias, stride=0 for broadcast
+        {D_cutlass, N},      // D = output
+        {1.0f, 1.0f}
+    };
+
+    BF16GemmBiasGELU gemm_op;
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    size_t workspace_size = BF16GemmBiasGELU::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
     status = gemm_op.initialize(arguments, workspace.get(), stream);

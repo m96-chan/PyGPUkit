@@ -2,10 +2,12 @@
 
 from pygpukit.ops.basic import (
     add,
+    bias_add_inplace,
     div,
     exp,
     gelu,
     layernorm,
+    linear_bias_gelu,
     log,
     matmul,
     max,
@@ -14,6 +16,7 @@ from pygpukit.ops.basic import (
     relu,
     sub,
     sum,
+    transpose,
 )
 
 __all__ = [
@@ -30,4 +33,7 @@ __all__ = [
     "sum",
     "mean",
     "max",
+    "transpose",
+    "bias_add_inplace",
+    "linear_bias_gelu",
 ]
