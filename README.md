@@ -103,18 +103,17 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 |---------|------|------|--------------|
 | **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only |
 | **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** (Driver-Only) | 17.7 TFLOPS | 28.2 TFLOPS | GPU drivers only |
-| **PyGPUkit** (Full) | 17.7 TFLOPS | 30.3 TFLOPS | GPU drivers + CUDA Toolkit |
+| **PyGPUkit** | 16.7 TFLOPS | 29.7 TFLOPS | GPU drivers only |
 
-> Driver-Only mode uses pre-compiled kernels. Full mode adds JIT compilation for custom kernels with slightly better TF32 optimization.
+> Built-in matmul kernels are pre-compiled. Driver-Only and Full (JIT) modes have identical matmul performance. JIT is only needed for custom kernels.
 
 ### PyGPUkit Performance by Matrix Size
 
 | Matrix Size | FP32 | TF32 | FP16 | BF16 |
 |-------------|------|------|------|------|
-| 2048×2048 | 4.0 TFLOPS | 4.0 TFLOPS | 2.0 TFLOPS | 2.0 TFLOPS |
-| 4096×4096 | 8.1 TFLOPS | 8.2 TFLOPS | 2.2 TFLOPS | 2.2 TFLOPS |
-| 8192×8192 | 12.7 TFLOPS | 13.0 TFLOPS | 2.3 TFLOPS | 2.2 TFLOPS |
+| 2048×2048 | 9.6 TFLOPS | 13.2 TFLOPS | 2.4 TFLOPS | 2.4 TFLOPS |
+| 4096×4096 | 14.7 TFLOPS | 22.8 TFLOPS | 2.4 TFLOPS | 2.3 TFLOPS |
+| 8192×8192 | 16.7 TFLOPS | 29.7 TFLOPS | 2.3 TFLOPS | 2.3 TFLOPS |
 
 > **Note:** FP16/BF16 matmul uses simple kernels with FP32 accumulation. TensorCore optimization planned for future releases (see [Issue #60](https://github.com/m96-chan/PyGPUkit/issues/60)).
 

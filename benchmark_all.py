@@ -2,12 +2,22 @@
 """
 PyGPUkit Comprehensive Benchmark
 
-Benchmarks all supported dtypes and runtime modes:
-- FP32, TF32, FP16, BF16
-- Driver-Only mode vs Full (JIT) mode
+Benchmarks all supported dtypes:
+- FP32 (Ampere optimized kernel)
+- TF32 v1 (WMMA TensorCore)
+- TF32 v2 (PTX mma.sync TensorCore, optimized)
+- FP16 (simple kernel, TensorCore planned)
+- BF16 (simple kernel, TensorCore planned)
+
+Runtime Modes:
+- Driver-Only: Uses pre-compiled kernels, no CUDA Toolkit needed
+- Full (JIT): Same kernels + JIT compilation for custom ops
+
+Note: Built-in matmul kernels are pre-compiled, so Driver-Only and Full
+modes have identical performance for matmul operations.
 
 Usage:
-    python benchmark_all.py [--sizes SIZES] [--quick]
+    python benchmark_all.py [--sizes SIZES] [--quick] [--tf32-version v1|v2]
 
 Output format matches README.md tables for easy updates.
 """
@@ -17,7 +27,6 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -62,6 +71,7 @@ class GPUInfo:
 # =============================================================================
 _native_module = None
 
+
 def get_native_module():
     """Get native module with fallback."""
     global _native_module
@@ -84,7 +94,6 @@ def get_gpu_info() -> GPUInfo:
     native = get_native_module()
     props = native.get_device_properties(0)
 
-    # Check NVRTC availability
     try:
         import pygpukit as gpk
         nvrtc = gpk.is_nvrtc_available()
@@ -100,7 +109,7 @@ def get_gpu_info() -> GPUInfo:
 
 
 def benchmark_fp32(size: int, warmup: int = 5, iterations: int = 10) -> BenchmarkResult:
-    """Benchmark FP32 matmul."""
+    """Benchmark FP32 matmul (Ampere optimized kernel)."""
     native = get_native_module()
 
     A = np.random.randn(size, size).astype(np.float32)
@@ -114,7 +123,7 @@ def benchmark_fp32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
     C_result = C_gpu.to_numpy()
     C_expected = A @ B
     rel_error = np.max(np.abs(C_result - C_expected)) / np.max(np.abs(C_expected))
-    correct = rel_error < 1e-3  # FP32 matmul has some numerical error due to order of operations
+    correct = rel_error < 1e-3
 
     # Warmup
     for _ in range(warmup):
@@ -143,9 +152,21 @@ def benchmark_fp32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
     )
 
 
-def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10) -> BenchmarkResult:
-    """Benchmark TF32 TensorCore matmul."""
+def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10, use_v2: bool = True) -> BenchmarkResult:
+    """Benchmark TF32 TensorCore matmul.
+
+    Uses environment variables to control kernel selection:
+    - PYGPUKIT_ALLOW_TF32=1: Enable TF32 kernels
+    - PYGPUKIT_TF32_V2=1: Use optimized v2 kernel (PTX mma.sync)
+    """
     native = get_native_module()
+
+    # Set environment for TF32
+    os.environ["PYGPUKIT_ALLOW_TF32"] = "1"
+    if use_v2:
+        os.environ["PYGPUKIT_TF32_V2"] = "1"
+    else:
+        os.environ.pop("PYGPUKIT_TF32_V2", None)
 
     A = np.random.randn(size, size).astype(np.float32)
     B = np.random.randn(size, size).astype(np.float32)
@@ -153,8 +174,8 @@ def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
     A_gpu = native.from_numpy(A)
     B_gpu = native.from_numpy(B)
 
-    # Correctness (TF32 tolerance is higher)
-    C_gpu = native.matmul_tf32(A_gpu, B_gpu, True)
+    # Correctness - use native.matmul which respects env vars
+    C_gpu = native.matmul(A_gpu, B_gpu)
     C_result = C_gpu.to_numpy()
     C_expected = A @ B
     rel_error = np.max(np.abs(C_result - C_expected)) / np.max(np.abs(C_expected))
@@ -162,13 +183,13 @@ def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
 
     # Warmup
     for _ in range(warmup):
-        _ = native.matmul_tf32(A_gpu, B_gpu, True)
+        _ = native.matmul(A_gpu, B_gpu)
 
     # Benchmark
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
-        _ = native.matmul_tf32(A_gpu, B_gpu, True)
+        _ = native.matmul(A_gpu, B_gpu)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
@@ -176,8 +197,9 @@ def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
     min_time = np.min(times)
     flops = 2.0 * size * size * size
 
+    version = "v2" if use_v2 else "v1"
     return BenchmarkResult(
-        dtype="TF32",
+        dtype=f"TF32 {version}",
         size=size,
         tflops_median=flops / median_time / 1e12,
         tflops_max=flops / min_time / 1e12,
@@ -188,7 +210,7 @@ def benchmark_tf32(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
 
 
 def benchmark_fp16(size: int, warmup: int = 5, iterations: int = 10) -> BenchmarkResult:
-    """Benchmark FP16 matmul."""
+    """Benchmark FP16 matmul (simple kernel, no TensorCore yet)."""
     native = get_native_module()
 
     A = np.random.randn(size, size).astype(np.float16)
@@ -201,7 +223,9 @@ def benchmark_fp16(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
     C_gpu = native.matmul(A_gpu, B_gpu)
     C_result = C_gpu.to_numpy()
     C_expected = (A.astype(np.float32) @ B.astype(np.float32)).astype(np.float16)
-    rel_error = np.max(np.abs(C_result.astype(np.float32) - C_expected.astype(np.float32))) / (np.max(np.abs(C_expected.astype(np.float32))) + 1e-7)
+    rel_error = np.max(np.abs(C_result.astype(np.float32) - C_expected.astype(np.float32))) / (
+        np.max(np.abs(C_expected.astype(np.float32))) + 1e-7
+    )
     correct = rel_error < 0.05
 
     # Warmup
@@ -232,7 +256,7 @@ def benchmark_fp16(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
 
 
 def benchmark_bf16(size: int, warmup: int = 5, iterations: int = 10) -> BenchmarkResult:
-    """Benchmark BF16 matmul."""
+    """Benchmark BF16 matmul (simple kernel, no TensorCore yet)."""
     native = get_native_module()
     import pygpukit as gpk
 
@@ -245,14 +269,13 @@ def benchmark_bf16(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
 
     # Correctness
     C_gpu = native.matmul(A_gpu, B_gpu)
-    # Convert result back to FP32 for comparison
     C_gpk = gpk.GPUArray._wrap_native(C_gpu).astype(gpk.float32)
     C_result = C_gpk.to_numpy()
     C_expected = A_fp32 @ B_fp32
     rel_error = np.max(np.abs(C_result - C_expected)) / (np.max(np.abs(C_expected)) + 1e-7)
     correct = rel_error < 0.05
 
-    # Re-create arrays for benchmark (previous ones consumed)
+    # Re-create arrays for benchmark
     A_gpu = gpk.from_numpy(A_fp32).astype(gpk.bfloat16)._get_native()
     B_gpu = gpk.from_numpy(B_fp32).astype(gpk.bfloat16)._get_native()
 
@@ -286,7 +309,7 @@ def benchmark_bf16(size: int, warmup: int = 5, iterations: int = 10) -> Benchmar
 # =============================================================================
 # Output Functions
 # =============================================================================
-def print_header(gpu_info: GPUInfo):
+def print_header(gpu_info: GPUInfo, tf32_version: str):
     """Print benchmark header."""
     print("=" * 70)
     print(" PyGPUkit Comprehensive Benchmark")
@@ -295,7 +318,10 @@ def print_header(gpu_info: GPUInfo):
     print(f"GPU: {gpu_info.name}")
     print(f"SM: {gpu_info.sm_major}.{gpu_info.sm_minor}")
     print(f"NVRTC (JIT): {'Available' if gpu_info.nvrtc_available else 'Not Available'}")
-    print(f"Mode: {'Full (Driver + JIT)' if gpu_info.nvrtc_available else 'Driver-Only'}")
+    print(f"TF32 Kernel: {tf32_version}")
+    print()
+    print("Note: Built-in matmul kernels are pre-compiled.")
+    print("      Driver-Only and Full modes have identical matmul performance.")
     print()
 
 
@@ -305,17 +331,17 @@ def print_correctness_results(results: list):
     print(" Correctness Verification")
     print("=" * 70)
     print()
-    print(f"{'Dtype':<8} {'Size':<12} {'Rel Error':<12} {'Status':<8}")
-    print("-" * 44)
+    print(f"{'Dtype':<12} {'Size':<12} {'Rel Error':<12} {'Status':<8}")
+    print("-" * 48)
 
     for r in results:
         status = "PASS" if r.correct else "FAIL"
-        print(f"{r.dtype:<8} {r.size}x{r.size:<6} {r.rel_error:<12.2e} {status:<8}")
+        print(f"{r.dtype:<12} {r.size}x{r.size:<6} {r.rel_error:<12.2e} {status:<8}")
     print()
 
 
 def print_benchmark_results(results: list, sizes: list):
-    """Print benchmark results in README-compatible table format."""
+    """Print benchmark results."""
     print("=" * 70)
     print(" Performance Results (TFLOPS)")
     print("=" * 70)
@@ -328,33 +354,40 @@ def print_benchmark_results(results: list, sizes: list):
             by_size[r.size] = {}
         by_size[r.size][r.dtype] = r
 
-    # Print table
-    print(f"{'Size':<14} {'FP32':<10} {'TF32':<10} {'FP16':<10} {'BF16':<10}")
-    print("-" * 54)
+    # Get all dtypes
+    all_dtypes = []
+    for r in results:
+        if r.dtype not in all_dtypes:
+            all_dtypes.append(r.dtype)
 
+    # Print header
+    header = f"{'Size':<14}"
+    for dt in all_dtypes:
+        header += f"{dt:<12}"
+    print(header)
+    print("-" * (14 + 12 * len(all_dtypes)))
+
+    # Print rows
     for size in sizes:
         if size not in by_size:
             continue
         row = by_size[size]
-        fp32 = row.get("FP32")
-        tf32 = row.get("TF32")
-        fp16 = row.get("FP16")
-        bf16 = row.get("BF16")
-
-        fp32_str = f"{fp32.tflops_median:.1f}" if fp32 else "-"
-        tf32_str = f"{tf32.tflops_median:.1f}" if tf32 else "-"
-        fp16_str = f"{fp16.tflops_median:.1f}" if fp16 else "-"
-        bf16_str = f"{bf16.tflops_median:.1f}" if bf16 else "-"
-
-        print(f"{size}x{size:<8} {fp32_str:<10} {tf32_str:<10} {fp16_str:<10} {bf16_str:<10}")
+        line = f"{size}x{size:<8}"
+        for dt in all_dtypes:
+            r = row.get(dt)
+            if r:
+                line += f"{r.tflops_median:<12.1f}"
+            else:
+                line += f"{'-':<12}"
+        print(line)
 
     print()
 
 
-def print_readme_table(results: list, sizes: list, mode: str):
+def print_readme_table(results: list, sizes: list):
     """Print README.md compatible markdown table."""
     print("=" * 70)
-    print(f" README.md Table ({mode})")
+    print(" README.md Table")
     print("=" * 70)
     print()
 
@@ -365,24 +398,33 @@ def print_readme_table(results: list, sizes: list, mode: str):
             by_size[r.size] = {}
         by_size[r.size][r.dtype] = r
 
-    print("| Matrix Size | FP32 | TF32 | FP16 | BF16 |")
-    print("|-------------|------|------|------|------|")
+    # Get dtypes
+    all_dtypes = []
+    for r in results:
+        if r.dtype not in all_dtypes:
+            all_dtypes.append(r.dtype)
+
+    # Print markdown table
+    header = "| Matrix Size |"
+    separator = "|-------------|"
+    for dt in all_dtypes:
+        header += f" {dt} |"
+        separator += "------|"
+    print(header)
+    print(separator)
 
     for size in sizes:
         if size not in by_size:
             continue
         row = by_size[size]
-        fp32 = row.get("FP32")
-        tf32 = row.get("TF32")
-        fp16 = row.get("FP16")
-        bf16 = row.get("BF16")
-
-        fp32_str = f"{fp32.tflops_median:.1f} TFLOPS" if fp32 else "-"
-        tf32_str = f"{tf32.tflops_median:.1f} TFLOPS" if tf32 else "-"
-        fp16_str = f"{fp16.tflops_median:.1f} TFLOPS" if fp16 else "-"
-        bf16_str = f"{bf16.tflops_median:.1f} TFLOPS" if bf16 else "-"
-
-        print(f"| {size}x{size} | {fp32_str} | {tf32_str} | {fp16_str} | {bf16_str} |")
+        line = f"| {size}x{size} |"
+        for dt in all_dtypes:
+            r = row.get(dt)
+            if r:
+                line += f" {r.tflops_median:.1f} TFLOPS |"
+            else:
+                line += " - |"
+        print(line)
 
     print()
 
@@ -398,23 +440,20 @@ def main():
                         help="Quick mode: fewer iterations")
     parser.add_argument("--dtypes", type=str, default="fp32,tf32,fp16,bf16",
                         help="Comma-separated dtypes to benchmark")
+    parser.add_argument("--tf32-version", type=str, default="v2", choices=["v1", "v2"],
+                        help="TF32 kernel version: v1 (WMMA) or v2 (PTX mma.sync, default)")
     args = parser.parse_args()
 
     sizes = [int(s.strip()) for s in args.sizes.split(",")]
     dtypes = [d.strip().lower() for d in args.dtypes.split(",")]
+    use_tf32_v2 = args.tf32_version == "v2"
 
     warmup = 3 if args.quick else 5
     iterations = 5 if args.quick else 10
 
-    # Setup environment for TF32
-    os.environ["PYGPUKIT_ALLOW_TF32"] = "1"
-    os.environ["PYGPUKIT_TF32_V2"] = "1"
-
     # Get GPU info
     gpu_info = get_gpu_info()
-    print_header(gpu_info)
-
-    mode = "Full (Driver + JIT)" if gpu_info.nvrtc_available else "Driver-Only"
+    print_header(gpu_info, args.tf32_version.upper())
 
     # Run benchmarks
     results = []
@@ -423,17 +462,20 @@ def main():
     print()
 
     for size in sizes:
-        iters = iterations // 2 if size >= 8192 else iterations
+        iters = max(2, iterations // 2) if size >= 8192 else iterations
 
         if "fp32" in dtypes:
+            # Disable TF32 for FP32 benchmark
+            os.environ.pop("PYGPUKIT_ALLOW_TF32", None)
+            os.environ.pop("PYGPUKIT_TF32_V2", None)
             print(f"  FP32 {size}x{size}...", end=" ", flush=True)
             r = benchmark_fp32(size, warmup, iters)
             results.append(r)
             print(f"{r.tflops_median:.1f} TFLOPS")
 
         if "tf32" in dtypes:
-            print(f"  TF32 {size}x{size}...", end=" ", flush=True)
-            r = benchmark_tf32(size, warmup, iters)
+            print(f"  TF32 {args.tf32_version} {size}x{size}...", end=" ", flush=True)
+            r = benchmark_tf32(size, warmup, iters, use_v2=use_tf32_v2)
             results.append(r)
             print(f"{r.tflops_median:.1f} TFLOPS")
 
@@ -454,17 +496,16 @@ def main():
     # Print results
     print_correctness_results(results)
     print_benchmark_results(results, sizes)
-    print_readme_table(results, sizes, mode)
+    print_readme_table(results, sizes)
 
     # Summary
     print("=" * 70)
     print(" Summary")
     print("=" * 70)
     print()
-    print(f"Mode: {mode}")
     print(f"GPU: {gpu_info.name}")
+    print(f"TF32 Kernel: {args.tf32_version.upper()}")
 
-    # Find peak performance
     if results:
         peak = max(results, key=lambda r: r.tflops_median)
         print(f"Peak: {peak.tflops_median:.1f} TFLOPS ({peak.dtype}, {peak.size}x{peak.size})")
@@ -473,7 +514,9 @@ def main():
     print("RTX 3090 Ti Theoretical:")
     print("  FP32: ~40 TFLOPS")
     print("  TF32 TensorCore: ~80 TFLOPS (Sparse: ~156 TFLOPS)")
-    print("  FP16 TensorCore: ~160 TFLOPS")
+    print("  FP16 TensorCore: ~160 TFLOPS (not yet optimized)")
+    print()
+    print("Note: FP16/BF16 use simple kernels. TensorCore optimization in Issue #60.")
     print()
 
 
