@@ -53,9 +53,17 @@ output = gpk.linear_bias_gelu(input, weight, bias)
 ```
 
 ### Multi-SM CUTLASS Kernels
-Runtime SM detection with optimized kernel variants:
-- **SM80 (A100)**: 4-stage pipeline optimized for 48KB shared memory
-- **SM86+ (RTX 30xx/40xx, H100)**: 5-stage pipeline for 100KB+ shared memory
+Runtime SM detection with architecture-optimized kernel variants:
+
+| Architecture | GPU Examples | Pipeline | Features |
+|-------------|--------------|----------|----------|
+| **SM80** | A100 | 4-stage | 48KB shared memory |
+| **SM86** | RTX 3090, RTX 3080 | 5-stage | 100KB shared memory |
+| **SM89** | RTX 4090, RTX 4080 | 6-stage | Ada Lovelace optimizations |
+| **SM90** | H100 | CUTLASS 3.x | WGMMA/TMA instructions |
+| **SM100/120** | Blackwell (B100, B200) | CUTLASS 3.x | Next-gen TensorCore |
+
+> **Note:** SM100+ (Blackwell) requires CUDA 13.x. Windows wheels include SM100/120 support.
 
 ### New Operations
 | Operation | Description |
@@ -301,8 +309,14 @@ pip install -e .
 > Pre-compiled GPU operations (matmul, add, mul, etc.) work with just GPU drivers.
 
 ### Supported GPUs
-- RTX 30XX series (Ampere, SM 80+) and above
-- Older GPUs (RTX 20XX, GTX 10XX, etc.) are **NOT supported** (SM < 80)
+
+| Generation | Architecture | Examples | Status |
+|------------|-------------|----------|--------|
+| **Ampere** | SM80-86 | A100, RTX 3090, RTX 3080 | Fully supported |
+| **Ada Lovelace** | SM89 | RTX 4090, RTX 4080 | Fully supported |
+| **Hopper** | SM90 | H100, H200 | Fully supported |
+| **Blackwell** | SM100-120 | B100, B200 | Supported (CUDA 13.x) |
+| Turing/Older | SM < 80 | RTX 20XX, GTX 10XX | **NOT supported** |
 
 ### Runtime Modes
 | Mode | Requirements | Features |
