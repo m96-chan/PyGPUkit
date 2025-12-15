@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.factory import from_numpy, zeros
+from pygpukit.core.factory import from_numpy
 from pygpukit.ops.basic import add, gelu, layernorm, matmul
 
 if TYPE_CHECKING:
-    import numpy as np
+    pass
 
 
 @dataclass

@@ -17,6 +17,14 @@
 #include <cstdlib>
 #include <algorithm>
 
+// CUTLASS GEMM (extern declarations from matmul_cutlass.cu)
+extern "C" {
+    cudaError_t cutlass_gemm_tf32(const float* A, const float* B, float* C, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_fp16(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K, cudaStream_t stream);
+    bool cutlass_is_compatible(int M, int N, int K);
+}
+
 namespace pygpukit {
 namespace ops {
 
@@ -36,36 +44,45 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
-    // Check for TensorCore modes (requires SM >= 80)
+    // v0.2.6: CUTLASS is the default backend
+    // Environment variables:
+    //   PYGPUKIT_NO_CUTLASS=1  - Disable CUTLASS entirely, use native kernels
+    //   PYGPUKIT_NO_TF32=1     - Disable TF32 for FP32 inputs (use native FP32 kernel)
+    const char* no_cutlass_env = std::getenv("PYGPUKIT_NO_CUTLASS");
+    const char* no_tf32_env = std::getenv("PYGPUKIT_NO_TF32");
+
+    bool cutlass_disabled = no_cutlass_env &&
+        (no_cutlass_env[0] == '1' || no_cutlass_env[0] == 'y' || no_cutlass_env[0] == 'Y');
+    bool tf32_disabled = no_tf32_env &&
+        (no_tf32_env[0] == '1' || no_tf32_env[0] == 'y' || no_tf32_env[0] == 'Y');
+
+    // CUTLASS enabled by default if dimensions are compatible
+    // For FP32: skip CUTLASS TF32 if NO_TF32 is set (will use native FP32 kernel)
+    bool cutlass_enabled = !cutlass_disabled && cutlass_is_compatible(M, N, K);
+    bool cutlass_tf32_enabled = cutlass_enabled && !tf32_disabled;
+
+    // Fallback to native TensorCore kernels
     bool tf32_enabled = false;
     bool fp16_tc_enabled = false;
     int sm_version = 0;
 
-    // Check environment variables
-    const char* tf32_env = std::getenv("PYGPUKIT_ALLOW_TF32");
-    const char* fp16_tc_env = std::getenv("PYGPUKIT_ALLOW_FP16_TC");
+    // Only check native TensorCore settings if CUTLASS is disabled
+    if (!cutlass_enabled) {
+        const char* tf32_env = std::getenv("PYGPUKIT_ALLOW_TF32");
+        const char* fp16_tc_env = std::getenv("PYGPUKIT_ALLOW_FP16_TC");
 
-    // Debug output
-    static bool debug_printed = false;
-    if (!debug_printed) {
-        debug_printed = true;
-        printf("[PyGPUkit] PYGPUKIT_ALLOW_TF32 = %s\n", tf32_env ? tf32_env : "(null)");
-        printf("[PyGPUkit] PYGPUKIT_ALLOW_FP16_TC = %s\n", fp16_tc_env ? fp16_tc_env : "(null)");
-        fflush(stdout);
-    }
+        if ((tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) ||
+            (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y'))) {
+            sm_version = get_sm_version();
+        }
 
-    // Check SM version if any TensorCore mode is requested
-    if ((tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) ||
-        (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y'))) {
-        sm_version = get_sm_version();
-    }
+        if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
+            tf32_enabled = (sm_version >= 80);
+        }
 
-    if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
-        tf32_enabled = (sm_version >= 80);
-    }
-
-    if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
-        fp16_tc_enabled = (sm_version >= 80);
+        if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
+            fp16_tc_enabled = (sm_version >= 80);
+        }
     }
 
     // Kernel selection
@@ -96,6 +113,57 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                      (M >= TILED_MATMUL_THRESHOLD ||
                       N >= TILED_MATMUL_THRESHOLD ||
                       K >= TILED_MATMUL_THRESHOLD);
+
+    // CUTLASS dispatch (highest priority when enabled)
+    // FP32 uses TF32 TensorCore (can be disabled with PYGPUKIT_NO_TF32)
+    // FP16/BF16 always use CUTLASS when available
+    if (cutlass_enabled || cutlass_tf32_enabled) {
+        cudaError_t err = cudaSuccess;
+        bool used_cutlass = false;
+
+        switch (a.dtype()) {
+            case DataType::Float32:
+                if (cutlass_tf32_enabled) {
+                    err = cutlass_gemm_tf32(
+                        static_cast<const float*>(a.data()),
+                        static_cast<const float*>(b.data()),
+                        static_cast<float*>(c.data()),
+                        M, N, K, nullptr);
+                    used_cutlass = true;
+                }
+                break;
+            case DataType::Float16:
+                if (cutlass_enabled) {
+                    err = cutlass_gemm_fp16(
+                        static_cast<const __half*>(a.data()),
+                        static_cast<const __half*>(b.data()),
+                        static_cast<__half*>(c.data()),
+                        M, N, K, nullptr);
+                    used_cutlass = true;
+                }
+                break;
+            case DataType::BFloat16:
+                if (cutlass_enabled) {
+                    err = cutlass_gemm_bf16(
+                        static_cast<const __nv_bfloat16*>(a.data()),
+                        static_cast<const __nv_bfloat16*>(b.data()),
+                        static_cast<__nv_bfloat16*>(c.data()),
+                        M, N, K, nullptr);
+                    used_cutlass = true;
+                }
+                break;
+            default:
+                break;
+        }
+
+        if (used_cutlass) {
+            if (err != cudaSuccess) {
+                throw std::runtime_error("CUTLASS GEMM failed");
+            }
+            sync_and_check("CUTLASS matmul kernel failed");
+            return;
+        }
+    }
 
     if (use_tf32) {
         if (M == 16 && (N == 8 || N == 16)) {
