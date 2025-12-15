@@ -24,6 +24,7 @@ extern "C" {
     cudaError_t cutlass_gemm_fp16(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream);
     cudaError_t cutlass_gemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K, cudaStream_t stream);
     bool cutlass_is_compatible(int M, int N, int K);
+    bool cutlass_is_sm_supported();
 
     // BiasGELU fused operations
     cudaError_t cutlass_gemm_tf32_bias_gelu(const float* A, const float* B, const float* bias, float* D, int M, int N, int K, cudaStream_t stream);
@@ -62,9 +63,10 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     bool tf32_disabled = no_tf32_env &&
         (no_tf32_env[0] == '1' || no_tf32_env[0] == 'y' || no_tf32_env[0] == 'Y');
 
-    // CUTLASS enabled by default if dimensions are compatible
+    // CUTLASS enabled by default if dimensions are compatible AND SM >= 86
+    // v0.2.7+ requires SM >= 86 (RTX 30xx and newer)
     // For FP32: skip CUTLASS TF32 if NO_TF32 is set (will use native FP32 kernel)
-    bool cutlass_enabled = !cutlass_disabled && cutlass_is_compatible(M, N, K);
+    bool cutlass_enabled = !cutlass_disabled && cutlass_is_compatible(M, N, K) && cutlass_is_sm_supported();
     bool cutlass_tf32_enabled = cutlass_enabled && !tf32_disabled;
 
     // Fallback to native TensorCore kernels
@@ -83,11 +85,11 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         }
 
         if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
-            tf32_enabled = (sm_version >= 80);
+            tf32_enabled = (sm_version >= MIN_SM_VERSION);
         }
 
         if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
-            fp16_tc_enabled = (sm_version >= 80);
+            fp16_tc_enabled = (sm_version >= MIN_SM_VERSION);
         }
     }
 
@@ -319,13 +321,13 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
 
     bool tf32_enabled = use_tf32_explicit &&
                         (a.dtype() == DataType::Float32) &&
-                        (sm_version >= 80);
+                        (sm_version >= MIN_SM_VERSION);
 
     if (use_tf32_explicit && !tf32_enabled) {
         if (a.dtype() != DataType::Float32) {
             throw std::runtime_error("TF32 matmul requires float32 dtype");
         }
-        if (sm_version < 80) {
+        if (sm_version < MIN_SM_VERSION) {
             throw std::runtime_error("TF32 matmul requires SM >= 80 (Ampere or newer)");
         }
     }
@@ -496,8 +498,8 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
     }
 
     // Check if CUTLASS fused kernel can be used
-    // Requirements: dimensions must be multiples of 16 for TensorCore
-    bool use_cutlass = cutlass_is_compatible(batch, out_features, in_features);
+    // Requirements: dimensions must be multiples of 16 AND SM >= 86
+    bool use_cutlass = cutlass_is_compatible(batch, out_features, in_features) && cutlass_is_sm_supported();
 
     // Also check if CUTLASS is disabled via environment variable
     const char* no_cutlass_env = std::getenv("PYGPUKIT_NO_CUTLASS");

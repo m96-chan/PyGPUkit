@@ -57,6 +57,10 @@ bool cutlass_is_compatible(int M, int N, int K) {
     return cutlass_gemm::is_cutlass_compatible(M, N, K);
 }
 
+bool cutlass_is_sm_supported() {
+    return cutlass_gemm::is_sm_supported();
+}
+
 // ============================================================================
 // BiasGELU fused operations
 // ============================================================================
@@ -135,6 +139,10 @@ cudaError_t cutlass_gemm_bf16(
 }
 
 bool cutlass_is_compatible(int M, int N, int K) {
+    return false;
+}
+
+bool cutlass_is_sm_supported() {
     return false;
 }
 

@@ -37,7 +37,7 @@ endif()
 # PyGPUkit requires SM >= 80 (Ampere and newer)
 # Older architectures (Pascal/Turing) are NOT supported
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
+    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90;100;120")
 endif()
 
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
