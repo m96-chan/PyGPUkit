@@ -28,6 +28,9 @@ if(EXISTS "${CUTLASS_DIR}/include")
     include_directories(${CUTLASS_DIR}/include)
     include_directories(${CUTLASS_DIR}/tools/util/include)
     add_definitions(-DPYGPUKIT_HAS_CUTLASS=1)
+    # Note: CUTLASS 3.x SM90+ features (Hopper/Blackwell) require SM90+ hardware
+    # Disabled for now - will be enabled when SM90+ testing is available
+    # add_definitions(-DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1)
 else()
     message(STATUS "CUTLASS not found, using fallback kernels")
     add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
@@ -36,6 +39,16 @@ endif()
 # Set default CUDA architectures if not specified
 # PyGPUkit requires SM >= 80 (Ampere and newer)
 # Older architectures (Pascal/Turing) are NOT supported
+#
+# Supported architectures (CUDA 13.1):
+# - SM 80 (A100): Ampere datacenter, 4-stage pipeline
+# - SM 86 (RTX 30xx): Ampere consumer, 5-stage pipeline
+# - SM 89 (RTX 40xx): Ada Lovelace, 6-stage pipeline
+# - SM 90 (H100): Hopper, WGMMA/TMA
+# - SM 100 (B100/B200): Blackwell
+# - SM 103: Blackwell variant
+# - SM 120: Future architecture
+# - SM 121: Future architecture variant
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90;100;120")
 endif()

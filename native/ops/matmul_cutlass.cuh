@@ -4,12 +4,15 @@
  * Provides high-performance matrix multiplication using NVIDIA CUTLASS library.
  * Multi-SM support with runtime dispatch for optimal performance across GPU architectures.
  *
- * Supported architectures:
- * - SM 80 (A100): 4-stage pipeline (data center baseline)
- * - SM 86 (RTX 30xx): 5-stage pipeline, 100KB shared memory
- * - SM 89 (RTX 40xx): Ada Lovelace, uses SM86 configuration
- * - SM 90 (H100): Hopper (CUTLASS 3.x WGMMA is future work)
- * - SM 100-120: Future architectures (forward compatible)
+ * Supported architectures (CUTLASS 2.x API):
+ * - SM 80 (A100): 4-stage pipeline, 48KB shared memory (datacenter)
+ * - SM 86 (RTX 30xx): 5-stage pipeline, 100KB shared memory (Ampere consumer)
+ * - SM 89 (RTX 40xx): 6-stage pipeline, 128KB shared memory (Ada Lovelace)
+ *
+ * Future architectures (CUTLASS 3.x API, see matmul_cutlass_sm90.cuh):
+ * - SM 90 (H100): Hopper with WGMMA/TMA
+ * - SM 100 (B100/B200): Blackwell
+ * - SM 100-121: Future architectures
  *
  * NOT supported:
  * - SM < 80 (Turing and older)
@@ -35,6 +38,12 @@
 #include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/epilogue/thread/linear_combination_gelu.h"
 #include "cutlass/util/device_memory.h"
+
+// SM90+ kernels use CUTLASS 3.x API (future work)
+// Disabled for now - requires SM90+ hardware for testing
+// #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
+// #include "matmul_cutlass_sm90.cuh"
+// #endif
 
 namespace pygpukit {
 namespace ops {
@@ -65,7 +74,17 @@ inline bool is_sm_supported() {
     return get_cached_sm_version() >= MIN_SM_VERSION;
 }
 
-// Check if SM >= 86 for optimized 5-stage pipeline
+// SM version classification for kernel selection
+inline int get_sm_tier() {
+    int sm = get_cached_sm_version();
+    if (sm >= 100) return 100;  // Blackwell+
+    if (sm >= 90)  return 90;   // Hopper
+    if (sm >= 89)  return 89;   // Ada Lovelace
+    if (sm >= 86)  return 86;   // Ampere (consumer)
+    return 80;                   // Ampere (datacenter)
+}
+
+// Check if SM >= 86 for optimized 5-stage pipeline (legacy, for backward compat)
 inline bool use_5stage_pipeline() {
     return get_cached_sm_version() >= 86;
 }
@@ -101,7 +120,7 @@ using TF32Gemm_Sm80 = cutlass::gemm::device::Gemm<
     4                                           // Stages (4-stage for SM80)
 >;
 
-// SM86+ (RTX 30xx/40xx/H100+): 5-stage pipeline, 100KB+ shared memory
+// SM86 (RTX 30xx): 5-stage pipeline, 100KB shared memory
 using TF32Gemm_Sm86 = cutlass::gemm::device::Gemm<
     float,                                      // ElementA (will be B^T)
     cutlass::layout::ColumnMajor,               // LayoutA
@@ -119,7 +138,29 @@ using TF32Gemm_Sm86 = cutlass::gemm::device::Gemm<
         float, 128 / cutlass::sizeof_bits<float>::value,
         float, float>,                          // EpilogueOp (128-bit aligned)
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    5                                           // Stages (5-stage for SM86+)
+    5                                           // Stages (5-stage for SM86)
+>;
+
+// SM89 (RTX 40xx Ada): 6-stage pipeline, 128KB shared memory
+// Note: Uses Sm80 arch tag for CUTLASS 2.x compatibility (runtime dispatch selects for SM89)
+using TF32Gemm_Sm89 = cutlass::gemm::device::Gemm<
+    float,                                      // ElementA (will be B^T)
+    cutlass::layout::ColumnMajor,               // LayoutA
+    float,                                      // ElementB (will be A^T)
+    cutlass::layout::ColumnMajor,               // LayoutB
+    float,                                      // ElementC (will be C^T)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Sm80 for CUTLASS 2.x compat)
+    cutlass::gemm::GemmShape<128, 256, 16>,     // ThreadBlockShape (larger N for Ada)
+    cutlass::gemm::GemmShape<64, 64, 16>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 8>,         // InstructionShape (mma.sync)
+    cutlass::epilogue::thread::LinearCombination<
+        float, 128 / cutlass::sizeof_bits<float>::value,
+        float, float>,                          // EpilogueOp (128-bit aligned)
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    6                                           // Stages (6-stage for SM89)
 >;
 
 // Default alias (SM80 for backward compatibility)
@@ -150,7 +191,7 @@ using FP16Gemm_Sm80 = cutlass::gemm::device::Gemm<
     4                                           // Stages (4-stage for SM80)
 >;
 
-// SM86+ (RTX 30xx/40xx/H100+): FP16 GEMM with 5-stage pipeline
+// SM86 (RTX 30xx): FP16 GEMM with 5-stage pipeline
 using FP16Gemm_Sm86 = cutlass::gemm::device::Gemm<
     cutlass::half_t,                            // ElementA (will be B^T)
     cutlass::layout::ColumnMajor,               // LayoutA
@@ -168,7 +209,29 @@ using FP16Gemm_Sm86 = cutlass::gemm::device::Gemm<
         cutlass::half_t, 128 / cutlass::sizeof_bits<cutlass::half_t>::value,
         float, float>,                          // EpilogueOp (128-bit aligned)
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    5                                           // Stages (5-stage for SM86+)
+    5                                           // Stages (5-stage for SM86)
+>;
+
+// SM89 (RTX 40xx Ada): FP16 GEMM with 6-stage pipeline
+// Note: Uses Sm80 arch tag for CUTLASS 2.x compatibility (runtime dispatch selects for SM89)
+using FP16Gemm_Sm89 = cutlass::gemm::device::Gemm<
+    cutlass::half_t,                            // ElementA (will be B^T)
+    cutlass::layout::ColumnMajor,               // LayoutA
+    cutlass::half_t,                            // ElementB (will be A^T)
+    cutlass::layout::ColumnMajor,               // LayoutB
+    cutlass::half_t,                            // ElementC (will be C^T)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator (FP32 for precision)
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Sm80 for CUTLASS 2.x compat)
+    cutlass::gemm::GemmShape<128, 256, 32>,     // ThreadBlockShape (larger N for Ada)
+    cutlass::gemm::GemmShape<64, 64, 32>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 16>,        // InstructionShape (mma.sync.m16n8k16)
+    cutlass::epilogue::thread::LinearCombination<
+        cutlass::half_t, 128 / cutlass::sizeof_bits<cutlass::half_t>::value,
+        float, float>,                          // EpilogueOp (128-bit aligned)
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    6                                           // Stages (6-stage for SM89)
 >;
 
 // Default alias (SM80 for backward compatibility)
@@ -199,7 +262,7 @@ using BF16Gemm_Sm80 = cutlass::gemm::device::Gemm<
     4                                           // Stages (4-stage for SM80)
 >;
 
-// SM86+ (RTX 30xx/40xx/H100+): BF16 GEMM with 5-stage pipeline
+// SM86 (RTX 30xx): BF16 GEMM with 5-stage pipeline
 using BF16Gemm_Sm86 = cutlass::gemm::device::Gemm<
     cutlass::bfloat16_t,                        // ElementA (will be B^T)
     cutlass::layout::ColumnMajor,               // LayoutA
@@ -217,7 +280,29 @@ using BF16Gemm_Sm86 = cutlass::gemm::device::Gemm<
         cutlass::bfloat16_t, 128 / cutlass::sizeof_bits<cutlass::bfloat16_t>::value,
         float, float>,                          // EpilogueOp (128-bit aligned)
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    5                                           // Stages (5-stage for SM86+)
+    5                                           // Stages (5-stage for SM86)
+>;
+
+// SM89 (RTX 40xx Ada): BF16 GEMM with 6-stage pipeline
+// Note: Uses Sm80 arch tag for CUTLASS 2.x compatibility (runtime dispatch selects for SM89)
+using BF16Gemm_Sm89 = cutlass::gemm::device::Gemm<
+    cutlass::bfloat16_t,                        // ElementA (will be B^T)
+    cutlass::layout::ColumnMajor,               // LayoutA
+    cutlass::bfloat16_t,                        // ElementB (will be A^T)
+    cutlass::layout::ColumnMajor,               // LayoutB
+    cutlass::bfloat16_t,                        // ElementC (will be C^T)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator (FP32 for precision)
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Sm80 for CUTLASS 2.x compat)
+    cutlass::gemm::GemmShape<128, 256, 32>,     // ThreadBlockShape (larger N for Ada)
+    cutlass::gemm::GemmShape<64, 64, 32>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 16>,        // InstructionShape
+    cutlass::epilogue::thread::LinearCombination<
+        cutlass::bfloat16_t, 128 / cutlass::sizeof_bits<cutlass::bfloat16_t>::value,
+        float, float>,                          // EpilogueOp (128-bit aligned)
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    6                                           // Stages (6-stage for SM89)
 >;
 
 // Default alias (SM80 for backward compatibility)
@@ -244,7 +329,7 @@ using TF32GemmBiasGELU_Sm80 = cutlass::gemm::device::Gemm<
     4
 >;
 
-// TF32 BiasGELU - SM86+ (5-stage)
+// TF32 BiasGELU - SM86 (5-stage)
 using TF32GemmBiasGELU_Sm86 = cutlass::gemm::device::Gemm<
     float, cutlass::layout::ColumnMajor,
     float, cutlass::layout::ColumnMajor,
@@ -259,6 +344,24 @@ using TF32GemmBiasGELU_Sm86 = cutlass::gemm::device::Gemm<
         float, 128 / cutlass::sizeof_bits<float>::value, float, float>,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
     5
+>;
+
+// TF32 BiasGELU - SM89 (6-stage)
+// Note: Uses Sm80 arch tag for CUTLASS 2.x compatibility
+using TF32GemmBiasGELU_Sm89 = cutlass::gemm::device::Gemm<
+    float, cutlass::layout::ColumnMajor,
+    float, cutlass::layout::ColumnMajor,
+    float, cutlass::layout::ColumnMajor,
+    float,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<128, 256, 16>,
+    cutlass::gemm::GemmShape<64, 64, 16>,
+    cutlass::gemm::GemmShape<16, 8, 8>,
+    cutlass::epilogue::thread::LinearCombinationGELU<
+        float, 128 / cutlass::sizeof_bits<float>::value, float, float>,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    6
 >;
 
 using TF32GemmBiasGELU = TF32GemmBiasGELU_Sm80;
@@ -333,6 +436,43 @@ using BF16GemmBiasGELU_Sm86 = cutlass::gemm::device::Gemm<
     5
 >;
 
+// FP16 BiasGELU - SM89 (6-stage, Ada Lovelace)
+// Note: Uses Sm80 arch tag for CUTLASS 2.x compatibility
+using FP16GemmBiasGELU_Sm89 = cutlass::gemm::device::Gemm<
+    cutlass::half_t, cutlass::layout::ColumnMajor,
+    cutlass::half_t, cutlass::layout::ColumnMajor,
+    cutlass::half_t, cutlass::layout::ColumnMajor,
+    float,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<128, 256, 32>,
+    cutlass::gemm::GemmShape<64, 64, 32>,
+    cutlass::gemm::GemmShape<16, 8, 16>,
+    cutlass::epilogue::thread::LinearCombinationGELU<
+        cutlass::half_t, 128 / cutlass::sizeof_bits<cutlass::half_t>::value, float, float>,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    6
+>;
+
+// BF16 BiasGELU - SM89 (6-stage, Ada Lovelace)
+// Note: Uses Sm80 arch tag for CUTLASS 2.x compatibility
+using BF16GemmBiasGELU_Sm89 = cutlass::gemm::device::Gemm<
+    cutlass::bfloat16_t, cutlass::layout::ColumnMajor,
+    cutlass::bfloat16_t, cutlass::layout::ColumnMajor,
+    cutlass::bfloat16_t, cutlass::layout::ColumnMajor,
+    float,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<128, 256, 32>,
+    cutlass::gemm::GemmShape<64, 64, 32>,
+    cutlass::gemm::GemmShape<16, 8, 16>,
+    cutlass::epilogue::thread::LinearCombinationGELU<
+        cutlass::bfloat16_t, 128 / cutlass::sizeof_bits<cutlass::bfloat16_t>::value, float, float>,
+    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+    6
+>;
+
+using FP16GemmBiasGELU = FP16GemmBiasGELU_Sm80;
 using BF16GemmBiasGELU = BF16GemmBiasGELU_Sm80;
 
 // ============================================================================
@@ -426,11 +566,18 @@ inline cudaError_t gemm_tf32(
     // Transpose trick: C^T (NxM col) = B^T (NxK col) @ A^T (KxM col)
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // Runtime SM dispatch: SM86+ uses 5-stage pipeline
-    if (use_5stage_pipeline()) {
+    // Runtime SM dispatch with tiered kernel selection
+    int sm_tier = get_sm_tier();
+    if (sm_tier >= 89) {
+        // SM89+ (Ada): 6-stage pipeline with larger tiles
+        return run_gemm<TF32Gemm_Sm89>(
+            problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
+    } else if (sm_tier >= 86) {
+        // SM86 (Ampere consumer): 5-stage pipeline
         return run_gemm<TF32Gemm_Sm86>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     } else {
+        // SM80 (Ampere datacenter): 4-stage pipeline
         return run_gemm<TF32Gemm_Sm80>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     }
@@ -449,13 +596,21 @@ inline cudaError_t gemm_fp16(
     float beta = 0.0f,
     cudaStream_t stream = nullptr
 ) {
+    // Transpose trick: C^T = B^T @ A^T
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // Runtime SM dispatch: SM86+ uses 5-stage pipeline
-    if (use_5stage_pipeline()) {
+    // Runtime SM dispatch with tiered kernel selection
+    int sm_tier = get_sm_tier();
+    if (sm_tier >= 89) {
+        // SM89+ (Ada): 6-stage pipeline with larger tiles
+        return run_gemm<FP16Gemm_Sm89>(
+            problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
+    } else if (sm_tier >= 86) {
+        // SM86 (Ampere consumer): 5-stage pipeline
         return run_gemm<FP16Gemm_Sm86>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     } else {
+        // SM80 (Ampere datacenter): 4-stage pipeline
         return run_gemm<FP16Gemm_Sm80>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     }
@@ -474,13 +629,21 @@ inline cudaError_t gemm_bf16(
     float beta = 0.0f,
     cudaStream_t stream = nullptr
 ) {
+    // Transpose trick: C^T = B^T @ A^T
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // Runtime SM dispatch: SM86+ uses 5-stage pipeline
-    if (use_5stage_pipeline()) {
+    // Runtime SM dispatch with tiered kernel selection
+    int sm_tier = get_sm_tier();
+    if (sm_tier >= 89) {
+        // SM89+ (Ada): 6-stage pipeline with larger tiles
+        return run_gemm<BF16Gemm_Sm89>(
+            problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
+    } else if (sm_tier >= 86) {
+        // SM86 (Ampere consumer): 5-stage pipeline
         return run_gemm<BF16Gemm_Sm86>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     } else {
+        // SM80 (Ampere datacenter): 4-stage pipeline
         return run_gemm<BF16Gemm_Sm80>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     }
@@ -549,8 +712,12 @@ inline cudaError_t gemm_tf32_bias_gelu(
 ) {
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // Runtime SM dispatch: SM86+ uses 5-stage pipeline
-    if (use_5stage_pipeline()) {
+    // Runtime SM dispatch with tiered kernel selection
+    int sm_tier = get_sm_tier();
+    if (sm_tier >= 89) {
+        return run_gemm_bias_gelu<TF32GemmBiasGELU_Sm89>(
+            problem_size, B, N, A, K, bias, D, N, stream);
+    } else if (sm_tier >= 86) {
         return run_gemm_bias_gelu<TF32GemmBiasGELU_Sm86>(
             problem_size, B, N, A, K, bias, D, N, stream);
     } else {
@@ -572,8 +739,12 @@ inline cudaError_t gemm_fp16_bias_gelu(
 ) {
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // Runtime SM dispatch: SM86+ uses 5-stage pipeline
-    if (use_5stage_pipeline()) {
+    // Runtime SM dispatch with tiered kernel selection
+    int sm_tier = get_sm_tier();
+    if (sm_tier >= 89) {
+        return run_gemm_bias_gelu<FP16GemmBiasGELU_Sm89>(
+            problem_size, B, N, A, K, bias, D, N, stream);
+    } else if (sm_tier >= 86) {
         return run_gemm_bias_gelu<FP16GemmBiasGELU_Sm86>(
             problem_size, B, N, A, K, bias, D, N, stream);
     } else {
@@ -595,8 +766,12 @@ inline cudaError_t gemm_bf16_bias_gelu(
 ) {
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // Runtime SM dispatch: SM86+ uses 5-stage pipeline
-    if (use_5stage_pipeline()) {
+    // Runtime SM dispatch with tiered kernel selection
+    int sm_tier = get_sm_tier();
+    if (sm_tier >= 89) {
+        return run_gemm_bias_gelu<BF16GemmBiasGELU_Sm89>(
+            problem_size, B, N, A, K, bias, D, N, stream);
+    } else if (sm_tier >= 86) {
         return run_gemm_bias_gelu<BF16GemmBiasGELU_Sm86>(
             problem_size, B, N, A, K, bias, D, N, stream);
     } else {
