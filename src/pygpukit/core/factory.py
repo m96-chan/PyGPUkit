@@ -205,12 +205,16 @@ def _from_numpy_native(array: np.ndarray) -> GPUArray:
 
 def _to_native_dtype(dtype: DataType, native: Any) -> Any:
     """Convert Python DataType to native DataType."""
-    from pygpukit.core.dtypes import float32, float64, int32, int64
+    from pygpukit.core.dtypes import float32, float64, float16, bfloat16, int32, int64
 
     if dtype == float32:
         return native.DataType.Float32
     elif dtype == float64:
         return native.DataType.Float64
+    elif dtype == float16:
+        return native.DataType.Float16
+    elif dtype == bfloat16:
+        return native.DataType.BFloat16
     elif dtype == int32:
         return native.DataType.Int32
     elif dtype == int64:

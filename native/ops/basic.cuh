@@ -56,5 +56,18 @@ GPUArray matmul(const GPUArray& a, const GPUArray& b);
 void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c, bool use_tf32);
 GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32);
 
+// ============================================================================
+// Reduction Operations
+// ============================================================================
+
+// Sum of all elements: returns a scalar GPUArray with shape {1}
+GPUArray sum(const GPUArray& a);
+
+// Mean of all elements: returns a scalar GPUArray with shape {1}
+GPUArray mean(const GPUArray& a);
+
+// Max of all elements: returns a scalar GPUArray with shape {1}
+GPUArray max(const GPUArray& a);
+
 } // namespace ops
 } // namespace pygpukit

@@ -11,6 +11,8 @@ namespace pygpukit {
 enum class DataType {
     Float32,
     Float64,
+    Float16,    // FP16 (half precision)
+    BFloat16,   // BF16 (bfloat16)
     Int32,
     Int64
 };
@@ -20,6 +22,8 @@ inline size_t dtype_size(DataType dtype) {
     switch (dtype) {
         case DataType::Float32: return 4;
         case DataType::Float64: return 8;
+        case DataType::Float16: return 2;
+        case DataType::BFloat16: return 2;
         case DataType::Int32: return 4;
         case DataType::Int64: return 8;
         default: throw std::runtime_error("Unknown dtype");
@@ -31,6 +35,8 @@ inline std::string dtype_name(DataType dtype) {
     switch (dtype) {
         case DataType::Float32: return "float32";
         case DataType::Float64: return "float64";
+        case DataType::Float16: return "float16";
+        case DataType::BFloat16: return "bfloat16";
         case DataType::Int32: return "int32";
         case DataType::Int64: return "int64";
         default: throw std::runtime_error("Unknown dtype");

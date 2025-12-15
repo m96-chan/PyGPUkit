@@ -5,8 +5,11 @@
 #include "matmul_f32_ampere.cuh"
 #include "matmul_f32_tf32.cuh"
 #include "matmul_f32_tf32_v2.cuh"
+#include "matmul_f16_bf16.cuh"
 #include "../core/driver_context.hpp"
 #include <cuda.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <stdexcept>
 #include <cstdlib>
 
@@ -14,6 +17,30 @@ namespace pygpukit {
 namespace ops {
 
 namespace {
+
+// Helper functions for BF16 to avoid constexpr __host__ issues
+// Use raw union type for conversion
+__device__ __forceinline__ float bf16_to_float(__nv_bfloat16 val) {
+    // BF16 is stored in upper 16 bits of FP32
+    unsigned short raw;
+    memcpy(&raw, &val, sizeof(raw));
+    unsigned int bits = ((unsigned int)raw) << 16;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+__device__ __forceinline__ __nv_bfloat16 float_to_bf16(float val) {
+    // BF16 truncates lower 16 bits of FP32 mantissa
+    unsigned int bits;
+    memcpy(&bits, &val, sizeof(bits));
+    // Round to nearest even
+    bits += 0x7FFF + ((bits >> 16) & 1);
+    unsigned short raw = (unsigned short)(bits >> 16);
+    __nv_bfloat16 result;
+    memcpy(&result, &raw, sizeof(result));
+    return result;
+}
 
 void check_driver_error(CUresult result, const char* msg) {
     if (result != CUDA_SUCCESS) {
@@ -92,6 +119,21 @@ __global__ void add_i64_kernel(const int64_t* a, const int64_t* b, int64_t* c, s
     }
 }
 
+__global__ void add_f16_kernel(const __half* a, const __half* b, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+__global__ void add_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16: convert to float, add, convert back using helper functions
+        c[idx] = float_to_bf16(bf16_to_float(a[idx]) + bf16_to_float(b[idx]));
+    }
+}
+
 void add(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     validate_same_shape(a, b, "add");
     validate_same_dtype(a, b, "add");
@@ -129,6 +171,20 @@ void add(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 static_cast<const int64_t*>(a.data()),
                 static_cast<const int64_t*>(b.data()),
                 static_cast<int64_t*>(c.data()),
+                n);
+            break;
+        case DataType::Float16:
+            add_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            add_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
                 n);
             break;
     }
@@ -177,6 +233,21 @@ __global__ void mul_i64_kernel(const int64_t* a, const int64_t* b, int64_t* c, s
     }
 }
 
+__global__ void mul_f16_kernel(const __half* a, const __half* b, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+__global__ void mul_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16: convert to float, multiply, convert back
+        c[idx] = float_to_bf16(bf16_to_float(a[idx]) * bf16_to_float(b[idx]));
+    }
+}
+
 void mul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     validate_same_shape(a, b, "mul");
     validate_same_dtype(a, b, "mul");
@@ -214,6 +285,20 @@ void mul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 static_cast<const int64_t*>(a.data()),
                 static_cast<const int64_t*>(b.data()),
                 static_cast<int64_t*>(c.data()),
+                n);
+            break;
+        case DataType::Float16:
+            mul_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            mul_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
                 n);
             break;
     }
@@ -262,6 +347,21 @@ __global__ void sub_i64_kernel(const int64_t* a, const int64_t* b, int64_t* c, s
     }
 }
 
+__global__ void sub_f16_kernel(const __half* a, const __half* b, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = __hsub(a[idx], b[idx]);
+    }
+}
+
+__global__ void sub_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16: convert to float, subtract, convert back
+        c[idx] = float_to_bf16(bf16_to_float(a[idx]) - bf16_to_float(b[idx]));
+    }
+}
+
 void sub(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     validate_same_shape(a, b, "sub");
     validate_same_dtype(a, b, "sub");
@@ -299,6 +399,20 @@ void sub(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 static_cast<const int64_t*>(a.data()),
                 static_cast<const int64_t*>(b.data()),
                 static_cast<int64_t*>(c.data()),
+                n);
+            break;
+        case DataType::Float16:
+            sub_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            sub_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
                 n);
             break;
     }
@@ -347,6 +461,22 @@ __global__ void div_i64_kernel(const int64_t* a, const int64_t* b, int64_t* c, s
     }
 }
 
+__global__ void div_f16_kernel(const __half* a, const __half* b, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // FP16: convert to float for division, convert back
+        c[idx] = __float2half(__half2float(a[idx]) / __half2float(b[idx]));
+    }
+}
+
+__global__ void div_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16: convert to float for division, convert back
+        c[idx] = float_to_bf16(bf16_to_float(a[idx]) / bf16_to_float(b[idx]));
+    }
+}
+
 void div(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     validate_same_shape(a, b, "div");
     validate_same_dtype(a, b, "div");
@@ -386,6 +516,20 @@ void div(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 static_cast<int64_t*>(c.data()),
                 n);
             break;
+        case DataType::Float16:
+            div_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            div_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                n);
+            break;
     }
 
     sync_and_check("div kernel failed");
@@ -418,12 +562,29 @@ __global__ void exp_f64_kernel(const double* a, double* c, size_t n) {
     }
 }
 
+__global__ void exp_f16_kernel(const __half* a, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // FP16: convert to float, compute, convert back
+        c[idx] = __float2half(expf(__half2float(a[idx])));
+    }
+}
+
+__global__ void exp_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16: convert to float, compute, convert back
+        c[idx] = float_to_bf16(expf(bf16_to_float(a[idx])));
+    }
+}
+
 void exp(const GPUArray& a, GPUArray& c) {
     validate_same_shape(a, c, "exp");
     validate_same_dtype(a, c, "exp");
 
-    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64) {
-        throw std::runtime_error("exp only supports float32 and float64");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("exp only supports float types");
     }
 
     size_t n = a.size();
@@ -443,6 +604,18 @@ void exp(const GPUArray& a, GPUArray& c) {
                 static_cast<double*>(c.data()),
                 n);
             break;
+        case DataType::Float16:
+            exp_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            exp_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                n);
+            break;
         default:
             break;
     }
@@ -451,8 +624,9 @@ void exp(const GPUArray& a, GPUArray& c) {
 }
 
 GPUArray exp(const GPUArray& a) {
-    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64) {
-        throw std::runtime_error("exp only supports float32 and float64");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("exp only supports float types");
     }
 
     GPUArray c(a.shape(), a.dtype());
@@ -461,7 +635,7 @@ GPUArray exp(const GPUArray& a) {
 }
 
 // ============================================================================
-// Log kernels (float only)
+// Log kernels
 // ============================================================================
 
 __global__ void log_f32_kernel(const float* a, float* c, size_t n) {
@@ -478,12 +652,29 @@ __global__ void log_f64_kernel(const double* a, double* c, size_t n) {
     }
 }
 
+__global__ void log_f16_kernel(const __half* a, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // FP16: convert to float, compute, convert back
+        c[idx] = __float2half(logf(__half2float(a[idx])));
+    }
+}
+
+__global__ void log_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16: convert to float, compute, convert back
+        c[idx] = float_to_bf16(logf(bf16_to_float(a[idx])));
+    }
+}
+
 void log(const GPUArray& a, GPUArray& c) {
     validate_same_shape(a, c, "log");
     validate_same_dtype(a, c, "log");
 
-    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64) {
-        throw std::runtime_error("log only supports float32 and float64");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("log only supports float types");
     }
 
     size_t n = a.size();
@@ -503,6 +694,18 @@ void log(const GPUArray& a, GPUArray& c) {
                 static_cast<double*>(c.data()),
                 n);
             break;
+        case DataType::Float16:
+            log_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            log_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                n);
+            break;
         default:
             break;
     }
@@ -511,8 +714,9 @@ void log(const GPUArray& a, GPUArray& c) {
 }
 
 GPUArray log(const GPUArray& a) {
-    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64) {
-        throw std::runtime_error("log only supports float32 and float64");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("log only supports float types");
     }
 
     GPUArray c(a.shape(), a.dtype());
@@ -521,7 +725,7 @@ GPUArray log(const GPUArray& a) {
 }
 
 // ============================================================================
-// ReLU kernels (float only)
+// ReLU kernels
 // ============================================================================
 
 __global__ void relu_f32_kernel(const float* a, float* c, size_t n) {
@@ -538,12 +742,31 @@ __global__ void relu_f64_kernel(const double* a, double* c, size_t n) {
     }
 }
 
+__global__ void relu_f16_kernel(const __half* a, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // Convert to float for comparison, then convert result back
+        float val = __half2float(a[idx]);
+        c[idx] = __float2half(val > 0.0f ? val : 0.0f);
+    }
+}
+
+__global__ void relu_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // Convert to float for comparison, then convert result back
+        float val = bf16_to_float(a[idx]);
+        c[idx] = float_to_bf16(val > 0.0f ? val : 0.0f);
+    }
+}
+
 void relu(const GPUArray& a, GPUArray& c) {
     validate_same_shape(a, c, "relu");
     validate_same_dtype(a, c, "relu");
 
-    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64) {
-        throw std::runtime_error("relu only supports float32 and float64");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("relu only supports float types");
     }
 
     size_t n = a.size();
@@ -563,6 +786,18 @@ void relu(const GPUArray& a, GPUArray& c) {
                 static_cast<double*>(c.data()),
                 n);
             break;
+        case DataType::Float16:
+            relu_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(c.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            relu_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                n);
+            break;
         default:
             break;
     }
@@ -571,13 +806,519 @@ void relu(const GPUArray& a, GPUArray& c) {
 }
 
 GPUArray relu(const GPUArray& a) {
-    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64) {
-        throw std::runtime_error("relu only supports float32 and float64");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("relu only supports float types");
     }
 
     GPUArray c(a.shape(), a.dtype());
     relu(a, c);
     return c;
+}
+
+// ============================================================================
+// Reduction Operations (sum, mean, max)
+// ============================================================================
+
+// Warp-level reduction using shuffle instructions
+__device__ __forceinline__ float warp_reduce_sum(float val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+__device__ __forceinline__ double warp_reduce_sum_f64(double val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+__device__ __forceinline__ float warp_reduce_max(float val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+__device__ __forceinline__ double warp_reduce_max_f64(double val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = fmax(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+// Block-level sum reduction kernel (FP32)
+__global__ void reduce_sum_f32_kernel(const float* __restrict__ input, float* __restrict__ output, size_t n) {
+    __shared__ float shared[32];  // One value per warp
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    // Grid-stride loop to accumulate
+    float sum = 0.0f;
+    for (size_t i = idx; i < n; i += stride) {
+        sum += input[i];
+    }
+
+    // Warp reduction
+    sum = warp_reduce_sum(sum);
+
+    // Write warp result to shared memory
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = sum;
+    }
+    __syncthreads();
+
+    // Final reduction by first warp
+    if (warp_id == 0) {
+        sum = (tid < (blockDim.x + 31) / 32) ? shared[lane] : 0.0f;
+        sum = warp_reduce_sum(sum);
+        if (lane == 0) {
+            atomicAdd(output, sum);
+        }
+    }
+}
+
+// Block-level sum reduction kernel (FP64)
+__global__ void reduce_sum_f64_kernel(const double* __restrict__ input, double* __restrict__ output, size_t n) {
+    __shared__ double shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    double sum = 0.0;
+    for (size_t i = idx; i < n; i += stride) {
+        sum += input[i];
+    }
+
+    sum = warp_reduce_sum_f64(sum);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = sum;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (tid < (blockDim.x + 31) / 32) ? shared[lane] : 0.0;
+        sum = warp_reduce_sum_f64(sum);
+        if (lane == 0) {
+            // atomicAdd for double requires sm_60+
+            atomicAdd(output, sum);
+        }
+    }
+}
+
+// Block-level max reduction kernel (FP32)
+__global__ void reduce_max_f32_kernel(const float* __restrict__ input, float* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float max_val = -INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        max_val = fmaxf(max_val, input[i]);
+    }
+
+    max_val = warp_reduce_max(max_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = max_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : -INFINITY;
+        max_val = warp_reduce_max(max_val);
+        if (lane == 0) {
+            // Atomic max for float - use atomicMax with int cast trick
+            int* addr = (int*)output;
+            int expected = *addr;
+            while (max_val > __int_as_float(expected)) {
+                int old = atomicCAS(addr, expected, __float_as_int(max_val));
+                if (old == expected) break;
+                expected = old;
+            }
+        }
+    }
+}
+
+// Block-level max reduction kernel (FP64)
+__global__ void reduce_max_f64_kernel(const double* __restrict__ input, double* __restrict__ output, size_t n) {
+    __shared__ double shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    double max_val = -INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        max_val = fmax(max_val, input[i]);
+    }
+
+    max_val = warp_reduce_max_f64(max_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = max_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : -INFINITY;
+        max_val = warp_reduce_max_f64(max_val);
+        if (lane == 0) {
+            // Atomic max for double using CAS
+            unsigned long long* addr = (unsigned long long*)output;
+            unsigned long long expected = *addr;
+            while (max_val > __longlong_as_double(expected)) {
+                unsigned long long old = atomicCAS(addr, expected, __double_as_longlong(max_val));
+                if (old == expected) break;
+                expected = old;
+            }
+        }
+    }
+}
+
+// FP16/BF16 reduction kernels - accumulate in FP32 for numerical stability
+// The output is stored as the input dtype
+
+__global__ void reduce_sum_f16_kernel(const __half* __restrict__ input, __half* __restrict__ output, size_t n) {
+    __shared__ float shared[32];  // Accumulate in FP32
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float sum = 0.0f;
+    for (size_t i = idx; i < n; i += stride) {
+        sum += __half2float(input[i]);
+    }
+
+    sum = warp_reduce_sum(sum);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = sum;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (tid < (blockDim.x + 31) / 32) ? shared[lane] : 0.0f;
+        sum = warp_reduce_sum(sum);
+        if (lane == 0) {
+            // Atomic add in FP32, then convert back
+            float old_val = __half2float(*output);
+            *output = __float2half(old_val + sum);
+        }
+    }
+}
+
+__global__ void reduce_sum_bf16_kernel(const __nv_bfloat16* __restrict__ input, __nv_bfloat16* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float sum = 0.0f;
+    for (size_t i = idx; i < n; i += stride) {
+        sum += bf16_to_float(input[i]);
+    }
+
+    sum = warp_reduce_sum(sum);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = sum;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (tid < (blockDim.x + 31) / 32) ? shared[lane] : 0.0f;
+        sum = warp_reduce_sum(sum);
+        if (lane == 0) {
+            float old_val = bf16_to_float(*output);
+            *output = float_to_bf16(old_val + sum);
+        }
+    }
+}
+
+__global__ void reduce_max_f16_kernel(const __half* __restrict__ input, __half* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float max_val = -INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        max_val = fmaxf(max_val, __half2float(input[i]));
+    }
+
+    max_val = warp_reduce_max(max_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = max_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : -INFINITY;
+        max_val = warp_reduce_max(max_val);
+        if (lane == 0) {
+            float old_val = __half2float(*output);
+            if (max_val > old_val) {
+                *output = __float2half(max_val);
+            }
+        }
+    }
+}
+
+__global__ void reduce_max_bf16_kernel(const __nv_bfloat16* __restrict__ input, __nv_bfloat16* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float max_val = -INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        max_val = fmaxf(max_val, bf16_to_float(input[i]));
+    }
+
+    max_val = warp_reduce_max(max_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = max_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : -INFINITY;
+        max_val = warp_reduce_max(max_val);
+        if (lane == 0) {
+            float old_val = bf16_to_float(*output);
+            if (max_val > old_val) {
+                *output = float_to_bf16(max_val);
+            }
+        }
+    }
+}
+
+// Initialize output for reduction
+__global__ void init_sum_f32_kernel(float* output) { *output = 0.0f; }
+__global__ void init_sum_f64_kernel(double* output) { *output = 0.0; }
+__global__ void init_sum_f16_kernel(__half* output) { *output = __float2half(0.0f); }
+__global__ void init_sum_bf16_kernel(__nv_bfloat16* output) { *output = float_to_bf16(0.0f); }
+__global__ void init_max_f32_kernel(float* output) { *output = -INFINITY; }
+__global__ void init_max_f64_kernel(double* output) { *output = -INFINITY; }
+__global__ void init_max_f16_kernel(__half* output) { *output = __float2half(-INFINITY); }
+__global__ void init_max_bf16_kernel(__nv_bfloat16* output) { *output = float_to_bf16(-INFINITY); }
+
+GPUArray sum(const GPUArray& a) {
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("sum only supports float types");
+    }
+
+    GPUArray result({1}, a.dtype());
+    size_t n = a.size();
+
+    const int block_size = 256;
+    const int max_blocks = 256;  // Limit blocks for efficient atomic reduction
+    const int grid_size = std::min((int)((n + block_size - 1) / block_size), max_blocks);
+
+    switch (a.dtype()) {
+        case DataType::Float32:
+            init_sum_f32_kernel<<<1, 1>>>(static_cast<float*>(result.data()));
+            reduce_sum_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(a.data()),
+                static_cast<float*>(result.data()),
+                n);
+            break;
+        case DataType::Float64:
+            init_sum_f64_kernel<<<1, 1>>>(static_cast<double*>(result.data()));
+            reduce_sum_f64_kernel<<<grid_size, block_size>>>(
+                static_cast<const double*>(a.data()),
+                static_cast<double*>(result.data()),
+                n);
+            break;
+        case DataType::Float16:
+            init_sum_f16_kernel<<<1, 1>>>(static_cast<__half*>(result.data()));
+            reduce_sum_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(result.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            init_sum_bf16_kernel<<<1, 1>>>(static_cast<__nv_bfloat16*>(result.data()));
+            reduce_sum_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                n);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("sum kernel failed");
+    return result;
+}
+
+// Dedicated kernel for scaling a single value
+__global__ void scale_f32_kernel(float* data, float scale) {
+    *data *= scale;
+}
+
+__global__ void scale_f64_kernel(double* data, double scale) {
+    *data *= scale;
+}
+
+__global__ void scale_f16_kernel(__half* data, float scale) {
+    *data = __float2half(__half2float(*data) * scale);
+}
+
+__global__ void scale_bf16_kernel(__nv_bfloat16* data, float scale) {
+    *data = float_to_bf16(bf16_to_float(*data) * scale);
+}
+
+GPUArray mean(const GPUArray& a) {
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("mean only supports float types");
+    }
+
+    GPUArray result({1}, a.dtype());
+    size_t n = a.size();
+
+    const int block_size = 256;
+    const int max_blocks = 256;
+    const int grid_size = std::min((int)((n + block_size - 1) / block_size), max_blocks);
+
+    switch (a.dtype()) {
+        case DataType::Float32: {
+            init_sum_f32_kernel<<<1, 1>>>(static_cast<float*>(result.data()));
+            reduce_sum_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(a.data()),
+                static_cast<float*>(result.data()),
+                n);
+            sync_and_check("mean sum kernel failed");
+            scale_f32_kernel<<<1, 1>>>(
+                static_cast<float*>(result.data()),
+                1.0f / static_cast<float>(n));
+            break;
+        }
+        case DataType::Float64: {
+            init_sum_f64_kernel<<<1, 1>>>(static_cast<double*>(result.data()));
+            reduce_sum_f64_kernel<<<grid_size, block_size>>>(
+                static_cast<const double*>(a.data()),
+                static_cast<double*>(result.data()),
+                n);
+            sync_and_check("mean sum kernel failed");
+            scale_f64_kernel<<<1, 1>>>(
+                static_cast<double*>(result.data()),
+                1.0 / static_cast<double>(n));
+            break;
+        }
+        case DataType::Float16: {
+            init_sum_f16_kernel<<<1, 1>>>(static_cast<__half*>(result.data()));
+            reduce_sum_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(result.data()),
+                n);
+            sync_and_check("mean sum kernel failed");
+            scale_f16_kernel<<<1, 1>>>(
+                static_cast<__half*>(result.data()),
+                1.0f / static_cast<float>(n));
+            break;
+        }
+        case DataType::BFloat16: {
+            init_sum_bf16_kernel<<<1, 1>>>(static_cast<__nv_bfloat16*>(result.data()));
+            reduce_sum_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                n);
+            sync_and_check("mean sum kernel failed");
+            scale_bf16_kernel<<<1, 1>>>(
+                static_cast<__nv_bfloat16*>(result.data()),
+                1.0f / static_cast<float>(n));
+            break;
+        }
+        default:
+            break;
+    }
+
+    sync_and_check("mean kernel failed");
+    return result;
+}
+
+GPUArray max(const GPUArray& a) {
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float64 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("max only supports float types");
+    }
+
+    GPUArray result({1}, a.dtype());
+    size_t n = a.size();
+
+    const int block_size = 256;
+    const int max_blocks = 256;
+    const int grid_size = std::min((int)((n + block_size - 1) / block_size), max_blocks);
+
+    switch (a.dtype()) {
+        case DataType::Float32:
+            init_max_f32_kernel<<<1, 1>>>(static_cast<float*>(result.data()));
+            reduce_max_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(a.data()),
+                static_cast<float*>(result.data()),
+                n);
+            break;
+        case DataType::Float64:
+            init_max_f64_kernel<<<1, 1>>>(static_cast<double*>(result.data()));
+            reduce_max_f64_kernel<<<grid_size, block_size>>>(
+                static_cast<const double*>(a.data()),
+                static_cast<double*>(result.data()),
+                n);
+            break;
+        case DataType::Float16:
+            init_max_f16_kernel<<<1, 1>>>(static_cast<__half*>(result.data()));
+            reduce_max_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(result.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            init_max_bf16_kernel<<<1, 1>>>(static_cast<__nv_bfloat16*>(result.data()));
+            reduce_max_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                n);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("max kernel failed");
+    return result;
 }
 
 // ============================================================================
@@ -1230,34 +1971,69 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                     static_cast<double*>(c.data()),
                     M, N, K);
                 break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
             default:
-                throw std::runtime_error("matmul only supports float32 and float64");
+                throw std::runtime_error("matmul only supports float types");
         }
     } else {
         // L2-optimized kernel for small matrices (Ampere+)
-        dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid_size(
-            (N + BLOCK_SIZE - 1) / BLOCK_SIZE,
-            (M + BLOCK_SIZE - 1) / BLOCK_SIZE
-        );
-
+        // or FP16/BF16 kernels
         switch (a.dtype()) {
-            case DataType::Float32:
+            case DataType::Float32: {
+                dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
+                dim3 grid_size(
+                    (N + BLOCK_SIZE - 1) / BLOCK_SIZE,
+                    (M + BLOCK_SIZE - 1) / BLOCK_SIZE
+                );
                 matmul_f32_l2opt_kernel<<<grid_size, block_size>>>(
                     static_cast<const float*>(a.data()),
                     static_cast<const float*>(b.data()),
                     static_cast<float*>(c.data()),
                     M, N, K);
                 break;
-            case DataType::Float64:
+            }
+            case DataType::Float64: {
+                dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
+                dim3 grid_size(
+                    (N + BLOCK_SIZE - 1) / BLOCK_SIZE,
+                    (M + BLOCK_SIZE - 1) / BLOCK_SIZE
+                );
                 matmul_f64_l2opt_kernel<<<grid_size, block_size>>>(
                     static_cast<const double*>(a.data()),
                     static_cast<const double*>(b.data()),
                     static_cast<double*>(c.data()),
                     M, N, K);
                 break;
+            }
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
             default:
-                throw std::runtime_error("matmul only supports float32 and float64");
+                throw std::runtime_error("matmul only supports float types");
         }
     }
 
@@ -1378,8 +2154,22 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
                     static_cast<double*>(c.data()),
                     M, N, K);
                 break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
             default:
-                throw std::runtime_error("matmul only supports float32 and float64");
+                throw std::runtime_error("matmul only supports float32, float64, float16, and bfloat16");
         }
     } else {
         dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
@@ -1403,8 +2193,22 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
                     static_cast<double*>(c.data()),
                     M, N, K);
                 break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
             default:
-                throw std::runtime_error("matmul only supports float32 and float64");
+                throw std::runtime_error("matmul only supports float32, float64, float16, and bfloat16");
         }
     }
 

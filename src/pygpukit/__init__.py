@@ -10,7 +10,7 @@ from pygpukit.core.device import (
     get_device_info,
     is_cuda_available,
 )
-from pygpukit.core.dtypes import DataType, float32, float64, int32, int64
+from pygpukit.core.dtypes import DataType, float32, float64, float16, bfloat16, int32, int64
 from pygpukit.core.factory import empty, from_numpy, ones, zeros
 from pygpukit.core.stream import Stream, StreamManager, default_stream
 from pygpukit.jit.compiler import (
@@ -27,7 +27,7 @@ from pygpukit.jit.compiler import (
     jit,
     warmup,
 )
-from pygpukit.ops.basic import add, div, exp, log, matmul, mul, relu, sub
+from pygpukit.ops.basic import add, div, exp, log, matmul, max, mean, mul, relu, sub, sum
 
 # Try to import Rust types, fallback to Python implementations
 try:
@@ -53,6 +53,8 @@ __all__ = [
     "DataType",
     "float32",
     "float64",
+    "float16",
+    "bfloat16",
     "int32",
     "int64",
     # Factory functions
@@ -86,4 +88,8 @@ __all__ = [
     "log",
     "relu",
     "matmul",
+    # Reductions
+    "sum",
+    "mean",
+    "max",
 ]

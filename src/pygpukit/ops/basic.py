@@ -23,9 +23,9 @@ def _validate_same_dtype(a: GPUArray, b: GPUArray, op_name: str) -> None:
 
 def _validate_float_dtype(a: GPUArray, op_name: str) -> None:
     """Validate that array has float dtype."""
-    from pygpukit.core.dtypes import float32, float64
-    if a.dtype not in (float32, float64):
-        raise ValueError(f"{op_name} requires float32 or float64 dtype, got {a.dtype}")
+    from pygpukit.core.dtypes import float32, float64, float16, bfloat16
+    if a.dtype not in (float32, float64, float16, bfloat16):
+        raise ValueError(f"{op_name} requires float dtype, got {a.dtype}")
 
 
 def add(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -412,4 +412,126 @@ def _matmul_native(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) ->
         c_native = native.matmul(a_native, b_native)
 
     # Wrap result (zero-copy)
+    return GPUArray._wrap_native(c_native)
+
+
+# ============================================================================
+# Reduction Operations
+# ============================================================================
+
+
+def sum(a: GPUArray) -> GPUArray:
+    """Sum of all elements.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the sum.
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "sum")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _sum_native(a)
+    else:
+        return _sum_cpu(a)
+
+
+def _sum_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of sum."""
+    a_np = a.to_numpy()
+    result_np = np.array([np.sum(a_np)], dtype=a_np.dtype)
+    return from_numpy(result_np)
+
+
+def _sum_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of sum (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.sum(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def mean(a: GPUArray) -> GPUArray:
+    """Mean of all elements.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the mean.
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "mean")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _mean_native(a)
+    else:
+        return _mean_cpu(a)
+
+
+def _mean_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of mean."""
+    a_np = a.to_numpy()
+    result_np = np.array([np.mean(a_np)], dtype=a_np.dtype)
+    return from_numpy(result_np)
+
+
+def _mean_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of mean (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.mean(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def max(a: GPUArray) -> GPUArray:
+    """Max of all elements.
+
+    Args:
+        a: Input array (float32 or float64).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the maximum value.
+
+    Raises:
+        ValueError: If dtype is not float32 or float64.
+    """
+    _validate_float_dtype(a, "max")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _max_native(a)
+    else:
+        return _max_cpu(a)
+
+
+def _max_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of max."""
+    a_np = a.to_numpy()
+    result_np = np.array([np.max(a_np)], dtype=a_np.dtype)
+    return from_numpy(result_np)
+
+
+def _max_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of max (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.max(a_native)
     return GPUArray._wrap_native(c_native)

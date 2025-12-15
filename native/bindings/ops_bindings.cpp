@@ -98,4 +98,20 @@ void init_ops_bindings(py::module_& m) {
     m.def("matmul_tf32_", py::overload_cast<const GPUArray&, const GPUArray&, GPUArray&, bool>(&ops::matmul),
           py::arg("a"), py::arg("b"), py::arg("out"), py::arg("use_tf32"),
           "Matrix multiplication with explicit TF32 control and output array");
+
+    // ========================================================================
+    // Reduction operations
+    // ========================================================================
+
+    m.def("sum", &ops::sum,
+          py::arg("a"),
+          "Sum of all elements (float32/float64 only), returns scalar GPUArray");
+
+    m.def("mean", &ops::mean,
+          py::arg("a"),
+          "Mean of all elements (float32/float64 only), returns scalar GPUArray");
+
+    m.def("max", &ops::max,
+          py::arg("a"),
+          "Max of all elements (float32/float64 only), returns scalar GPUArray");
 }

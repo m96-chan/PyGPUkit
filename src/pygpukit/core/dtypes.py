@@ -12,6 +12,8 @@ class DataTypeKind(Enum):
 
     FLOAT32 = "float32"
     FLOAT64 = "float64"
+    FLOAT16 = "float16"
+    BFLOAT16 = "bfloat16"
     INT32 = "int32"
     INT64 = "int64"
 
@@ -43,6 +45,8 @@ class DataType:
         dtype_map = {
             DataTypeKind.FLOAT32: np.float32,
             DataTypeKind.FLOAT64: np.float64,
+            DataTypeKind.FLOAT16: np.float16,
+            DataTypeKind.BFLOAT16: np.uint16,  # NumPy has no native bfloat16
             DataTypeKind.INT32: np.int32,
             DataTypeKind.INT64: np.int64,
         }
@@ -60,6 +64,11 @@ class DataType:
             return float32
         elif name == "float64":
             return float64
+        elif name == "float16":
+            return float16
+        elif name == "uint16":
+            # uint16 is used as storage for bfloat16
+            return bfloat16
         elif name == "int32":
             return int32
         elif name == "int64":
@@ -73,6 +82,8 @@ class DataType:
         type_map = {
             "float32": float32,
             "float64": float64,
+            "float16": float16,
+            "bfloat16": bfloat16,
             "int32": int32,
             "int64": int64,
         }
@@ -84,5 +95,7 @@ class DataType:
 # Pre-defined data types
 float32 = DataType(DataTypeKind.FLOAT32, 4, "float32")
 float64 = DataType(DataTypeKind.FLOAT64, 8, "float64")
+float16 = DataType(DataTypeKind.FLOAT16, 2, "float16")
+bfloat16 = DataType(DataTypeKind.BFLOAT16, 2, "bfloat16")
 int32 = DataType(DataTypeKind.INT32, 4, "int32")
 int64 = DataType(DataTypeKind.INT64, 8, "int64")

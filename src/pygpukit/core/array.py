@@ -62,7 +62,7 @@ class GPUArray:
         This is the fast path for GPU operations - no data copying.
         """
         from pygpukit.core.backend import get_native_module
-        from pygpukit.core.dtypes import float32, float64, int32, int64
+        from pygpukit.core.dtypes import float32, float64, float16, bfloat16, int32, int64
 
         native = get_native_module()
 
@@ -72,6 +72,10 @@ class GPUArray:
             dtype = float32
         elif native_dtype == native.DataType.Float64:
             dtype = float64
+        elif native_dtype == native.DataType.Float16:
+            dtype = float16
+        elif native_dtype == native.DataType.BFloat16:
+            dtype = bfloat16
         elif native_dtype == native.DataType.Int32:
             dtype = int32
         elif native_dtype == native.DataType.Int64:
@@ -173,6 +177,38 @@ class GPUArray:
         backend = get_backend()
         flat_array = backend.copy_device_to_host(self._device_ptr, self.nbytes, self._dtype)
         return flat_array.reshape(self._shape)
+
+    def is_contiguous(self) -> bool:
+        """Check if the array is contiguous in memory.
+
+        Returns:
+            Always True, as PyGPUkit arrays are always contiguous (no stride support).
+        """
+        return True
+
+    def contiguous(self) -> GPUArray:
+        """Return a contiguous array.
+
+        If the array is already contiguous, returns self.
+        Otherwise, returns a contiguous copy.
+
+        Returns:
+            A contiguous GPUArray (always self, since arrays are always contiguous).
+        """
+        # All PyGPUkit arrays are contiguous (no stride support yet)
+        return self
+
+    def clone(self) -> GPUArray:
+        """Create a deep copy of the array.
+
+        Returns:
+            A new GPUArray with copied data.
+        """
+        from pygpukit.core.factory import from_numpy
+
+        # Copy via NumPy (simple and reliable)
+        np_data = self.to_numpy().copy()
+        return from_numpy(np_data)
 
     def __repr__(self) -> str:
         backend_type = "native" if self._native is not None else "simulation"
