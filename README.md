@@ -23,6 +23,29 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ## What's New in v0.2.6
 
+### CUTLASS Backend (Default)
+NVIDIA CUTLASS v4.3.0 is now the default GEMM backend, delivering optimized TensorCore performance out of the box.
+
+| Feature | Description |
+|---------|-------------|
+| **TF32 TensorCore** | 31+ TFLOPS for FP32 inputs (automatic) |
+| **FP16 TensorCore** | 63 TFLOPS |
+| **BF16 TensorCore** | 63 TFLOPS |
+| **Zero Config** | No environment variables needed |
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# CUTLASS TF32 is automatic for FP32 (31+ TFLOPS)
+a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float32))
+b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float32))
+c = a @ b  # Uses CUTLASS TF32 TensorCore
+
+# For full FP32 precision (no TF32), set:
+# PYGPUKIT_NO_TF32=1
+```
+
 ### Multi-LLM Async Execution
 Run multiple AI models (LLM, TTS, Vision) concurrently on a single GPU with independent CUDA streams and VRAM budgets.
 
@@ -63,28 +86,25 @@ result = asyncio.run(run_parallel())
 | Sequential | 986.8ms | 1.0x |
 | Parallel | 292.6ms | **3.37x** |
 
-### FP16/BF16 TensorCore Optimization
+### FP16/BF16 TensorCore (via CUTLASS)
 | Feature | Description |
 |---------|-------------|
-| **FP16 TensorCore** | 53 TFLOPS (22x faster than v0.2.5) |
-| **BF16 TensorCore** | 52 TFLOPS (22x faster than v0.2.5) |
-| **mma.sync.m16n8k16** | PTX-level TensorCore instructions |
+| **FP16 TensorCore** | 63 TFLOPS (automatic via CUTLASS) |
+| **BF16 TensorCore** | 63 TFLOPS (automatic via CUTLASS) |
 | **FP32 Accumulation** | Numerical stability maintained |
 
 ```python
-import os
-os.environ["PYGPUKIT_ALLOW_FP16_TC"] = "1"  # Enable TensorCore
-
 import pygpukit as gpk
 import numpy as np
 
-# FP16 TensorCore matmul (53 TFLOPS on RTX 3090 Ti)
+# FP16 TensorCore matmul (63 TFLOPS on RTX 3090 Ti)
+# No environment variable needed - CUTLASS is automatic
 a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
 b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
-c = a @ b  # Uses TensorCore when size is multiple of (128, 128, 32)
+c = a @ b  # Uses CUTLASS TensorCore
 ```
 
-> **Note:** TensorCore path requires matrix dimensions divisible by (M=128, N=128, K=32).
+> **Note:** CUTLASS requires matrix dimensions divisible by 16.
 
 ---
 
@@ -170,19 +190,19 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 |---------|------|------|------|------|--------------|
 | **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | — | — | CPU only |
 | **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | ~75 TFLOPS | ~83 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** | 16.7 TFLOPS | 29.7 TFLOPS | **53 TFLOPS** | **52 TFLOPS** | GPU drivers only |
+| **PyGPUkit** (CUTLASS) | 18 TFLOPS | **31 TFLOPS** | **63 TFLOPS** | **63 TFLOPS** | GPU drivers only |
 
 > Built-in matmul kernels are pre-compiled. Driver-Only and Full (JIT) modes have identical matmul performance. JIT is only needed for custom kernels.
 
 ### PyGPUkit Performance by Matrix Size
 
-| Matrix Size | FP32 | TF32 | FP16 (TC) | BF16 (TC) |
-|-------------|------|------|-----------|-----------|
-| 2048×2048 | 9.6 TFLOPS | 13.2 TFLOPS | 17.9 TFLOPS | 19.0 TFLOPS |
-| 4096×4096 | 14.7 TFLOPS | 22.8 TFLOPS | 37.8 TFLOPS | 31.2 TFLOPS |
-| 8192×8192 | 16.7 TFLOPS | 29.7 TFLOPS | **53.1 TFLOPS** | **52.2 TFLOPS** |
+| Matrix Size | FP32 (NO_TF32) | TF32 (CUTLASS) | FP16 (CUTLASS) | BF16 (CUTLASS) |
+|-------------|----------------|----------------|----------------|----------------|
+| 2048×2048 | 9.6 TFLOPS | 13 TFLOPS | 15 TFLOPS | 21 TFLOPS |
+| 4096×4096 | 14.7 TFLOPS | 22 TFLOPS | 44 TFLOPS | 44 TFLOPS |
+| 8192×8192 | 18 TFLOPS | **31 TFLOPS** | **63 TFLOPS** | **63 TFLOPS** |
 
-> **Note:** FP16/BF16 TensorCore requires `PYGPUKIT_ALLOW_FP16_TC=1` and matrix sizes divisible by (128, 128, 32).
+> **Note:** CUTLASS is automatic for compatible sizes (16-aligned). Use `PYGPUKIT_NO_TF32=1` for full FP32 precision.
 
 ---
 
@@ -334,7 +354,7 @@ PyGPUkit/
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 28 TFLOPS |
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
 | **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
-| **v0.2.6** | **Multi-LLM async execution**, FP16/BF16 TensorCore (53 TFLOPS), 3.37x parallel speedup |
+| **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM async execution |
 
 ### Planned
 
