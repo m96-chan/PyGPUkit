@@ -422,7 +422,9 @@ PyGPUkit/
   rust/            # Rust backend (memory pool, scheduler)
     pygpukit-core/   # Pure Rust core logic
     pygpukit-python/ # PyO3 bindings
+  docs/            # Documentation guides
   examples/        # Demo scripts
+  scripts/         # Build scripts, benchmarks
   tests/           # Test suite
 ```
 
