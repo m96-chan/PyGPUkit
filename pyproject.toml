@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "PyGPUkit"
-version = "0.2.4"
+version = "0.2.5"
 description = "A lightweight GPU runtime for Python with Rust-powered scheduler, NVRTC JIT compilation, and NumPy-like API"
 readme = "README.md"
 license = "MIT"
