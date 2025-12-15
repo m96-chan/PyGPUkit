@@ -79,7 +79,7 @@ def main():
         quota=100 * 1024 * 1024,  # 100 MB quota
         enable_eviction=True
     )
-    print(f"Created pool with 100 MB quota, eviction enabled")
+    print("Created pool with 100 MB quota, eviction enabled")
 
     # Allocate blocks
     block_ids = []
@@ -90,7 +90,7 @@ def main():
         print(f"  Allocated block {block.id}: {block.size} bytes")
 
     stats = pool.stats()
-    print(f"\nPool stats:")
+    print("\nPool stats:")
     print(f"  Active: {stats.active_blocks} blocks, {stats.used} bytes")
     print(f"  Allocations: {stats.allocation_count}")
     print(f"  Quota usage: {stats.used / stats.quota:.1%}")
@@ -147,7 +147,7 @@ def main():
         print(f"\nCompleted: {runnable_ids[0]}")
 
     sched_stats = scheduler.stats()
-    print(f"\nScheduler stats:")
+    print("\nScheduler stats:")
     print(f"  Total submitted: {sched_stats.total_submitted}")
     print(f"  Completed: {sched_stats.completed_count}")
     print(f"  Pending: {sched_stats.pending_count}")
@@ -188,7 +188,7 @@ def main():
         print(f"  Completed transfer {op.id}")
 
     transfer_stats = transfer_engine.stats()
-    print(f"\nTransfer stats:")
+    print("\nTransfer stats:")
     print(f"  Total queued: {transfer_stats.total_queued}")
     print(f"  Completed: {transfer_stats.completed_count}")
     print(f"  Pending: {transfer_stats.pending_count}")
@@ -228,7 +228,7 @@ def main():
         dispatcher.mark_completed(req.id)
 
     dispatch_stats = dispatcher.stats()
-    print(f"\nDispatch stats:")
+    print("\nDispatch stats:")
     print(f"  Total queued: {dispatch_stats.total_queued}")
     print(f"  Completed: {dispatch_stats.completed_count}")
     print(f"  Pending: {dispatch_stats.pending_count}")
@@ -342,10 +342,10 @@ def main():
         # Allocate memory
         input_block_id = pool.allocate(batch_size * hidden_dim * 4)
         weight_block_id = pool.allocate(hidden_dim * hidden_dim * 4)
-        output_block_id = pool.allocate(batch_size * hidden_dim * 4)
+        pool.allocate(batch_size * hidden_dim * 4)
 
         # Queue transfer
-        h2d_id = transfer_engine.enqueue_h2d(
+        transfer_engine.enqueue_h2d(
             host_ptr=0x1000,
             device_ptr=input_block_id,
             size=batch_size * hidden_dim * 4
@@ -353,7 +353,7 @@ def main():
 
         # Queue kernel
         config = rust.LaunchConfig.linear(batch_size * hidden_dim, 256)
-        kernel_id = dispatcher.queue(
+        dispatcher.queue(
             kernel_handle=0xFFFF0000 + layer,
             config=config,
             task_id=task_id,
@@ -368,7 +368,7 @@ def main():
         W_gpu = native.from_numpy(W)
 
         start = time.perf_counter()
-        out_gpu = native.matmul(A_gpu, W_gpu)
+        native.matmul(A_gpu, W_gpu)
         layer_time = time.perf_counter() - start
 
         total_time += layer_time
@@ -383,7 +383,7 @@ def main():
 
     throughput = total_flops / total_time / 1e9
 
-    print(f"\nPipeline completed:")
+    print("\nPipeline completed:")
     print(f"  Total time: {total_time*1000:.2f} ms")
     print(f"  Throughput: {throughput:.1f} GFLOPS")
     print(f"  Tasks completed: {scheduler.stats().completed_count}")

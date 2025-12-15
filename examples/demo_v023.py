@@ -69,7 +69,7 @@ def main():
 
     # Get device capabilities (v0.2.3 feature)
     caps = gp.get_device_capabilities()
-    print(f"\nDevice Capabilities:")
+    print("\nDevice Capabilities:")
     print(f"  SM Version: {caps.sm_version}")
     print(f"  TensorCore (TF32): {caps.tensorcore}")
     print(f"  TensorCore (FP16): {caps.tensorcore_fp16}")
@@ -116,14 +116,14 @@ def main():
     # FP32 error
     fp32_abs_err = np.max(np.abs(result_fp32 - expected))
     fp32_rel_err = np.max(np.abs(result_fp32 - expected) / (np.abs(expected) + 1e-8))
-    print(f"\nFP32 Error:")
+    print("\nFP32 Error:")
     print(f"  Max absolute error: {fp32_abs_err:.6e}")
     print(f"  Max relative error: {fp32_rel_err:.6e} ({fp32_rel_err*100:.4f}%)")
 
     # TF32 error (expected to be higher due to reduced precision)
     tf32_abs_err = np.max(np.abs(result_tf32 - expected))
     tf32_rel_err = np.max(np.abs(result_tf32 - expected) / (np.abs(expected) + 1e-8))
-    print(f"\nTF32 Error:")
+    print("\nTF32 Error:")
     print(f"  Max absolute error: {tf32_abs_err:.6e}")
     print(f"  Max relative error: {tf32_rel_err:.6e} ({tf32_rel_err*100:.4f}%)")
 

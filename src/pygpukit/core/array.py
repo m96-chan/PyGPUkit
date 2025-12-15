@@ -62,7 +62,7 @@ class GPUArray:
         This is the fast path for GPU operations - no data copying.
         """
         from pygpukit.core.backend import get_native_module
-        from pygpukit.core.dtypes import float32, float64, float16, bfloat16, int32, int64
+        from pygpukit.core.dtypes import bfloat16, float16, float32, float64, int32, int64
 
         native = get_native_module()
 
@@ -278,8 +278,8 @@ class GPUArray:
         if self._dtype == dtype:
             return self
 
+        from pygpukit.core.dtypes import bfloat16, float16, float32
         from pygpukit.core.factory import from_numpy
-        from pygpukit.core.dtypes import bfloat16, float32, float16
 
         # Get numpy array
         np_data = self.to_numpy()

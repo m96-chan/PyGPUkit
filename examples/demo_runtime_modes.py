@@ -9,7 +9,6 @@ This demo shows the three runtime modes of PyGPUkit:
 Run this script to see which mode your system supports.
 """
 
-import sys
 
 
 def print_header(title: str) -> None:
@@ -164,7 +163,6 @@ def demo_cpu_simulation_mode() -> bool:
 
     # Demo: Operations work via NumPy
     print("\n  [Demo] CPU-Simulated Operations:")
-    import numpy as np
 
     # Create arrays (backed by NumPy in simulation mode)
     A = gp.zeros((128, 128), dtype="float32")

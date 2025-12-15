@@ -10,9 +10,10 @@ Demonstrates all features available in v0.2.5:
 - Type conversion: astype()
 """
 
-import numpy as np
-import time
 import os
+import time
+
+import numpy as np
 
 # Set TF32 environment before import
 os.environ["PYGPUKIT_ALLOW_TF32"] = "1"
@@ -292,7 +293,7 @@ def main():
     print("=" * 60)
 
     # Show version and backend info
-    print(f"\nBackend: Native C++/CUDA")
+    print("\nBackend: Native C++/CUDA")
     print(f"TF32 enabled: {os.environ.get('PYGPUKIT_ALLOW_TF32', '0') == '1'}")
 
     demo_dtypes()

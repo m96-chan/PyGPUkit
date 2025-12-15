@@ -91,7 +91,7 @@ def main():
         quota=100 * 1024 * 1024,  # 100 MB quota
         enable_eviction=True
     )
-    print(f"Created pool with 100 MB quota, eviction enabled")
+    print("Created pool with 100 MB quota, eviction enabled")
 
     # Allocate blocks
     block_ids = []
@@ -102,7 +102,7 @@ def main():
         print(f"  Allocated block {block.id}: {block.size} bytes")
 
     stats = pool.stats()
-    print(f"\nPool stats:")
+    print("\nPool stats:")
     print(f"  Active: {stats.active_blocks} blocks, {stats.used} bytes")
     print(f"  Allocations: {stats.allocation_count}")
     print(f"  Quota usage: {stats.used / stats.quota:.1%}")
@@ -240,7 +240,7 @@ def main():
         print(f"  Admitted task {i}: {task_id}")
 
     admission_stats = admission_scheduler.stats()
-    print(f"\nAdmission results:")
+    print("\nAdmission results:")
     print(f"  Total submitted: {admission_stats.total_submitted}")
     print(f"  Reserved memory: {admission_stats.reserved_memory / 1024 / 1024:.0f} MB")
 
@@ -277,7 +277,7 @@ def main():
             print(f"  {class_name:12} | {task.name:15} | QUEUED")
 
     qos_stats = qos_evaluator.stats()
-    print(f"\nQoS stats:")
+    print("\nQoS stats:")
     print(f"  Guaranteed memory: {qos_stats.guaranteed_memory / 1024 / 1024:.0f} MB")
     print(f"  Burstable memory: {qos_stats.burstable_memory / 1024 / 1024:.0f} MB")
     print(f"  Available memory: {qos_stats.available_memory / 1024 / 1024:.0f} MB")
@@ -300,7 +300,7 @@ def main():
     # Allocate bandwidth to streams
     pacing_engine.allocate_stream(0, 0.6)  # 60% to stream 0
     pacing_engine.allocate_stream(1, 0.3)  # 30% to stream 1
-    print(f"\nAllocated bandwidth: stream 0=60%, stream 1=30%")
+    print("\nAllocated bandwidth: stream 0=60%, stream 1=30%")
 
     # Test launch decisions
     for stream_id in [0, 1, 2]:  # 2 is unknown
@@ -315,7 +315,7 @@ def main():
             print(f"  Stream {stream_id}: WAIT {decision.wait_ms():.2f}ms")
 
     pacing_stats = pacing_engine.stats()
-    print(f"\nPacing stats:")
+    print("\nPacing stats:")
     print(f"  Streams: {pacing_stats.stream_count}")
     print(f"  Used bandwidth: {pacing_stats.used_bandwidth:.1%}")
     print(f"  Total launches: {pacing_stats.total_launches}")
@@ -366,7 +366,7 @@ def main():
         executed += 1
 
     slice_stats = slice_scheduler.stats()
-    print(f"\nSlice stats:")
+    print("\nSlice stats:")
     print(f"  Total slices: {slice_stats.total_slices}")
     print(f"  Completed: {slice_stats.completed_slices}")
     print(f"  Pending: {slice_stats.pending_slices}")
@@ -407,7 +407,7 @@ def main():
     print(f"Re-allocated 65KB: reused={result2[2]}")
 
     pinned_stats = pinned_manager.stats()
-    print(f"\nPinned stats:")
+    print("\nPinned stats:")
     print(f"  Current used: {pinned_stats.current_used} bytes")
     print(f"  Pool hits: {pinned_stats.pool_hits}")
     print(f"  Pool misses: {pinned_stats.pool_misses}")
@@ -458,7 +458,7 @@ def main():
         kernel_cache.set_handles(key, 0xAABB0000 + i, 0xCCDD0000 + i)
 
     cache_stats = kernel_cache.stats()
-    print(f"\nCache stats:")
+    print("\nCache stats:")
     print(f"  Entries: {cache_stats.entries}")
     print(f"  Hits: {cache_stats.hits}")
     print(f"  Misses: {cache_stats.misses}")
@@ -492,7 +492,7 @@ def main():
     # Assign tasks
     partition_manager.assign_task("inference-task-1", "inference")
     partition_manager.assign_task("training-task-1", "training")
-    print(f"\nAssigned tasks to partitions")
+    print("\nAssigned tasks to partitions")
 
     # Check partition for task
     for task_id in ["inference-task-1", "training-task-1", "unknown-task"]:
@@ -503,7 +503,7 @@ def main():
             print(f"  {task_id} -> (no partition)")
 
     partition_stats = partition_manager.stats()
-    print(f"\nPartition stats:")
+    print("\nPartition stats:")
     print(f"  Partitions: {partition_stats.partition_count}")
     print(f"  Memory allocated: {partition_stats.total_memory_allocated / 1024**3:.1f} GB")
     print(f"  Compute allocated: {partition_stats.total_compute_allocated:.0%}")
@@ -603,8 +603,8 @@ def main():
     """)
 
     # Count tests
-    print(f"Total Rust tests: 106 passing")
-    print(f"Features demonstrated: 12")
+    print("Total Rust tests: 106 passing")
+    print("Features demonstrated: 12")
 
     print("\n" + "=" * 70)
     print(" PyGPUkit v0.2 Demo Complete!")

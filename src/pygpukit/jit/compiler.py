@@ -386,7 +386,6 @@ class JITKernel:
         # Try compilation with fallback on PTX load failure
         fallback_archs = self._get_fallback_archs(native)
         last_error: Exception | None = None
-        arch_used: str | None = None
 
         for arch_attempt, arch in enumerate(fallback_archs):
             current_options = self._replace_arch_option(options, arch)
@@ -399,7 +398,6 @@ class JITKernel:
                     )
                     self._ptx = self._kernel.ptx
                     self._is_compiled = self._kernel.is_compiled
-                    arch_used = arch
 
                     # Warn if fallback was used
                     if arch_attempt > 0:

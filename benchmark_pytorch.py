@@ -1,5 +1,7 @@
 """Benchmark PyTorch cuBLAS for comparison with PyGPUkit."""
+
 import time
+
 import numpy as np
 
 try:
@@ -37,4 +39,4 @@ for size in sizes:
 
     median_time = np.median(times)
     tflops = 2 * size**3 / median_time / 1e12
-    print(f"{size}x{size}: {tflops:.1f} TFLOPS ({median_time*1000:.2f} ms)")
+    print(f"{size}x{size}: {tflops:.1f} TFLOPS ({median_time * 1000:.2f} ms)")

@@ -23,7 +23,7 @@ def _validate_same_dtype(a: GPUArray, b: GPUArray, op_name: str) -> None:
 
 def _validate_float_dtype(a: GPUArray, op_name: str) -> None:
     """Validate that array has float dtype."""
-    from pygpukit.core.dtypes import float32, float64, float16, bfloat16
+    from pygpukit.core.dtypes import bfloat16, float16, float32, float64
     if a.dtype not in (float32, float64, float16, bfloat16):
         raise ValueError(f"{op_name} requires float dtype, got {a.dtype}")
 

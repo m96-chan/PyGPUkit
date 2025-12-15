@@ -10,7 +10,7 @@ from pygpukit.core.device import (
     get_device_info,
     is_cuda_available,
 )
-from pygpukit.core.dtypes import DataType, float32, float64, float16, bfloat16, int32, int64
+from pygpukit.core.dtypes import DataType, bfloat16, float16, float32, float64, int32, int64
 from pygpukit.core.factory import empty, from_numpy, ones, zeros
 from pygpukit.core.stream import Stream, StreamManager, default_stream
 from pygpukit.jit.compiler import (
