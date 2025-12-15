@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from pygpukit.core.array import GPUArray
 from pygpukit.core.factory import from_numpy
-from pygpukit.ops.basic import add, gelu, layernorm, matmul
+from pygpukit.ops.basic import add, bias_add_inplace, gelu, layernorm, matmul, transpose
 
 if TYPE_CHECKING:
     pass
@@ -43,8 +43,8 @@ class GPT2Config:
 class Linear:
     """Linear layer: y = xW^T + b
 
-    For MVP, we store weight as [out_features, in_features] and transpose
-    during forward pass using simple element access.
+    Weights are stored as [out_features, in_features] (PyTorch convention).
+    Forward pass uses GPU transpose and bias_add_inplace for efficiency.
     """
 
     def __init__(
@@ -64,6 +64,8 @@ class Linear:
         self.bias = bias
         self.out_features = weight.shape[0]
         self.in_features = weight.shape[1]
+        # Pre-transpose weight for efficient forward pass
+        self._weight_t: GPUArray | None = None
 
     def __call__(self, x: GPUArray) -> GPUArray:
         """Forward pass: y = xW^T + b
@@ -77,30 +79,19 @@ class Linear:
         if x.ndim != 2:
             raise ValueError(f"input must be 2D [batch, in_features], got {x.ndim}D")
         if x.shape[1] != self.in_features:
-            raise ValueError(
-                f"input features {x.shape[1]} doesn't match weight {self.in_features}"
-            )
+            raise ValueError(f"input features {x.shape[1]} doesn't match weight {self.in_features}")
 
-        # For MVP: transpose weight and use matmul
-        # x: [batch, in_features]
-        # weight: [out_features, in_features]
-        # We need: y = x @ weight.T = x @ [in_features, out_features]
-
-        # Simple approach: transpose weight to CPU, create new GPU array
-        # This is not optimal but works for MVP
-        weight_np = self.weight.to_numpy()
-        weight_t = from_numpy(weight_np.T.copy())  # [in_features, out_features]
+        # Lazy transpose - compute once and cache
+        # weight: [out_features, in_features] -> weight_t: [in_features, out_features]
+        if self._weight_t is None:
+            self._weight_t = transpose(self.weight)
 
         # y = x @ weight_t: [batch, in_features] @ [in_features, out_features] = [batch, out_features]
-        y = matmul(x, weight_t)
+        y = matmul(x, self._weight_t)
 
+        # Add bias in-place on GPU if present
         if self.bias is not None:
-            # Add bias: y[i, j] += bias[j]
-            # For now, do this on CPU as we don't have broadcast add
-            y_np = y.to_numpy()
-            bias_np = self.bias.to_numpy()
-            y_np += bias_np
-            y = from_numpy(y_np)
+            bias_add_inplace(y, self.bias)
 
         return y
 
@@ -332,7 +323,7 @@ class GPT2Model:
 
         for _ in range(max_new_tokens):
             # Truncate to max context length
-            context = tokens[-self.config.n_positions:]
+            context = tokens[-self.config.n_positions :]
 
             # Forward pass
             hidden = self(context)

@@ -5,6 +5,7 @@
 #include "../common/error.cuh"
 #include "../common/device.cuh"
 #include "../../core/memory.hpp"
+#include "../ops.cuh"  // For transpose()
 
 // Include existing optimized kernels
 #include "../matmul_f32_ampere.cuh"
@@ -23,6 +24,12 @@ extern "C" {
     cudaError_t cutlass_gemm_fp16(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream);
     cudaError_t cutlass_gemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K, cudaStream_t stream);
     bool cutlass_is_compatible(int M, int N, int K);
+    bool cutlass_is_sm_supported();
+
+    // BiasGELU fused operations
+    cudaError_t cutlass_gemm_tf32_bias_gelu(const float* A, const float* B, const float* bias, float* D, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_fp16_bias_gelu(const __half* A, const __half* B, const __half* bias, __half* D, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_bf16_bias_gelu(const __nv_bfloat16* A, const __nv_bfloat16* B, const __nv_bfloat16* bias, __nv_bfloat16* D, int M, int N, int K, cudaStream_t stream);
 }
 
 namespace pygpukit {
@@ -56,9 +63,10 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     bool tf32_disabled = no_tf32_env &&
         (no_tf32_env[0] == '1' || no_tf32_env[0] == 'y' || no_tf32_env[0] == 'Y');
 
-    // CUTLASS enabled by default if dimensions are compatible
+    // CUTLASS enabled by default if dimensions are compatible AND SM >= 86
+    // v0.2.7+ requires SM >= 86 (RTX 30xx and newer)
     // For FP32: skip CUTLASS TF32 if NO_TF32 is set (will use native FP32 kernel)
-    bool cutlass_enabled = !cutlass_disabled && cutlass_is_compatible(M, N, K);
+    bool cutlass_enabled = !cutlass_disabled && cutlass_is_compatible(M, N, K) && cutlass_is_sm_supported();
     bool cutlass_tf32_enabled = cutlass_enabled && !tf32_disabled;
 
     // Fallback to native TensorCore kernels
@@ -77,11 +85,11 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         }
 
         if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
-            tf32_enabled = (sm_version >= 80);
+            tf32_enabled = (sm_version >= MIN_SM_VERSION);
         }
 
         if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
-            fp16_tc_enabled = (sm_version >= 80);
+            fp16_tc_enabled = (sm_version >= MIN_SM_VERSION);
         }
     }
 
@@ -313,13 +321,13 @@ static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool 
 
     bool tf32_enabled = use_tf32_explicit &&
                         (a.dtype() == DataType::Float32) &&
-                        (sm_version >= 80);
+                        (sm_version >= MIN_SM_VERSION);
 
     if (use_tf32_explicit && !tf32_enabled) {
         if (a.dtype() != DataType::Float32) {
             throw std::runtime_error("TF32 matmul requires float32 dtype");
         }
-        if (sm_version < 80) {
+        if (sm_version < MIN_SM_VERSION) {
             throw std::runtime_error("TF32 matmul requires SM >= 80 (Ampere or newer)");
         }
     }
@@ -455,6 +463,104 @@ GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32) {
     GPUArray c({M, N}, a.dtype());
     matmul_impl(a, b, c, use_tf32);
     return c;
+}
+
+// ============================================================================
+// Fused Operations (CUTLASS Epilogue Fusion)
+// ============================================================================
+
+GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias) {
+    // Validate shapes: input [batch, in_features], weight [out_features, in_features], bias [out_features]
+    if (input.ndim() != 2) {
+        throw std::runtime_error("linear_bias_gelu: input must be 2D [batch, in_features]");
+    }
+    if (weight.ndim() != 2) {
+        throw std::runtime_error("linear_bias_gelu: weight must be 2D [out_features, in_features]");
+    }
+    if (bias.ndim() != 1) {
+        throw std::runtime_error("linear_bias_gelu: bias must be 1D [out_features]");
+    }
+
+    size_t batch = input.shape()[0];
+    size_t in_features = input.shape()[1];
+    size_t out_features = weight.shape()[0];
+
+    if (weight.shape()[1] != in_features) {
+        throw std::runtime_error("linear_bias_gelu: weight.shape[1] must match input.shape[1]");
+    }
+    if (bias.shape()[0] != out_features) {
+        throw std::runtime_error("linear_bias_gelu: bias.shape[0] must match weight.shape[0]");
+    }
+
+    // Validate dtypes
+    if (input.dtype() != weight.dtype() || input.dtype() != bias.dtype()) {
+        throw std::runtime_error("linear_bias_gelu: all inputs must have the same dtype");
+    }
+
+    // Check if CUTLASS fused kernel can be used
+    // Requirements: dimensions must be multiples of 16 AND SM >= 86
+    bool use_cutlass = cutlass_is_compatible(batch, out_features, in_features) && cutlass_is_sm_supported();
+
+    // Also check if CUTLASS is disabled via environment variable
+    const char* no_cutlass_env = std::getenv("PYGPUKIT_NO_CUTLASS");
+    if (no_cutlass_env && (no_cutlass_env[0] == '1' || no_cutlass_env[0] == 'y' || no_cutlass_env[0] == 'Y')) {
+        use_cutlass = false;
+    }
+
+    // Transpose weight for both paths (needed for input @ weight^T)
+    GPUArray weight_T = transpose(weight);  // [in_features, out_features]
+
+    // Allocate output
+    GPUArray output({batch, out_features}, input.dtype());
+
+    if (use_cutlass) {
+        // CUTLASS fused BiasGELU kernel path
+        cudaError_t err = cudaSuccess;
+
+        switch (input.dtype()) {
+            case DataType::Float32:
+                err = cutlass_gemm_tf32_bias_gelu(
+                    static_cast<const float*>(input.data()),
+                    static_cast<const float*>(weight_T.data()),
+                    static_cast<const float*>(bias.data()),
+                    static_cast<float*>(output.data()),
+                    batch, out_features, in_features, nullptr);
+                break;
+            case DataType::Float16:
+                err = cutlass_gemm_fp16_bias_gelu(
+                    static_cast<const __half*>(input.data()),
+                    static_cast<const __half*>(weight_T.data()),
+                    static_cast<const __half*>(bias.data()),
+                    static_cast<__half*>(output.data()),
+                    batch, out_features, in_features, nullptr);
+                break;
+            case DataType::BFloat16:
+                err = cutlass_gemm_bf16_bias_gelu(
+                    static_cast<const __nv_bfloat16*>(input.data()),
+                    static_cast<const __nv_bfloat16*>(weight_T.data()),
+                    static_cast<const __nv_bfloat16*>(bias.data()),
+                    static_cast<__nv_bfloat16*>(output.data()),
+                    batch, out_features, in_features, nullptr);
+                break;
+            default:
+                throw std::runtime_error("linear_bias_gelu only supports float32, float16, and bfloat16");
+        }
+
+        // If CUTLASS fails (e.g., not compiled in), fall back to native path
+        if (err == cudaSuccess) {
+            sync_and_check("linear_bias_gelu CUTLASS kernel failed");
+            return output;
+        }
+        // Fall through to native path if CUTLASS returns error
+    }
+
+    // Native fallback path: matmul + bias_add_inplace + gelu
+    // This works for any dimensions and when CUTLASS is not available
+    matmul(input, weight_T, output);
+    bias_add_inplace(output, bias);
+    output = gelu(output);
+
+    return output;
 }
 
 } // namespace ops

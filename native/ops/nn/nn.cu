@@ -61,6 +61,58 @@ GPUArray gelu(const GPUArray& input) {
 }
 
 // ============================================================================
+// Transpose
+// ============================================================================
+
+GPUArray transpose(const GPUArray& input) {
+    if (input.ndim() != 2) {
+        throw std::runtime_error("transpose expects 2D input [rows, cols]");
+    }
+
+    size_t rows = input.shape()[0];
+    size_t cols = input.shape()[1];
+
+    // Output shape is [cols, rows]
+    GPUArray result({cols, rows}, input.dtype());
+
+    // Use 32x32 tiles with 32x8 threads
+    dim3 block(TILE_DIM, BLOCK_ROWS);
+    dim3 grid((cols + TILE_DIM - 1) / TILE_DIM, (rows + TILE_DIM - 1) / TILE_DIM);
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            transpose_f32_kernel<<<grid, block>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                rows, cols);
+            break;
+        case DataType::Float64:
+            transpose_f64_kernel<<<grid, block>>>(
+                static_cast<const double*>(input.data()),
+                static_cast<double*>(result.data()),
+                rows, cols);
+            break;
+        case DataType::Float16:
+            transpose_f16_kernel<<<grid, block>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                rows, cols);
+            break;
+        case DataType::BFloat16:
+            transpose_bf16_kernel<<<grid, block>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                rows, cols);
+            break;
+        default:
+            throw std::runtime_error("transpose only supports float types");
+    }
+
+    sync_and_check("transpose kernel failed");
+    return result;
+}
+
+// ============================================================================
 // Bias Add
 // ============================================================================
 

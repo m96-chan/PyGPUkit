@@ -89,7 +89,9 @@ jobs:
         run: |
           python -m build --wheel
         env:
-          CMAKE_CUDA_ARCHITECTURES: "70;75;80;86;89;90"
+          # PyGPUkit requires SM >= 80 (Ampere and newer)
+          # SM100/120 (Blackwell) requires CUDA 13.x - not available on GitHub runners yet
+          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90"
 
       - name: Show wheel info before repair
         run: |
@@ -187,11 +189,15 @@ jobs:
           Get-ChildItem ../../src/pygpukit/*.pyd
 
       - name: Build wheel (C++ + Rust)
-        shell: pwsh
+        shell: cmd
         run: |
+          @REM Set up VS environment for cl.exe
+          call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
           python -m build --wheel
         env:
-          CMAKE_CUDA_ARCHITECTURES: "86"
+          # PyGPUkit requires SM >= 80 (Ampere and newer)
+          # Self-hosted runner should have CUDA 13.1 for SM100/120 (Blackwell) support
+          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
 
       - name: Verify wheel contents
         shell: pwsh

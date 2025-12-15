@@ -7,6 +7,18 @@
 
 ---
 
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/getting-started.md) | Installation, quick start, basic usage |
+| [API Reference](docs/api.md) | Complete API documentation with examples |
+| [LLM Guide](docs/llm.md) | SafeTensors, Tokenizer, GPT-2 model loading |
+| [Performance Tuning](docs/performance.md) | TF32, FP16, CUTLASS optimization |
+| [Scheduler Guide](docs/scheduler.md) | Multi-LLM concurrent execution |
+
+---
+
 ## Overview
 **PyGPUkit** is a lightweight GPU runtime for Python that provides:
 - **Single-binary distribution** — works with just GPU drivers, no CUDA Toolkit needed
@@ -18,6 +30,71 @@
 PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
 
 > **Note:** PyGPUkit is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads where full ML frameworks are overkill.
+
+---
+
+## What's New in v0.2.7
+
+### CUTLASS Epilogue Fusion
+Fused Linear + Bias + GELU operations using CUTLASS epilogue fusion for improved performance in transformer workloads.
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# Create tensors
+batch, in_feat, out_feat = 512, 768, 3072
+input = gpk.from_numpy(np.random.randn(batch, in_feat).astype(np.float32))
+weight = gpk.from_numpy(np.random.randn(out_feat, in_feat).astype(np.float32))
+bias = gpk.from_numpy(np.random.randn(out_feat).astype(np.float32))
+
+# Fused linear + bias + GELU (single kernel, no intermediate memory)
+output = gpk.linear_bias_gelu(input, weight, bias)
+```
+
+### Multi-SM CUTLASS Kernels
+Runtime SM detection with optimized kernel variants:
+- **SM80 (A100)**: 4-stage pipeline optimized for 48KB shared memory
+- **SM86+ (RTX 30xx/40xx, H100)**: 5-stage pipeline for 100KB+ shared memory
+
+### New Operations
+| Operation | Description |
+|-----------|-------------|
+| `gpk.transpose(a)` | GPU-native matrix transpose |
+| `gpk.bias_add_inplace(out, bias)` | In-place bias addition |
+| `gpk.linear_bias_gelu(x, w, b)` | Fused linear + bias + GELU |
+
+### API Improvements
+- Complete public API exports (all operations accessible via `gpk.*`)
+- Consistent snake_case naming convention
+- Full docstrings for all public functions
+
+---
+
+## LLM Support
+
+PyGPUkit includes built-in support for loading and running LLM models.
+See the [LLM Guide](docs/llm.md) for detailed documentation.
+
+```python
+from pygpukit.llm import SafeTensorsFile, Tokenizer
+
+# Load safetensors (memory-mapped, zero-copy)
+st = SafeTensorsFile("model.safetensors")
+print(f"Tensors: {st.num_tensors}, Size: {st.file_size / 1e9:.2f} GB")
+
+# Tokenizer (HuggingFace format)
+tok = Tokenizer("tokenizer.json")
+ids = tok.encode("Hello, world!")
+text = tok.decode(ids)
+```
+
+| Component | Description |
+|-----------|-------------|
+| `SafeTensorsFile` | Memory-mapped .safetensors loading |
+| `Tokenizer` | BPE tokenizer (HuggingFace format) |
+| `GPT2Model` | GPT-2 model (MLP-only MVP) |
+| `Linear`, `LayerNorm`, `MLP` | Model building blocks |
 
 ---
 
@@ -351,13 +428,38 @@ PyGPUkit/
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
 | **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
 | **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
+| **v0.2.7** | **Epilogue fusion** (linear+bias+gelu), Multi-SM kernels, API review |
 
 ### Planned
 
 | Version | Goals |
 |---------|-------|
-| **v0.2.7** | Full API review, documentation, backward compatibility |
-| **v0.3** | Triton backend, advanced ops (softmax, layernorm), MPS/MIG |
+| **v0.3** | Triton backend, advanced ops (softmax), MPS/MIG |
+
+---
+
+## API Stability & Backward Compatibility
+
+### Version Policy
+- **v0.2.x**: Backward compatible within minor versions. New features may be added, but existing APIs remain stable.
+- **v0.3+**: May introduce breaking changes with deprecation warnings in prior version.
+
+### Stable Public API (v0.2.x)
+All functions exported via `pygpukit.*` are part of the stable public API:
+
+| Category | Functions |
+|----------|-----------|
+| **Factory** | `zeros`, `ones`, `empty`, `from_numpy` |
+| **Elementwise** | `add`, `sub`, `mul`, `div` |
+| **Math** | `exp`, `log`, `relu`, `gelu` |
+| **Matrix** | `matmul`, `transpose` |
+| **Reductions** | `sum`, `mean`, `max` |
+| **Neural** | `layernorm`, `bias_add_inplace`, `linear_bias_gelu` |
+| **Types** | `GPUArray`, `DataType`, `float32`, `float64`, `float16`, `bfloat16` |
+| **LLM** | `llm.SafeTensorsFile`, `llm.Tokenizer`, `llm.GPT2Model`, `llm.Linear` |
+
+### Deprecation Policy
+APIs to be removed will emit `DeprecationWarning` for at least one minor version before removal.
 
 ---
 

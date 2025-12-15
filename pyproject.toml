@@ -57,11 +57,13 @@ wheel.py-api = ""
 sdist.include = ["native/*", "rust/*"]
 sdist.exclude = ["native/build/*", "rust/target/*"]
 # Allow building without CUDA for testing
-cmake.args = ["-DCMAKE_CUDA_COMPILER_WORKS=1"]
+# Ninja generator for faster builds (platform-neutral - no hardcoded paths)
+cmake.args = ["-GNinja"]
 build.targets = []
 
 [tool.scikit-build.cmake.define]
 # PyGPUkit requires SM >= 80 (Ampere and newer) for cp.async support
+# Default: SM80-90 (CUDA 12.x), SM100+ requires CUDA 13.x and env override
 CMAKE_CUDA_ARCHITECTURES = "80;86;89;90"
 
 [tool.cibuildwheel]

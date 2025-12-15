@@ -83,6 +83,10 @@ GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32);
 // Neural Network Operations
 // ============================================================================
 
+// Transpose: c = a.T
+// input: [rows, cols], output: [cols, rows]
+GPUArray transpose(const GPUArray& input);
+
 // GELU: Gaussian Error Linear Unit activation
 // y = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 GPUArray gelu(const GPUArray& input);
@@ -93,6 +97,16 @@ void bias_add_inplace(GPUArray& output, const GPUArray& bias);
 // LayerNorm: y = (x - mean) / sqrt(var + eps) * gamma + beta
 // input: [batch, features], gamma/beta: [features]
 GPUArray layernorm(const GPUArray& input, const GPUArray& gamma, const GPUArray& beta, float eps = 1e-5f);
+
+// ============================================================================
+// Fused Operations (CUTLASS Epilogue Fusion)
+// ============================================================================
+
+// Linear + BiasGELU: output = gelu(input @ weight^T + bias)
+// Fused kernel for efficient MLP layers
+// input: [batch, in_features], weight: [out_features, in_features], bias: [out_features]
+// output: [batch, out_features]
+GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias);
 
 } // namespace ops
 } // namespace pygpukit

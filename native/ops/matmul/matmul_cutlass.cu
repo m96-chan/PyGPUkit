@@ -57,6 +57,47 @@ bool cutlass_is_compatible(int M, int N, int K) {
     return cutlass_gemm::is_cutlass_compatible(M, N, K);
 }
 
+bool cutlass_is_sm_supported() {
+    return cutlass_gemm::is_sm_supported();
+}
+
+// ============================================================================
+// BiasGELU fused operations
+// ============================================================================
+
+cudaError_t cutlass_gemm_tf32_bias_gelu(
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* D,
+    int M, int N, int K,
+    cudaStream_t stream
+) {
+    return cutlass_gemm::gemm_tf32_bias_gelu(A, B, bias, D, M, N, K, stream);
+}
+
+cudaError_t cutlass_gemm_fp16_bias_gelu(
+    const __half* A,
+    const __half* B,
+    const __half* bias,
+    __half* D,
+    int M, int N, int K,
+    cudaStream_t stream
+) {
+    return cutlass_gemm::gemm_fp16_bias_gelu(A, B, bias, D, M, N, K, stream);
+}
+
+cudaError_t cutlass_gemm_bf16_bias_gelu(
+    const __nv_bfloat16* A,
+    const __nv_bfloat16* B,
+    const __nv_bfloat16* bias,
+    __nv_bfloat16* D,
+    int M, int N, int K,
+    cudaStream_t stream
+) {
+    return cutlass_gemm::gemm_bf16_bias_gelu(A, B, bias, D, M, N, K, stream);
+}
+
 }  // extern "C"
 
 }  // namespace ops
@@ -99,6 +140,43 @@ cudaError_t cutlass_gemm_bf16(
 
 bool cutlass_is_compatible(int M, int N, int K) {
     return false;
+}
+
+bool cutlass_is_sm_supported() {
+    return false;
+}
+
+cudaError_t cutlass_gemm_tf32_bias_gelu(
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* D,
+    int M, int N, int K,
+    cudaStream_t stream
+) {
+    return cudaErrorNotSupported;
+}
+
+cudaError_t cutlass_gemm_fp16_bias_gelu(
+    const __half* A,
+    const __half* B,
+    const __half* bias,
+    __half* D,
+    int M, int N, int K,
+    cudaStream_t stream
+) {
+    return cudaErrorNotSupported;
+}
+
+cudaError_t cutlass_gemm_bf16_bias_gelu(
+    const __nv_bfloat16* A,
+    const __nv_bfloat16* B,
+    const __nv_bfloat16* bias,
+    __nv_bfloat16* D,
+    int M, int N, int K,
+    cudaStream_t stream
+) {
+    return cudaErrorNotSupported;
 }
 
 }  // extern "C"
