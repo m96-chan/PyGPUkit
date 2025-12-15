@@ -465,12 +465,28 @@ Edit → Build → Validate → Benchmark → Commit
 
 **Always commit after validation and benchmark, regardless of results.**
 
+### Lint Check (MANDATORY)
+
+**Before EVERY commit, run lint check:**
+
+```bash
+# Check all tracked Python files
+git ls-files "*.py" | xargs python -m ruff check
+
+# Auto-fix and format
+git ls-files "*.py" | xargs python -m ruff check --fix
+git ls-files "*.py" | xargs python -m ruff format
+```
+
+**NEVER commit without passing lint.** CI will reject PRs with lint errors.
+
 ### Commit Rules
 
-1. Commit after every validation/benchmark completion, regardless of outcome
-2. Include benchmark results in commit message
-3. Never proceed to next kernel edit until commit is complete
-4. Never overwrite a working kernel without committing first
+1. **Run lint check before commit** (see above)
+2. Commit after every validation/benchmark completion, regardless of outcome
+3. Include benchmark results in commit message
+4. Never proceed to next kernel edit until commit is complete
+5. Never overwrite a working kernel without committing first
 
 ### Commit Message Format
 
