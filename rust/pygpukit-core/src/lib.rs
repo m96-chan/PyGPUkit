@@ -13,6 +13,7 @@ pub mod scheduler;
 pub mod transfer;
 pub mod dispatch;
 pub mod device;
+pub mod llm;
 
 pub use memory::{MemoryBlock, MemoryPool, PoolStats, MemoryError};
 pub use scheduler::{
@@ -20,6 +21,7 @@ pub use scheduler::{
     AdmissionController, AdmissionConfig, AdmissionDecision, AdmissionStats, RejectReason,
     QosClass, QosPolicy, QosTaskMeta, QosEvaluation, QosPolicyEvaluator, QosStats, ResourceRequirements,
     PartitionManager, PartitionConfig, Partition, PartitionLimits, PartitionUsage, PartitionStats, PartitionError,
+    ExecutionContext, ContextState, ContextStats, MultiLLMController, ControllerStats,
 };
 pub use transfer::{
     TransferType, TransferOp, TransferState, AsyncTransferEngine, StreamType, TransferStats,
@@ -32,3 +34,8 @@ pub use dispatch::{
     KernelCache, CacheConfig, CachedKernel, CompileOptions, CacheStats,
 };
 pub use device::{KernelType, DeviceCapabilities};
+pub use llm::{
+    SafeTensorsFile, TensorInfo, TensorData, SafeTensorsError,
+    Dtype, load_safetensors,
+    Tokenizer, TokenizerError,
+};

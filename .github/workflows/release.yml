@@ -18,6 +18,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1  # Shallow clone for faster checkout
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,6 +47,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1  # Shallow clone for faster checkout
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -124,6 +130,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1  # Shallow clone for faster checkout
 
       - name: Set up Python 3.12
         shell: pwsh
@@ -289,6 +298,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1  # Shallow clone for faster checkout
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

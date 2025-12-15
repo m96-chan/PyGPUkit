@@ -1,0 +1,461 @@
+/**
+ * Matrix multiplication dispatch
+ */
+#include "matmul_fp32.cuh"
+#include "../common/error.cuh"
+#include "../common/device.cuh"
+#include "../../core/memory.hpp"
+
+// Include existing optimized kernels
+#include "../matmul_f32_ampere.cuh"
+#include "../matmul_f32_tf32.cuh"
+#include "../matmul_f32_tf32_v2.cuh"
+#include "../matmul_f16_bf16.cuh"
+#include "../matmul_f16_bf16_tc.cuh"
+#include "../matmul_f16_bf16_tc_generic.cuh"
+
+#include <cstdlib>
+#include <algorithm>
+
+// CUTLASS GEMM (extern declarations from matmul_cutlass.cu)
+extern "C" {
+    cudaError_t cutlass_gemm_tf32(const float* A, const float* B, float* C, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_fp16(const __half* A, const __half* B, __half* C, int M, int N, int K, cudaStream_t stream);
+    cudaError_t cutlass_gemm_bf16(const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C, int M, int N, int K, cudaStream_t stream);
+    bool cutlass_is_compatible(int M, int N, int K);
+}
+
+namespace pygpukit {
+namespace ops {
+
+// Thresholds for kernel selection
+constexpr int TILED_MATMUL_THRESHOLD = 128;
+constexpr int OPTIMIZED_MATMUL_THRESHOLD = 128;
+
+void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
+    validate_matmul_shapes(a, b, "matmul");
+    validate_same_dtype(a, b, "matmul");
+
+    size_t M = a.shape()[0];
+    size_t K = a.shape()[1];
+    size_t N = b.shape()[1];
+
+    if (c.shape()[0] != M || c.shape()[1] != N) {
+        throw std::runtime_error("matmul output shape mismatch");
+    }
+
+    // v0.2.6: CUTLASS is the default backend
+    // Environment variables:
+    //   PYGPUKIT_NO_CUTLASS=1  - Disable CUTLASS entirely, use native kernels
+    //   PYGPUKIT_NO_TF32=1     - Disable TF32 for FP32 inputs (use native FP32 kernel)
+    const char* no_cutlass_env = std::getenv("PYGPUKIT_NO_CUTLASS");
+    const char* no_tf32_env = std::getenv("PYGPUKIT_NO_TF32");
+
+    bool cutlass_disabled = no_cutlass_env &&
+        (no_cutlass_env[0] == '1' || no_cutlass_env[0] == 'y' || no_cutlass_env[0] == 'Y');
+    bool tf32_disabled = no_tf32_env &&
+        (no_tf32_env[0] == '1' || no_tf32_env[0] == 'y' || no_tf32_env[0] == 'Y');
+
+    // CUTLASS enabled by default if dimensions are compatible
+    // For FP32: skip CUTLASS TF32 if NO_TF32 is set (will use native FP32 kernel)
+    bool cutlass_enabled = !cutlass_disabled && cutlass_is_compatible(M, N, K);
+    bool cutlass_tf32_enabled = cutlass_enabled && !tf32_disabled;
+
+    // Fallback to native TensorCore kernels
+    bool tf32_enabled = false;
+    bool fp16_tc_enabled = false;
+    int sm_version = 0;
+
+    // Only check native TensorCore settings if CUTLASS is disabled
+    if (!cutlass_enabled) {
+        const char* tf32_env = std::getenv("PYGPUKIT_ALLOW_TF32");
+        const char* fp16_tc_env = std::getenv("PYGPUKIT_ALLOW_FP16_TC");
+
+        if ((tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) ||
+            (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y'))) {
+            sm_version = get_sm_version();
+        }
+
+        if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
+            tf32_enabled = (sm_version >= 80);
+        }
+
+        if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
+            fp16_tc_enabled = (sm_version >= 80);
+        }
+    }
+
+    // Kernel selection
+    bool use_tf32 = tf32_enabled &&
+                    (a.dtype() == DataType::Float32) &&
+                    ((M >= OPTIMIZED_MATMUL_THRESHOLD &&
+                      N >= OPTIMIZED_MATMUL_THRESHOLD &&
+                      K >= OPTIMIZED_MATMUL_THRESHOLD) ||
+                     (M == 16 && (N == 8 || N == 16)));
+
+    bool use_fp16_tc_fast = fp16_tc_enabled &&
+                            (a.dtype() == DataType::Float16 || a.dtype() == DataType::BFloat16) &&
+                            (M >= 128 && N >= 128 && K >= 32) &&
+                            (M % 128 == 0 && N % 128 == 0 && K % 32 == 0);
+
+    bool use_fp16_tc_generic = !use_fp16_tc_fast && fp16_tc_enabled &&
+                               (a.dtype() == DataType::Float16 || a.dtype() == DataType::BFloat16) &&
+                               (M >= 16 && N >= 16 && K >= 8) &&
+                               (K % 8 == 0);
+
+    bool use_optimized = !use_tf32 && !use_fp16_tc_fast && !use_fp16_tc_generic &&
+                         (a.dtype() == DataType::Float32) &&
+                         (M >= OPTIMIZED_MATMUL_THRESHOLD ||
+                          N >= OPTIMIZED_MATMUL_THRESHOLD ||
+                          K >= OPTIMIZED_MATMUL_THRESHOLD);
+
+    bool use_tiled = !use_optimized && !use_tf32 && !use_fp16_tc_fast && !use_fp16_tc_generic &&
+                     (M >= TILED_MATMUL_THRESHOLD ||
+                      N >= TILED_MATMUL_THRESHOLD ||
+                      K >= TILED_MATMUL_THRESHOLD);
+
+    // CUTLASS dispatch (highest priority when enabled)
+    // FP32 uses TF32 TensorCore (can be disabled with PYGPUKIT_NO_TF32)
+    // FP16/BF16 always use CUTLASS when available
+    if (cutlass_enabled || cutlass_tf32_enabled) {
+        cudaError_t err = cudaSuccess;
+        bool used_cutlass = false;
+
+        switch (a.dtype()) {
+            case DataType::Float32:
+                if (cutlass_tf32_enabled) {
+                    err = cutlass_gemm_tf32(
+                        static_cast<const float*>(a.data()),
+                        static_cast<const float*>(b.data()),
+                        static_cast<float*>(c.data()),
+                        M, N, K, nullptr);
+                    used_cutlass = true;
+                }
+                break;
+            case DataType::Float16:
+                if (cutlass_enabled) {
+                    err = cutlass_gemm_fp16(
+                        static_cast<const __half*>(a.data()),
+                        static_cast<const __half*>(b.data()),
+                        static_cast<__half*>(c.data()),
+                        M, N, K, nullptr);
+                    used_cutlass = true;
+                }
+                break;
+            case DataType::BFloat16:
+                if (cutlass_enabled) {
+                    err = cutlass_gemm_bf16(
+                        static_cast<const __nv_bfloat16*>(a.data()),
+                        static_cast<const __nv_bfloat16*>(b.data()),
+                        static_cast<__nv_bfloat16*>(c.data()),
+                        M, N, K, nullptr);
+                    used_cutlass = true;
+                }
+                break;
+            default:
+                break;
+        }
+
+        if (used_cutlass) {
+            if (err != cudaSuccess) {
+                throw std::runtime_error("CUTLASS GEMM failed");
+            }
+            sync_and_check("CUTLASS matmul kernel failed");
+            return;
+        }
+    }
+
+    if (use_tf32) {
+        if (M == 16 && (N == 8 || N == 16)) {
+            tf32::launch_single_tile_verified(
+                static_cast<const float*>(a.data()),
+                static_cast<const float*>(b.data()),
+                static_cast<float*>(c.data()),
+                M, N, K);
+        } else {
+            tf32::launch_sgemm_tf32(
+                static_cast<const float*>(a.data()),
+                static_cast<const float*>(b.data()),
+                static_cast<float*>(c.data()),
+                M, N, K);
+        }
+    } else if (use_fp16_tc_fast) {
+        if (a.dtype() == DataType::Float16) {
+            fp16_bf16_tc::launch_sgemm_f16_tc(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                M, N, K);
+        } else {
+            fp16_bf16_tc::launch_sgemm_bf16_tc(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                M, N, K);
+        }
+    } else if (use_fp16_tc_generic) {
+        if (a.dtype() == DataType::Float16) {
+            fp16_bf16_tc_generic::launch_sgemm_f16_tc_generic(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                M, N, K);
+        } else {
+            fp16_bf16_tc_generic::launch_sgemm_bf16_tc_generic(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                M, N, K);
+        }
+    } else if (use_optimized) {
+        ampere::launch_sgemm_ampere(
+            static_cast<const float*>(a.data()),
+            static_cast<const float*>(b.data()),
+            static_cast<float*>(c.data()),
+            M, N, K);
+    } else if (use_tiled) {
+        switch (a.dtype()) {
+            case DataType::Float32:
+                matmul_fp32::launch_tiled_f32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float64:
+                matmul_fp32::launch_tiled_f64(
+                    static_cast<const double*>(a.data()),
+                    static_cast<const double*>(b.data()),
+                    static_cast<double*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
+            default:
+                throw std::runtime_error("matmul only supports float types");
+        }
+    } else {
+        switch (a.dtype()) {
+            case DataType::Float32:
+                matmul_fp32::launch_l2opt_f32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float64:
+                matmul_fp32::launch_l2opt_f64(
+                    static_cast<const double*>(a.data()),
+                    static_cast<const double*>(b.data()),
+                    static_cast<double*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
+            default:
+                throw std::runtime_error("matmul only supports float types");
+        }
+    }
+
+    sync_and_check("matmul kernel failed");
+}
+
+GPUArray matmul(const GPUArray& a, const GPUArray& b) {
+    validate_matmul_shapes(a, b, "matmul");
+    validate_same_dtype(a, b, "matmul");
+
+    size_t M = a.shape()[0];
+    size_t N = b.shape()[1];
+
+    GPUArray c({M, N}, a.dtype());
+    matmul(a, b, c);
+    return c;
+}
+
+// Internal helper: matmul with explicit TF32 control
+static void matmul_impl(const GPUArray& a, const GPUArray& b, GPUArray& c, bool use_tf32_explicit) {
+    validate_matmul_shapes(a, b, "matmul");
+    validate_same_dtype(a, b, "matmul");
+
+    size_t M = a.shape()[0];
+    size_t K = a.shape()[1];
+    size_t N = b.shape()[1];
+
+    if (c.shape()[0] != M || c.shape()[1] != N) {
+        throw std::runtime_error("matmul output shape mismatch");
+    }
+
+    int sm_version = get_sm_version();
+
+    bool tf32_enabled = use_tf32_explicit &&
+                        (a.dtype() == DataType::Float32) &&
+                        (sm_version >= 80);
+
+    if (use_tf32_explicit && !tf32_enabled) {
+        if (a.dtype() != DataType::Float32) {
+            throw std::runtime_error("TF32 matmul requires float32 dtype");
+        }
+        if (sm_version < 80) {
+            throw std::runtime_error("TF32 matmul requires SM >= 80 (Ampere or newer)");
+        }
+    }
+
+    bool use_tf32 = tf32_enabled &&
+                    ((M >= OPTIMIZED_MATMUL_THRESHOLD &&
+                      N >= OPTIMIZED_MATMUL_THRESHOLD &&
+                      K >= OPTIMIZED_MATMUL_THRESHOLD) ||
+                     (M == 16 && (N == 8 || N == 16)));
+
+    bool use_optimized = !use_tf32 &&
+                         (a.dtype() == DataType::Float32) &&
+                         (M >= OPTIMIZED_MATMUL_THRESHOLD ||
+                          N >= OPTIMIZED_MATMUL_THRESHOLD ||
+                          K >= OPTIMIZED_MATMUL_THRESHOLD);
+
+    bool use_tiled = !use_optimized && !use_tf32 &&
+                     (M >= TILED_MATMUL_THRESHOLD ||
+                      N >= TILED_MATMUL_THRESHOLD ||
+                      K >= TILED_MATMUL_THRESHOLD);
+
+    if (use_tf32) {
+        if (M == 16 && (N == 8 || N == 16)) {
+            tf32::launch_single_tile_verified(
+                static_cast<const float*>(a.data()),
+                static_cast<const float*>(b.data()),
+                static_cast<float*>(c.data()),
+                M, N, K);
+        } else {
+            const char* use_v2 = std::getenv("PYGPUKIT_TF32_V2");
+            if (use_v2 && std::string(use_v2) == "1") {
+                tf32_v2::launch_sgemm_tf32_v2(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+            } else {
+                tf32::launch_sgemm_tf32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+            }
+        }
+    } else if (use_optimized) {
+        ampere::launch_sgemm_ampere(
+            static_cast<const float*>(a.data()),
+            static_cast<const float*>(b.data()),
+            static_cast<float*>(c.data()),
+            M, N, K);
+    } else if (use_tiled) {
+        switch (a.dtype()) {
+            case DataType::Float32:
+                matmul_fp32::launch_tiled_f32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float64:
+                matmul_fp32::launch_tiled_f64(
+                    static_cast<const double*>(a.data()),
+                    static_cast<const double*>(b.data()),
+                    static_cast<double*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
+            default:
+                throw std::runtime_error("matmul only supports float32, float64, float16, and bfloat16");
+        }
+    } else {
+        switch (a.dtype()) {
+            case DataType::Float32:
+                matmul_fp32::launch_l2opt_f32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float64:
+                matmul_fp32::launch_l2opt_f64(
+                    static_cast<const double*>(a.data()),
+                    static_cast<const double*>(b.data()),
+                    static_cast<double*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::Float16:
+                fp16_bf16_matmul::launch_sgemm_f16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K);
+                break;
+            case DataType::BFloat16:
+                fp16_bf16_matmul::launch_sgemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K);
+                break;
+            default:
+                throw std::runtime_error("matmul only supports float32, float64, float16, and bfloat16");
+        }
+    }
+
+    sync_and_check("matmul kernel failed");
+}
+
+void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c, bool use_tf32) {
+    matmul_impl(a, b, c, use_tf32);
+}
+
+GPUArray matmul(const GPUArray& a, const GPUArray& b, bool use_tf32) {
+    validate_matmul_shapes(a, b, "matmul");
+    validate_same_dtype(a, b, "matmul");
+
+    size_t M = a.shape()[0];
+    size_t N = b.shape()[1];
+
+    GPUArray c({M, N}, a.dtype());
+    matmul_impl(a, b, c, use_tf32);
+    return c;
+}
+
+} // namespace ops
+} // namespace pygpukit

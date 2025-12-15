@@ -21,6 +21,89 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.6
+
+### CUTLASS Backend (Default)
+NVIDIA CUTLASS v4.3.0 is now the default GEMM backend, delivering optimized TensorCore performance out of the box.
+
+| Feature | Description |
+|---------|-------------|
+| **TF32 TensorCore** | 31+ TFLOPS for FP32 inputs (automatic) |
+| **FP16 TensorCore** | 63 TFLOPS |
+| **BF16 TensorCore** | 63 TFLOPS |
+| **Zero Config** | No environment variables needed |
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# CUTLASS TF32 is automatic for FP32 (31+ TFLOPS)
+a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float32))
+b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float32))
+c = a @ b  # Uses CUTLASS TF32 TensorCore
+
+# For full FP32 precision (no TF32), set:
+# PYGPUKIT_NO_TF32=1
+```
+
+### Multi-LLM Concurrent Execution
+Run multiple AI models (LLM, TTS, Vision) concurrently on a single GPU with independent CUDA streams and VRAM budgets.
+
+| Feature | Description |
+|---------|-------------|
+| **Execution Control** | User controls execution order |
+| **Stream Isolation** | No implicit sync between streams |
+| **VRAM Budgeting** | Safe memory sharing per model |
+| **Concurrent Safety** | "Running simultaneously doesn't break" |
+| **asyncio Integration** | Native Python async/await support |
+
+> **Note:** On a single GPU, Multi-LLM scheduling enables **concurrent execution, not faster execution**, for compute-bound workloads. Speedup benefits apply to I/O-bound workloads or multi-GPU setups.
+
+```python
+import asyncio
+from pygpukit.scheduler import (
+    create_context, context_session, GB, initialize
+)
+
+# Create execution contexts with VRAM budgets
+initialize(device_id=0)
+llm_ctx = create_context("llm", max_vram=4 * GB)
+tts_ctx = create_context("tts", max_vram=2 * GB)
+
+async def run_parallel():
+    async with context_session(llm_ctx), context_session(tts_ctx):
+        # Run models concurrently with asyncio.gather
+        llm_task = asyncio.create_task(run_llm_inference())
+        tts_task = asyncio.create_task(run_tts_synthesis())
+
+        text, audio = await asyncio.gather(llm_task, tts_task)
+        return text, audio
+
+result = asyncio.run(run_parallel())
+```
+
+### FP16/BF16 TensorCore (via CUTLASS)
+| Feature | Description |
+|---------|-------------|
+| **FP16 TensorCore** | 63 TFLOPS (automatic via CUTLASS) |
+| **BF16 TensorCore** | 63 TFLOPS (automatic via CUTLASS) |
+| **FP32 Accumulation** | Numerical stability maintained |
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# FP16 TensorCore matmul (63 TFLOPS on RTX 3090 Ti)
+# No environment variable needed - CUTLASS is automatic
+a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
+b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
+c = a @ b  # Uses CUTLASS TensorCore
+```
+
+> **Note:** CUTLASS requires matrix dimensions divisible by 16.
+
+---
+
 ## What's New in v0.2.5
 
 ### FP16 / BF16 Support
@@ -99,23 +182,23 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 
 ### Benchmark Comparison (RTX 3090 Ti, 8192×8192)
 
-| Library | FP32 | TF32 | Requirements |
-|---------|------|------|--------------|
-| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | CPU only |
-| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** | 16.7 TFLOPS | 29.7 TFLOPS | GPU drivers only |
+| Library | FP32 | TF32 | FP16 | BF16 | Requirements |
+|---------|------|------|------|------|--------------|
+| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | — | — | CPU only |
+| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | ~75 TFLOPS | ~83 TFLOPS | CUDA Toolkit |
+| **PyGPUkit** (CUTLASS) | 18 TFLOPS | **31 TFLOPS** | **63 TFLOPS** | **63 TFLOPS** | GPU drivers only |
 
 > Built-in matmul kernels are pre-compiled. Driver-Only and Full (JIT) modes have identical matmul performance. JIT is only needed for custom kernels.
 
 ### PyGPUkit Performance by Matrix Size
 
-| Matrix Size | FP32 | TF32 | FP16 | BF16 |
-|-------------|------|------|------|------|
-| 2048×2048 | 9.6 TFLOPS | 13.2 TFLOPS | 2.4 TFLOPS | 2.4 TFLOPS |
-| 4096×4096 | 14.7 TFLOPS | 22.8 TFLOPS | 2.4 TFLOPS | 2.3 TFLOPS |
-| 8192×8192 | 16.7 TFLOPS | 29.7 TFLOPS | 2.3 TFLOPS | 2.3 TFLOPS |
+| Matrix Size | FP32 (NO_TF32) | TF32 (CUTLASS) | FP16 (CUTLASS) | BF16 (CUTLASS) |
+|-------------|----------------|----------------|----------------|----------------|
+| 2048×2048 | 9.6 TFLOPS | 13 TFLOPS | 15 TFLOPS | 21 TFLOPS |
+| 4096×4096 | 14.7 TFLOPS | 22 TFLOPS | 44 TFLOPS | 44 TFLOPS |
+| 8192×8192 | 18 TFLOPS | **31 TFLOPS** | **63 TFLOPS** | **63 TFLOPS** |
 
-> **Note:** FP16/BF16 matmul uses simple kernels with FP32 accumulation. TensorCore optimization planned for future releases (see [Issue #60](https://github.com/m96-chan/PyGPUkit/issues/60)).
+> **Note:** CUTLASS is automatic for compatible sizes (16-aligned). Use `PYGPUKIT_NO_TF32=1` for full FP32 precision.
 
 ---
 
@@ -227,6 +310,8 @@ manager.create_partition("inference", "Inference",
 | **QoS Policy** | Guaranteed/Burstable/BestEffort tiers |
 | **Kernel Pacing** | Bandwidth-based throttling per stream |
 | **GPU Partitioning** | Resource isolation, multi-tenant support |
+| **Multi-LLM Execution** | Concurrent AI model execution with stream isolation |
+| **asyncio Integration** | Native Python async/await for concurrent inference |
 
 ---
 
@@ -265,12 +350,12 @@ PyGPUkit/
 | **v0.2.3** | TF32 TensorCore (PTX mma.sync), 28 TFLOPS |
 | **v0.2.4** | **Single-binary distribution**, dynamic NVRTC, driver-only mode |
 | **v0.2.5** | **FP16/BF16 support**, reduction ops, operator overloads, TF32 v2 (~30 TFLOPS) |
+| **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
 
 ### Planned
 
 | Version | Goals |
 |---------|-------|
-| **v0.2.6** | FP16/BF16 TensorCore optimization, Multi-GPU detection |
 | **v0.2.7** | Full API review, documentation, backward compatibility |
 | **v0.3** | Triton backend, advanced ops (softmax, layernorm), MPS/MIG |
 

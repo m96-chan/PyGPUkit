@@ -21,6 +21,18 @@ find_package(pybind11 CONFIG REQUIRED)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
+# CUTLASS (header-only library)
+set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass")
+if(EXISTS "${CUTLASS_DIR}/include")
+    message(STATUS "CUTLASS found at: ${CUTLASS_DIR}")
+    include_directories(${CUTLASS_DIR}/include)
+    include_directories(${CUTLASS_DIR}/tools/util/include)
+    add_definitions(-DPYGPUKIT_HAS_CUTLASS=1)
+else()
+    message(STATUS "CUTLASS not found, using fallback kernels")
+    add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
+endif()
+
 # Set default CUDA architectures if not specified
 # PyGPUkit requires SM >= 80 (Ampere and newer)
 # Older architectures (Pascal/Turing) are NOT supported
@@ -32,8 +44,8 @@ message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # Ampere-optimized compiler flags
 # Add -v for verbose ptxas output to check register usage
-# Limit registers to 128 to prevent spilling issues with WMMA kernels
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math --ptxas-options=-v -maxrregcount=128")
+# NOTE: Do NOT use -maxrregcount for CUTLASS - it needs many registers for optimal performance
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math --ptxas-options=-v -O3")
 
 # Build single pybind11 module with all sources
 pybind11_add_module(_pygpukit_native
@@ -48,8 +60,13 @@ pybind11_add_module(_pygpukit_native
     jit/compiler.cpp
     jit/kernel.cpp
     jit/nvrtc_loader.cpp
-    # Ops
-    ops/basic.cu
+    # Ops - Modular structure
+    ops/elementwise/elementwise.cu
+    ops/unary/unary.cu
+    ops/reduction/reduction.cu
+    ops/matmul/matmul.cu
+    ops/matmul/matmul_cutlass.cu
+    ops/nn/nn.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp
@@ -64,8 +81,11 @@ target_link_libraries(_pygpukit_native PRIVATE
     CUDA::cuda_driver
 )
 
+# IMPORTANT: Do NOT enable CUDA_SEPARABLE_COMPILATION
+# It causes 15x performance degradation for CUTLASS kernels
+# due to prevented inlining and indirect function calls
 set_target_properties(_pygpukit_native PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_SEPARABLE_COMPILATION OFF
 )
 
 # Install the module to the correct location for scikit-build-core

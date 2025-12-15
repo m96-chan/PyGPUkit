@@ -200,7 +200,11 @@ class TestCorrectness:
     """Verify correctness is maintained with optimizations."""
 
     def test_matmul_correctness_small(self, check_3090ti):
-        """Small matmul should be numerically correct."""
+        """Small matmul should be numerically correct.
+
+        Note: v0.2.6+ uses CUTLASS TF32 by default, which has 19-bit mantissa
+        (vs FP32's 23-bit). Expected relative error is ~1e-3.
+        """
         A = np.random.randn(256, 256).astype(np.float32)
         B = np.random.randn(256, 256).astype(np.float32)
 
@@ -211,10 +215,14 @@ class TestCorrectness:
 
         C_expected = A @ B
         rel_error = np.max(np.abs(C_result - C_expected)) / np.max(np.abs(C_expected))
-        assert rel_error < 1e-5, f"Relative error too high: {rel_error}"
+        # TF32 threshold: 1e-3 (19-bit mantissa precision)
+        assert rel_error < 1e-3, f"Relative error too high: {rel_error}"
 
     def test_matmul_correctness_large(self, check_3090ti):
-        """Large matmul should be numerically correct."""
+        """Large matmul should be numerically correct.
+
+        Note: v0.2.6+ uses CUTLASS TF32 by default.
+        """
         A = np.random.randn(4096, 4096).astype(np.float32)
         B = np.random.randn(4096, 4096).astype(np.float32)
 
@@ -225,10 +233,14 @@ class TestCorrectness:
 
         C_expected = A @ B
         rel_error = np.max(np.abs(C_result - C_expected)) / np.max(np.abs(C_expected))
-        assert rel_error < 1e-4, f"Relative error too high: {rel_error}"
+        # TF32 threshold: 1e-3
+        assert rel_error < 1e-3, f"Relative error too high: {rel_error}"
 
     def test_matmul_correctness_non_square(self, check_3090ti):
-        """Non-square matmul should be numerically correct."""
+        """Non-square matmul should be numerically correct.
+
+        Note: v0.2.6+ uses CUTLASS TF32 by default.
+        """
         A = np.random.randn(2048, 1024).astype(np.float32)
         B = np.random.randn(1024, 4096).astype(np.float32)
 
@@ -239,7 +251,8 @@ class TestCorrectness:
 
         C_expected = A @ B
         rel_error = np.max(np.abs(C_result - C_expected)) / np.max(np.abs(C_expected))
-        assert rel_error < 1e-4, f"Relative error too high: {rel_error}"
+        # TF32 threshold: 1e-3
+        assert rel_error < 1e-3, f"Relative error too high: {rel_error}"
 
 
 class TestEfficiencyMetrics:

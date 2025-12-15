@@ -1,7 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "../ops/basic.cuh"
+#include "../ops/ops.cuh"
 
 namespace py = pybind11;
 using namespace pygpukit;
@@ -114,4 +114,23 @@ void init_ops_bindings(py::module_& m) {
     m.def("max", &ops::max,
           py::arg("a"),
           "Max of all elements (float32/float64 only), returns scalar GPUArray");
+
+    // ========================================================================
+    // Neural Network operations
+    // ========================================================================
+
+    // GELU activation
+    m.def("gelu", &ops::gelu,
+          py::arg("input"),
+          "GELU activation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))");
+
+    // Bias add (in-place)
+    m.def("bias_add_inplace", &ops::bias_add_inplace,
+          py::arg("output"), py::arg("bias"),
+          "Add bias to output in-place: output[batch, features] += bias[features]");
+
+    // LayerNorm
+    m.def("layernorm", &ops::layernorm,
+          py::arg("input"), py::arg("gamma"), py::arg("beta"), py::arg("eps") = 1e-5f,
+          "Layer normalization: (x - mean) / sqrt(var + eps) * gamma + beta");
 }
