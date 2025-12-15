@@ -6,6 +6,7 @@
 #include "matmul_f32_tf32.cuh"
 #include "matmul_f32_tf32_v2.cuh"
 #include "matmul_f16_bf16.cuh"
+#include "matmul_f16_bf16_tc.cuh"
 #include "../core/driver_context.hpp"
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -1878,29 +1879,37 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         throw std::runtime_error("matmul output shape mismatch");
     }
 
-    // Check for TF32 TensorCore mode (requires SM >= 80)
+    // Check for TensorCore modes (requires SM >= 80)
     // Note: Check on every call since env var might change
     bool tf32_enabled = false;
+    bool fp16_tc_enabled = false;
     int sm_version = 0;
 
-    // Check environment variable
+    // Check environment variables
     const char* tf32_env = std::getenv("PYGPUKIT_ALLOW_TF32");
+    const char* fp16_tc_env = std::getenv("PYGPUKIT_ALLOW_FP16_TC");
 
     // Debug output (remove in production)
     static bool debug_printed = false;
     if (!debug_printed) {
         debug_printed = true;
         printf("[PyGPUkit] PYGPUKIT_ALLOW_TF32 = %s\n", tf32_env ? tf32_env : "(null)");
+        printf("[PyGPUkit] PYGPUKIT_ALLOW_FP16_TC = %s\n", fp16_tc_env ? fp16_tc_env : "(null)");
         fflush(stdout);
     }
 
-    if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
-        // Check GPU compute capability (using internal helper for driver-only compatibility)
+    // Check SM version once if any TensorCore mode is requested
+    if ((tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) ||
+        (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y'))) {
         sm_version = get_sm_version_internal();
+    }
+
+    if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
         tf32_enabled = (sm_version >= 80);  // Ampere or newer
-        if (!debug_printed) {
-            fprintf(stderr, "[PyGPUkit] SM version = %d, TF32 enabled = %d\n", sm_version, tf32_enabled);
-        }
+    }
+
+    if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
+        fp16_tc_enabled = (sm_version >= 80);  // Ampere or newer
     }
 
     // Select kernel based on matrix size and dtype
@@ -1912,13 +1921,20 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                       K >= OPTIMIZED_MATMUL_THRESHOLD) ||
                      (M == 16 && (N == 8 || N == 16)));
 
-    bool use_optimized = !use_tf32 &&
+    // FP16/BF16 TensorCore: requires sizes to be multiples of tile size
+    // BM=128, BN=128, BK=32 in fp16_bf16_tc namespace
+    bool use_fp16_tc = fp16_tc_enabled &&
+                       (a.dtype() == DataType::Float16 || a.dtype() == DataType::BFloat16) &&
+                       (M >= 128 && N >= 128 && K >= 32) &&
+                       (M % 128 == 0 && N % 128 == 0 && K % 32 == 0);
+
+    bool use_optimized = !use_tf32 && !use_fp16_tc &&
                          (a.dtype() == DataType::Float32) &&
                          (M >= OPTIMIZED_MATMUL_THRESHOLD ||
                           N >= OPTIMIZED_MATMUL_THRESHOLD ||
                           K >= OPTIMIZED_MATMUL_THRESHOLD);
 
-    bool use_tiled = !use_optimized && !use_tf32 &&
+    bool use_tiled = !use_optimized && !use_tf32 && !use_fp16_tc &&
                      (M >= TILED_MATMUL_THRESHOLD ||
                       N >= TILED_MATMUL_THRESHOLD ||
                       K >= TILED_MATMUL_THRESHOLD);
@@ -1938,6 +1954,21 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 static_cast<const float*>(a.data()),
                 static_cast<const float*>(b.data()),
                 static_cast<float*>(c.data()),
+                M, N, K);
+        }
+    } else if (use_fp16_tc) {
+        // FP16/BF16 TensorCore kernels with mma.sync.m16n8k16
+        if (a.dtype() == DataType::Float16) {
+            fp16_bf16_tc::launch_sgemm_f16_tc(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                M, N, K);
+        } else {
+            fp16_bf16_tc::launch_sgemm_bf16_tc(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
                 M, N, K);
         }
     } else if (use_optimized) {
