@@ -41,17 +41,21 @@ import numpy as np
 # Header
 # =============================================================================
 
+
 def print_header(title: str):
     print("\n" + "=" * 70)
     print(f" {title}")
     print("=" * 70)
 
+
 def print_section(title: str):
     print(f"\n--- {title} ---")
+
 
 # =============================================================================
 # Main Demo
 # =============================================================================
+
 
 def main():
     print_header("PyGPUkit v0.2 Complete Feature Demo")
@@ -59,8 +63,10 @@ def main():
     # Import modules
     try:
         import pygpukit
+
         native = pygpukit._pygpukit_native
         import _pygpukit_rust as rust
+
         print(f"PyGPUkit version: {pygpukit.__version__}")
         print("Native module loaded: OK")
         print("Rust module loaded: OK")
@@ -89,7 +95,7 @@ def main():
 
     pool = rust.MemoryPool(
         quota=100 * 1024 * 1024,  # 100 MB quota
-        enable_eviction=True
+        enable_eviction=True,
     )
     print("Created pool with 100 MB quota, eviction enabled")
 
@@ -125,7 +131,7 @@ def main():
     scheduler = rust.Scheduler(
         sched_tick_ms=10.0,
         window_ms=100.0,
-        total_memory=1024 * 1024 * 1024  # 1 GB
+        total_memory=1024 * 1024 * 1024,  # 1 GB
     )
     print("Created scheduler (10ms tick, 100ms window, 1GB memory)")
 
@@ -136,7 +142,7 @@ def main():
             id=f"task_{i}",
             name=f"Layer {i}",
             memory_estimate=100 * 1024 * 1024,  # 100 MB
-            priority=i % 3
+            priority=i % 3,
         )
         task_id = scheduler.submit(task)
         task_ids.append(task_id)
@@ -171,7 +177,7 @@ def main():
             src_ptr=0x1000 + i * 0x1000,
             dst_ptr=0x2000 + i * 0x1000,
             size=1024 * 1024,
-            priority=i % 3
+            priority=i % 3,
         )
         print(f"  Queued transfer {op_id}: {type_name.upper()}")
 
@@ -182,7 +188,9 @@ def main():
         transfer_engine.complete_transfer(op.id)
 
     transfer_stats = transfer_engine.stats()
-    print(f"Transfer stats: {transfer_stats.completed_count} completed, {transfer_stats.pending_count} pending")
+    print(
+        f"Transfer stats: {transfer_stats.completed_count} completed, {transfer_stats.pending_count} pending"
+    )
 
     # =========================================================================
     # 4. Rust Kernel Dispatch Controller Demo
@@ -194,16 +202,9 @@ def main():
 
     for i in range(4):
         config = rust.LaunchConfig(
-            grid=(128, 1, 1),
-            block=(256, 1, 1),
-            shared_mem=0,
-            stream_id=i % 2
+            grid=(128, 1, 1), block=(256, 1, 1), shared_mem=0, stream_id=i % 2
         )
-        req_id = dispatcher.queue(
-            kernel_handle=0xDEADBEEF + i,
-            config=config,
-            priority=i % 3
-        )
+        req_id = dispatcher.queue(kernel_handle=0xDEADBEEF + i, config=config, priority=i % 3)
         print(f"  Queued kernel {req_id}: stream={i % 2}")
 
     ready_kernels = dispatcher.get_ready(max_requests=4)
@@ -212,7 +213,9 @@ def main():
         dispatcher.mark_completed(req.id)
 
     dispatch_stats = dispatcher.stats()
-    print(f"Dispatch stats: {dispatch_stats.completed_count} completed, {dispatch_stats.pending_count} pending")
+    print(
+        f"Dispatch stats: {dispatch_stats.completed_count} completed, {dispatch_stats.pending_count} pending"
+    )
 
     # =========================================================================
     # 5. Admission Control (NEW)
@@ -225,7 +228,7 @@ def main():
     admission_scheduler = rust.Scheduler(
         sched_tick_ms=10.0,
         window_ms=100.0,
-        total_memory=500 * 1024 * 1024  # 500 MB limit
+        total_memory=500 * 1024 * 1024,  # 500 MB limit
     )
 
     # Submit tasks that should fit
@@ -234,7 +237,7 @@ def main():
             id=f"admit_{i}",
             name=f"Admissible Task {i}",
             memory_estimate=100 * 1024 * 1024,  # 100 MB each
-            priority=1
+            priority=1,
         )
         task_id = admission_scheduler.submit(task)
         print(f"  Admitted task {i}: {task_id}")
@@ -254,7 +257,7 @@ def main():
     # Create QoS policy evaluator
     qos_evaluator = rust.QosPolicyEvaluator(
         total_memory=1024 * 1024 * 1024,  # 1 GB
-        total_bandwidth=1.0
+        total_bandwidth=1.0,
     )
 
     # Test different QoS classes
@@ -270,7 +273,9 @@ def main():
         class_name = qos_class_names.get(int(task.qos_class), "Unknown")
         if eval_result.is_admitted():
             qos_evaluator.reserve(eval_result)
-            print(f"  {class_name:12} | {task.name:15} | ADMITTED (priority={task.effective_priority()})")
+            print(
+                f"  {class_name:12} | {task.name:15} | ADMITTED (priority={task.effective_priority()})"
+            )
         elif eval_result.is_throttled():
             print(f"  {class_name:12} | {task.name:15} | THROTTLED")
         else:
@@ -289,10 +294,7 @@ def main():
     print_header("7. Kernel Pacing Engine (NEW)")
 
     pacing_config = rust.PacingConfig(
-        total_bandwidth=1.0,
-        window_ms=100.0,
-        min_interval_ms=0.1,
-        adaptive=True
+        total_bandwidth=1.0, window_ms=100.0, min_interval_ms=0.1, adaptive=True
     )
     pacing_engine = rust.KernelPacingEngine(pacing_config)
     print(f"Created pacing engine: {pacing_config}")
@@ -326,21 +328,14 @@ def main():
     print_header("8. Micro-Slicing Framework (NEW)")
 
     slice_config = rust.SliceConfig(
-        max_items_per_slice=10000,
-        max_duration_ms=1.0,
-        min_slices=2,
-        max_slices=16,
-        adaptive=True
+        max_items_per_slice=10000, max_duration_ms=1.0, min_slices=2, max_slices=16, adaptive=True
     )
     slice_scheduler = rust.SliceScheduler(slice_config)
     print(f"Created slice scheduler: {slice_config}")
 
     # Submit kernels for slicing
     num_slices_1 = slice_scheduler.submit(
-        kernel_handle=0xAAAA0001,
-        total_items=50000,
-        block=(256, 1, 1),
-        shared_mem=0
+        kernel_handle=0xAAAA0001, total_items=50000, block=(256, 1, 1), shared_mem=0
     )
     print(f"\nKernel 1: 50000 items -> {num_slices_1} slices")
 
@@ -350,7 +345,7 @@ def main():
         total_items=30000,
         block=(256, 1, 1),
         shared_mem=0,
-        priority=100
+        priority=100,
     )
     print(f"Kernel 2: 30000 items -> {num_slices_2} slices (priority=100)")
 
@@ -361,7 +356,9 @@ def main():
         slice_info = slice_scheduler.get_next_slice()
         if slice_info is None:
             break
-        print(f"  Slice {slice_info.slice_id}: kernel=0x{slice_info.kernel_handle:X}, offset={slice_info.offset}, count={slice_info.count}")
+        print(
+            f"  Slice {slice_info.slice_id}: kernel=0x{slice_info.kernel_handle:X}, offset={slice_info.offset}, count={slice_info.count}"
+        )
         slice_scheduler.complete_slice(0.1)  # 0.1ms exec time
         executed += 1
 
@@ -379,7 +376,7 @@ def main():
     pinned_config = rust.PinnedPoolConfig(
         max_size=256 * 1024 * 1024,  # 256 MB
         enable_pooling=True,
-        alignment=256
+        alignment=256,
     )
     pinned_manager = rust.PinnedMemoryManager(pinned_config)
     print(f"Created pinned memory manager: {pinned_config}")
@@ -422,7 +419,7 @@ def main():
         max_entries=1024,
         max_ptx_size=256 * 1024 * 1024,  # 256 MB
         enable_eviction=True,
-        ttl_seconds=0.0  # No TTL
+        ttl_seconds=0.0,  # No TTL
     )
     kernel_cache = rust.KernelCache(cache_config)
     print(f"Created kernel cache: {cache_config}")
@@ -435,7 +432,10 @@ def main():
     kernels = [
         ("__global__ void add_kernel(float* a, float* b, float* c) { ... }", "add_kernel"),
         ("__global__ void mul_kernel(float* a, float* b, float* c) { ... }", "mul_kernel"),
-        ("__global__ void matmul_kernel(float* A, float* B, float* C, int M, int N, int K) { ... }", "matmul_kernel"),
+        (
+            "__global__ void matmul_kernel(float* A, float* B, float* C, int M, int N, int K) { ... }",
+            "matmul_kernel",
+        ),
     ]
 
     for source, name in kernels:
@@ -474,20 +474,30 @@ def main():
     partition_config = rust.PartitionConfig(
         total_memory=8 * 1024 * 1024 * 1024,  # 8 GB
         allow_overcommit=False,
-        overcommit_ratio=1.0
+        overcommit_ratio=1.0,
     )
     partition_manager = rust.PartitionManager(partition_config)
     print(f"Created partition manager: {partition_config}")
 
     # Create partitions
     partitions = [
-        ("inference", "Inference Workload", rust.PartitionLimits.with_memory(4 * 1024 * 1024 * 1024).compute(0.5).bandwidth(0.4)),
-        ("training", "Training Workload", rust.PartitionLimits.with_memory(3 * 1024 * 1024 * 1024).compute(0.4).bandwidth(0.5)),
+        (
+            "inference",
+            "Inference Workload",
+            rust.PartitionLimits.with_memory(4 * 1024 * 1024 * 1024).compute(0.5).bandwidth(0.4),
+        ),
+        (
+            "training",
+            "Training Workload",
+            rust.PartitionLimits.with_memory(3 * 1024 * 1024 * 1024).compute(0.4).bandwidth(0.5),
+        ),
     ]
 
     for pid, name, limits in partitions:
         partition_manager.create_partition(pid, name, limits)
-        print(f"  Created partition '{pid}': memory={limits.memory_quota / 1024**3:.0f}GB, compute={limits.compute_share:.0%}")
+        print(
+            f"  Created partition '{pid}': memory={limits.memory_quota / 1024**3:.0f}GB, compute={limits.compute_share:.0%}"
+        )
 
     # Assign tasks
     partition_manager.assign_task("inference-task-1", "inference")
@@ -560,22 +570,28 @@ def main():
         C_result = C_gpu.to_numpy()
         rel_error = np.max(np.abs(C_result - C_cpu)) / np.max(np.abs(C_cpu))
 
-        results.append({
-            'size': size,
-            'kernel': kernel,
-            'time_ms': avg_time * 1000,
-            'gflops': gflops,
-            'speedup': speedup,
-            'error': rel_error
-        })
+        results.append(
+            {
+                "size": size,
+                "kernel": kernel,
+                "time_ms": avg_time * 1000,
+                "gflops": gflops,
+                "speedup": speedup,
+                "error": rel_error,
+            }
+        )
 
         status = "OK" if rel_error < 1e-3 else f"ERR:{rel_error:.1e}"
-        print(f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time*1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x ({status})")
+        print(
+            f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time * 1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x ({status})"
+        )
 
     print("-" * 60)
 
-    peak = max(results, key=lambda x: x['gflops'])
-    print(f"\nPeak: {peak['gflops']:.1f} GFLOPS at {peak['size']}x{peak['size']} ({peak['kernel']})")
+    peak = max(results, key=lambda x: x["gflops"])
+    print(
+        f"\nPeak: {peak['gflops']:.1f} GFLOPS at {peak['size']}x{peak['size']} ({peak['kernel']})"
+    )
 
     # =========================================================================
     # Summary
@@ -611,6 +627,7 @@ def main():
     print("=" * 70)
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

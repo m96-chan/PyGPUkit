@@ -24,6 +24,7 @@ def _validate_same_dtype(a: GPUArray, b: GPUArray, op_name: str) -> None:
 def _validate_float_dtype(a: GPUArray, op_name: str) -> None:
     """Validate that array has float dtype."""
     from pygpukit.core.dtypes import bfloat16, float16, float32, float64
+
     if a.dtype not in (float32, float64, float16, bfloat16):
         raise ValueError(f"{op_name} requires float dtype, got {a.dtype}")
 
@@ -367,6 +368,7 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
     # Check TF32 dtype requirement early (before backend dispatch)
     if use_tf32 is True:
         from pygpukit.core.dtypes import float32
+
         if a.dtype != float32:
             raise RuntimeError("TF32 matmul requires float32 dtype")
 

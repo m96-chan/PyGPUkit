@@ -52,7 +52,7 @@ def benchmark_matmul(a, b, name: str, warmup: int = 3, iterations: int = 10) -> 
     flops = 2.0 * M * N * K
     tflops = flops / avg_time / 1e12
 
-    print(f"  {name}: {avg_time*1000:.2f} ms, {tflops:.2f} TFLOPS")
+    print(f"  {name}: {avg_time * 1000:.2f} ms, {tflops:.2f} TFLOPS")
     return tflops
 
 
@@ -104,10 +104,10 @@ def demo_elementwise():
             b = gpk.from_numpy(b_np)
 
         # Operations
-        add_result = (a + b)
-        mul_result = (a * b)
-        sub_result = (a - b)
-        div_result = (a / b)
+        add_result = a + b
+        mul_result = a * b
+        sub_result = a - b
+        div_result = a / b
 
         # Convert back for display
         if gpk_dtype == gpk.bfloat16:
@@ -242,8 +242,8 @@ def demo_benchmark_full():
             start = time.perf_counter()
             _ = (a @ b).to_numpy()
             times.append(time.perf_counter() - start)
-        flops = 2.0 * size ** 3
-        results['FP32'] = flops / np.mean(times) / 1e12
+        flops = 2.0 * size**3
+        results["FP32"] = flops / np.mean(times) / 1e12
 
         # TF32
         for _ in range(3):
@@ -254,7 +254,7 @@ def demo_benchmark_full():
             start = time.perf_counter()
             _ = gpk.matmul(a, b, use_tf32=True).to_numpy()
             times.append(time.perf_counter() - start)
-        results['TF32'] = flops / np.mean(times) / 1e12
+        results["TF32"] = flops / np.mean(times) / 1e12
 
         # FP16
         a16 = gpk.from_numpy(np.random.randn(size, size).astype(np.float16))
@@ -268,7 +268,7 @@ def demo_benchmark_full():
             start = time.perf_counter()
             _ = (a16 @ b16).to_numpy()
             times.append(time.perf_counter() - start)
-        results['FP16'] = flops / np.mean(times) / 1e12
+        results["FP16"] = flops / np.mean(times) / 1e12
 
         # BF16
         abf = gpk.from_numpy(np.random.randn(size, size).astype(np.float32)).astype(gpk.bfloat16)
@@ -282,9 +282,11 @@ def demo_benchmark_full():
             start = time.perf_counter()
             _ = (abf @ bbf).to_numpy()
             times.append(time.perf_counter() - start)
-        results['BF16'] = flops / np.mean(times) / 1e12
+        results["BF16"] = flops / np.mean(times) / 1e12
 
-        print(f"{size}x{size:<7} {results['FP32']:<10.2f} {results['TF32']:<10.2f} {results['FP16']:<10.2f} {results['BF16']:<10.2f}")
+        print(
+            f"{size}x{size:<7} {results['FP32']:<10.2f} {results['TF32']:<10.2f} {results['FP16']:<10.2f} {results['BF16']:<10.2f}"
+        )
 
 
 def main():

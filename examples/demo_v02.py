@@ -29,17 +29,21 @@ import numpy as np
 # Header
 # =============================================================================
 
+
 def print_header(title: str):
     print("\n" + "=" * 70)
     print(f" {title}")
     print("=" * 70)
 
+
 def print_section(title: str):
     print(f"\n--- {title} ---")
+
 
 # =============================================================================
 # Main Demo
 # =============================================================================
+
 
 def main():
     print_header("PyGPUkit v0.2 Full Feature Demo")
@@ -47,8 +51,10 @@ def main():
     # Import modules
     try:
         import pygpukit
+
         native = pygpukit._pygpukit_native
         import _pygpukit_rust as rust
+
         print(f"PyGPUkit version: {pygpukit.__version__}")
         print("Native module loaded: OK")
         print("Rust module loaded: OK")
@@ -77,7 +83,7 @@ def main():
 
     pool = rust.MemoryPool(
         quota=100 * 1024 * 1024,  # 100 MB quota
-        enable_eviction=True
+        enable_eviction=True,
     )
     print("Created pool with 100 MB quota, eviction enabled")
 
@@ -113,7 +119,7 @@ def main():
     scheduler = rust.Scheduler(
         sched_tick_ms=10.0,
         window_ms=100.0,
-        total_memory=1024 * 1024 * 1024  # 1 GB
+        total_memory=1024 * 1024 * 1024,  # 1 GB
     )
     print("Created scheduler (10ms tick, 100ms window, 1GB memory)")
 
@@ -124,7 +130,7 @@ def main():
             id=f"task_{i}",
             name=f"Layer {i}",
             memory_estimate=100 * 1024 * 1024,  # 100 MB
-            priority=i % 3
+            priority=i % 3,
         )
         task_id = scheduler.submit(task)
         task_ids.append(task_id)
@@ -170,7 +176,7 @@ def main():
             src_ptr=0x1000 + i * 0x1000,
             dst_ptr=0x2000 + i * 0x1000,
             size=1024 * 1024,  # 1 MB
-            priority=i % 3
+            priority=i % 3,
         )
         transfer_ids.append(op_id)
         print(f"  Queued transfer {op_id}: {type_name.upper()}, priority={i % 3}")
@@ -207,13 +213,9 @@ def main():
             grid=(128, 1, 1),
             block=(256, 1, 1),
             shared_mem=0,
-            stream_id=i % 2  # Alternate between stream 0 and 1
+            stream_id=i % 2,  # Alternate between stream 0 and 1
         )
-        req_id = dispatcher.queue(
-            kernel_handle=0xDEADBEEF + i,
-            config=config,
-            priority=i % 3
-        )
+        req_id = dispatcher.queue(kernel_handle=0xDEADBEEF + i, config=config, priority=i % 3)
         print(f"  Queued kernel {req_id}: stream={i % 2}, priority={i % 3}")
 
     # Get ready kernels
@@ -285,23 +287,29 @@ def main():
         C_result = C_gpu.to_numpy()
         rel_error = np.max(np.abs(C_result - C_cpu)) / np.max(np.abs(C_cpu))
 
-        results.append({
-            'size': size,
-            'kernel': kernel,
-            'time_ms': avg_time * 1000,
-            'gflops': gflops,
-            'speedup': speedup,
-            'error': rel_error
-        })
+        results.append(
+            {
+                "size": size,
+                "kernel": kernel,
+                "time_ms": avg_time * 1000,
+                "gflops": gflops,
+                "speedup": speedup,
+                "error": rel_error,
+            }
+        )
 
         status = "OK" if rel_error < 1e-3 else f"ERR:{rel_error:.1e}"
-        print(f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time*1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x ({status})")
+        print(
+            f"{size:>5}x{size:<5} | {kernel:<9} | {avg_time * 1000:>8.2f} | {gflops:>7.1f} | {speedup:>5.1f}x ({status})"
+        )
 
     print("-" * 60)
 
     # Peak performance
-    peak = max(results, key=lambda x: x['gflops'])
-    print(f"\nPeak: {peak['gflops']:.1f} GFLOPS at {peak['size']}x{peak['size']} ({peak['kernel']})")
+    peak = max(results, key=lambda x: x["gflops"])
+    print(
+        f"\nPeak: {peak['gflops']:.1f} GFLOPS at {peak['size']}x{peak['size']} ({peak['kernel']})"
+    )
 
     # =========================================================================
     # 6. Integrated Demo - Full Pipeline
@@ -335,7 +343,7 @@ def main():
             id=f"layer_{layer}",
             name=f"Layer {layer}",
             memory_estimate=batch_size * hidden_dim * 4 * 2,  # input + output
-            priority=0
+            priority=0,
         )
         task_id = scheduler.submit(task)
 
@@ -346,18 +354,13 @@ def main():
 
         # Queue transfer
         transfer_engine.enqueue_h2d(
-            host_ptr=0x1000,
-            device_ptr=input_block_id,
-            size=batch_size * hidden_dim * 4
+            host_ptr=0x1000, device_ptr=input_block_id, size=batch_size * hidden_dim * 4
         )
 
         # Queue kernel
         config = rust.LaunchConfig.linear(batch_size * hidden_dim, 256)
         dispatcher.queue(
-            kernel_handle=0xFFFF0000 + layer,
-            config=config,
-            task_id=task_id,
-            priority=0
+            kernel_handle=0xFFFF0000 + layer, config=config, task_id=task_id, priority=0
         )
 
         # Actual compute
@@ -384,7 +387,7 @@ def main():
     throughput = total_flops / total_time / 1e9
 
     print("\nPipeline completed:")
-    print(f"  Total time: {total_time*1000:.2f} ms")
+    print(f"  Total time: {total_time * 1000:.2f} ms")
     print(f"  Throughput: {throughput:.1f} GFLOPS")
     print(f"  Tasks completed: {scheduler.stats().completed_count}")
     print(f"  Memory allocations: {pool.stats().allocation_count}")
@@ -433,6 +436,7 @@ def main():
     print("=" * 70)
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

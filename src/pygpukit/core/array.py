@@ -240,26 +240,31 @@ class GPUArray:
     def __add__(self, other: GPUArray) -> GPUArray:
         """Element-wise addition."""
         from pygpukit.ops.basic import add
+
         return add(self, other)
 
     def __sub__(self, other: GPUArray) -> GPUArray:
         """Element-wise subtraction."""
         from pygpukit.ops.basic import sub
+
         return sub(self, other)
 
     def __mul__(self, other: GPUArray) -> GPUArray:
         """Element-wise multiplication."""
         from pygpukit.ops.basic import mul
+
         return mul(self, other)
 
     def __truediv__(self, other: GPUArray) -> GPUArray:
         """Element-wise division."""
         from pygpukit.ops.basic import div
+
         return div(self, other)
 
     def __matmul__(self, other: GPUArray) -> GPUArray:
         """Matrix multiplication."""
         from pygpukit.ops.basic import matmul
+
         return matmul(self, other)
 
     # ========================================================================
@@ -310,5 +315,5 @@ class GPUArray:
             return result
         else:
             target_np_dtype = dtype.to_numpy_dtype()
-            converted = np_data.astype(target_np_dtype)
+            converted: np.ndarray = np_data.astype(target_np_dtype)
             return from_numpy(converted)

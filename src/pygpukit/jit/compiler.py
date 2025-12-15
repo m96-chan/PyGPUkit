@@ -393,9 +393,7 @@ class JITKernel:
             # Retry loop for transient errors
             for retry in range(self._MAX_RETRIES):
                 try:
-                    self._kernel = native.JITKernel(
-                        self._source, self._name, current_options
-                    )
+                    self._kernel = native.JITKernel(self._source, self._name, current_options)
                     self._ptx = self._kernel.ptx
                     self._is_compiled = self._kernel.is_compiled
 
@@ -476,8 +474,7 @@ class JITKernel:
 
         # Check if user already specified -arch
         has_arch = any(
-            opt.startswith("-arch=") or opt.startswith("--gpu-architecture=")
-            for opt in options
+            opt.startswith("-arch=") or opt.startswith("--gpu-architecture=") for opt in options
         )
 
         if not has_arch:
@@ -646,12 +643,12 @@ _warmup_thread: threading.Thread | None = None
 _warmup_error: Exception | None = None
 
 # Warmup test kernel
-_WARMUP_KERNEL_SOURCE = '''
+_WARMUP_KERNEL_SOURCE = """
 extern "C" __global__ void _pygpukit_warmup_kernel(float* x, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) x[idx] = x[idx];
 }
-'''
+"""
 
 
 def warmup(
@@ -714,9 +711,7 @@ def _do_warmup(callback: Callable[[], None] | None = None) -> bool:
     try:
         # Check if NVRTC is available
         if not is_nvrtc_available():
-            _warmup_error = NvrtcError(
-                "NVRTC not available", NvrtcErrorCode.NotLoaded
-            )
+            _warmup_error = NvrtcError("NVRTC not available", NvrtcErrorCode.NotLoaded)
             _warmup_done = True
             return False
 

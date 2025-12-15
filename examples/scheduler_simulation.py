@@ -27,7 +27,7 @@ def log(msg: str, level: str = "INFO") -> None:
 def separator(title: str = "") -> None:
     """Print separator line."""
     if title:
-        print(f"\n{'='*20} {title} {'='*20}")
+        print(f"\n{'=' * 20} {title} {'=' * 20}")
     else:
         print("-" * 60)
 
@@ -68,7 +68,7 @@ def main() -> None:
     ┌─────────────────────────────────────────────────────────┐
     │  Resource           │  Total        │  Available       │
     ├─────────────────────────────────────────────────────────┤
-    │  GPU Memory         │  {props.total_memory/(1024**3):6.2f} GB   │  {props.total_memory/(1024**3):6.2f} GB        │
+    │  GPU Memory         │  {props.total_memory / (1024**3):6.2f} GB   │  {props.total_memory / (1024**3):6.2f} GB        │
     │  Streaming MPs      │  {props.multiprocessor_count:6d} SMs   │  {props.multiprocessor_count:6d} SMs        │
     │  Bandwidth          │  100.00 %     │  100.00 %        │
     │  CUDA Streams       │      32       │      32          │
@@ -143,12 +143,12 @@ def main() -> None:
         def workload():
             start = time.time()
             execution_log.append((name, "START", start))
-            log(f"[KERNEL] {name}: Launching kernel (est. {flops/1e9:.1f} GFLOPS)", "EXEC")
+            log(f"[KERNEL] {name}: Launching kernel (est. {flops / 1e9:.1f} GFLOPS)", "EXEC")
             # Simulate work
             time.sleep(duration_ms / 1000.0)
             end = time.time()
             execution_log.append((name, "END", end))
-            log(f"[KERNEL] {name}: Completed in {(end-start)*1000:.2f} ms", "EXEC")
+            log(f"[KERNEL] {name}: Completed in {(end - start) * 1000:.2f} ms", "EXEC")
 
         return workload
 
@@ -185,9 +185,9 @@ def main() -> None:
     │  ID: {task_id:<8}                                        │
     │  Name: {name:<20}                            │
     │  Memory Request: {mem_mb:>6} MB                              │
-    │  Bandwidth: {bw*100:>5.1f} %                                   │
+    │  Bandwidth: {bw * 100:>5.1f} %                                   │
     │  Policy: {policy.upper():<12}                               │
-    │  Est. FLOPs: {flops/1e12:.2f} TFLOPS                              │
+    │  Est. FLOPs: {flops / 1e12:.2f} TFLOPS                              │
     │  State: {task.state.name:<10}                                 │
     └──────────────────────────────────────────────────────────┘
         """)
@@ -208,7 +208,7 @@ def main() -> None:
     ┌─────────────────────────────────────────────────────────┐
     │  Resource           │  Reserved     │  Available       │
     ├─────────────────────────────────────────────────────────┤
-    │  GPU Memory         │  {global_stats['reserved_memory']/(1024**2):6.0f} MB   │  {avail_mem/(1024**2):6.0f} MB ({avail_pct:.1f}%)  │
+    │  GPU Memory         │  {global_stats["reserved_memory"] / (1024**2):6.0f} MB   │  {avail_mem / (1024**2):6.0f} MB ({avail_pct:.1f}%)  │
     │  Bandwidth          │   140.0 %     │   -40.0 % (!)    │
     └─────────────────────────────────────────────────────────┘
 
@@ -280,12 +280,12 @@ def main() -> None:
     ]
 
     for name, size in alloc_sizes:
-        log(f"pool.allocate({size // (1024*1024)} MB) for {name}", "ALLOC")
+        log(f"pool.allocate({size // (1024 * 1024)} MB) for {name}", "ALLOC")
         try:
             block = pool.allocate(size)
             blocks.append((name, block))
             stats = pool.stats()
-            log(f"  Block ID: {block.id}, Size class: {block.size // (1024*1024)} MB", "ALLOC")
+            log(f"  Block ID: {block.id}, Size class: {block.size // (1024 * 1024)} MB", "ALLOC")
             log(
                 f"  Pool used: {stats['used'] // (1024**2)} MB, Cached: {stats['cached'] // (1024**2)} MB",
                 "ALLOC",
@@ -318,11 +318,11 @@ def main() -> None:
     ┌────────────────────────────────────────┐
     │  Metric              │  Value          │
     ├────────────────────────────────────────┤
-    │  cudaMalloc calls    │  {stats['cudamalloc_count']:>6}          │
-    │  Reuse count         │  {stats['reuse_count']:>6}          │
-    │  Eviction count      │  {stats['eviction_count']:>6}          │
-    │  Active blocks       │  {stats['active_blocks']:>6}          │
-    │  Free blocks         │  {stats['free_blocks']:>6}          │
+    │  cudaMalloc calls    │  {stats["cudamalloc_count"]:>6}          │
+    │  Reuse count         │  {stats["reuse_count"]:>6}          │
+    │  Eviction count      │  {stats["eviction_count"]:>6}          │
+    │  Active blocks       │  {stats["active_blocks"]:>6}          │
+    │  Free blocks         │  {stats["free_blocks"]:>6}          │
     └────────────────────────────────────────┘
     """)
 
@@ -396,10 +396,10 @@ def main() -> None:
     ┌────────────────────────────────────────┐
     │  Metric              │  Value          │
     ├────────────────────────────────────────┤
-    │  Total tasks         │  {final_stats['task_count']:>6}          │
-    │  Completed           │  {final_stats['completed_count']:>6}          │
+    │  Total tasks         │  {final_stats["task_count"]:>6}          │
+    │  Completed           │  {final_stats["completed_count"]:>6}          │
     │  Total time          │  {total_time:>6.1f} ms      │
-    │  Avg task time       │  {total_time/len(task_ids):>6.1f} ms      │
+    │  Avg task time       │  {total_time / len(task_ids):>6.1f} ms      │
     └────────────────────────────────────────┘
 
     Per-Task Statistics:

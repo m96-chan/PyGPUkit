@@ -465,20 +465,40 @@ Edit → Build → Validate → Benchmark → Commit
 
 **Always commit after validation and benchmark, regardless of results.**
 
-### Lint Check (MANDATORY)
+### Pre-Commit Checks (MANDATORY)
 
-**Before EVERY commit, run lint check:**
+**Before EVERY commit, run these checks:**
 
 ```bash
-# Check all tracked Python files
-git ls-files "*.py" | xargs python -m ruff check
-
-# Auto-fix and format
+# 1. Ruff lint check (auto-fix and format)
 git ls-files "*.py" | xargs python -m ruff check --fix
 git ls-files "*.py" | xargs python -m ruff format
+
+# 2. Mypy type check
+python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined
 ```
 
-**NEVER commit without passing lint.** CI will reject PRs with lint errors.
+**NEVER commit without passing ALL checks.** CI will reject PRs with lint/type errors.
+
+### PR Checklist (MANDATORY before `gh pr create`)
+
+Before creating a PR, verify ALL of the following:
+
+```bash
+# 1. Lint passes
+git ls-files "*.py" | xargs python -m ruff check
+
+# 2. Mypy passes
+python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined
+
+# 3. Tests pass
+python -m pytest tests/ -v
+
+# 4. Benchmark runs (optional but recommended)
+python benchmark.py --quick
+```
+
+**DO NOT create PR until all checks pass locally.**
 
 ### Commit Rules
 

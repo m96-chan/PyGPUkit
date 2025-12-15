@@ -2,6 +2,7 @@
 TDD Tests for v0.2.1 - Admission Control & QoS Policy Spec
 Tests written FIRST before implementation fixes.
 """
+
 import pytest
 
 # Skip all tests if Rust module not available
@@ -92,10 +93,10 @@ class TestAdmissionControlSpec:
         controller = rust.AdmissionController(config)
 
         stats = controller.stats()
-        assert hasattr(stats, 'used_memory')
-        assert hasattr(stats, 'used_bandwidth')
-        assert hasattr(stats, 'admitted_count')
-        assert hasattr(stats, 'rejected_count')
+        assert hasattr(stats, "used_memory")
+        assert hasattr(stats, "used_bandwidth")
+        assert hasattr(stats, "admitted_count")
+        assert hasattr(stats, "rejected_count")
 
 
 class TestQoSPolicySpec:
@@ -103,7 +104,7 @@ class TestQoSPolicySpec:
 
     def test_qos_class_enum(self):
         """QoS classes should be Guaranteed, Burstable, BestEffort."""
-        assert hasattr(rust, 'QosClass')
+        assert hasattr(rust, "QosClass")
 
         # Should be able to get class values
         guaranteed = rust.QosClass.Guaranteed
@@ -217,8 +218,9 @@ class TestQoSPolicyIntegration:
 
         # Create inference partition
         pm.create_partition(
-            "inference", "Inference Partition",
-            rust.PartitionLimits().memory(4 * 1024 * 1024 * 1024).compute(0.5)
+            "inference",
+            "Inference Partition",
+            rust.PartitionLimits().memory(4 * 1024 * 1024 * 1024).compute(0.5),
         )
 
         # Create QoS evaluator for the partition

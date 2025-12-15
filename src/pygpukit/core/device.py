@@ -65,6 +65,7 @@ def get_device_info(device_id: int = 0) -> DeviceInfo:
 @dataclass
 class FallbackDeviceCapabilities:
     """Fallback DeviceCapabilities when Rust module is not available."""
+
     device_id: int
     name: str
     sm_version: int
@@ -107,6 +108,7 @@ def get_device_capabilities(device_id: int = 0):
     # Try to use Rust DeviceCapabilities
     try:
         from pygpukit._pygpukit_rust import DeviceCapabilities
+
         return DeviceCapabilities(sm_version)
     except ImportError:
         pass
