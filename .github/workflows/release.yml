@@ -189,8 +189,10 @@ jobs:
           Get-ChildItem ../../src/pygpukit/*.pyd
 
       - name: Build wheel (C++ + Rust)
-        shell: pwsh
+        shell: cmd
         run: |
+          @REM Set up VS environment for cl.exe
+          call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
           python -m build --wheel
         env:
           # PyGPUkit requires SM >= 80 (Ampere and newer)

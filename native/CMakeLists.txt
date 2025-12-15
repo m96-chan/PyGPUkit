@@ -40,17 +40,15 @@ endif()
 # PyGPUkit requires SM >= 80 (Ampere and newer)
 # Older architectures (Pascal/Turing) are NOT supported
 #
-# Supported architectures (CUDA 13.1):
+# Supported architectures:
 # - SM 80 (A100): Ampere datacenter, 4-stage pipeline
 # - SM 86 (RTX 30xx): Ampere consumer, 5-stage pipeline
 # - SM 89 (RTX 40xx): Ada Lovelace, 6-stage pipeline
 # - SM 90 (H100): Hopper, WGMMA/TMA
-# - SM 100 (B100/B200): Blackwell
-# - SM 103: Blackwell variant
-# - SM 120: Future architecture
-# - SM 121: Future architecture variant
+#
+# For SM100+ (Blackwell), use CUDA 13.x and set CMAKE_CUDA_ARCHITECTURES env var
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90;100;120")
+    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90")
 endif()
 
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
