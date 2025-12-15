@@ -7,6 +7,7 @@
 #include "matmul_f32_tf32_v2.cuh"
 #include "matmul_f16_bf16.cuh"
 #include "matmul_f16_bf16_tc.cuh"
+#include "matmul_f16_bf16_tc_generic.cuh"
 #include "../core/driver_context.hpp"
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -1921,20 +1922,27 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                       K >= OPTIMIZED_MATMUL_THRESHOLD) ||
                      (M == 16 && (N == 8 || N == 16)));
 
-    // FP16/BF16 TensorCore: requires sizes to be multiples of tile size
+    // FP16/BF16 TensorCore FAST: requires sizes to be exact multiples of tile size
     // BM=128, BN=128, BK=32 in fp16_bf16_tc namespace
-    bool use_fp16_tc = fp16_tc_enabled &&
-                       (a.dtype() == DataType::Float16 || a.dtype() == DataType::BFloat16) &&
-                       (M >= 128 && N >= 128 && K >= 32) &&
-                       (M % 128 == 0 && N % 128 == 0 && K % 32 == 0);
+    bool use_fp16_tc_fast = fp16_tc_enabled &&
+                            (a.dtype() == DataType::Float16 || a.dtype() == DataType::BFloat16) &&
+                            (M >= 128 && N >= 128 && K >= 32) &&
+                            (M % 128 == 0 && N % 128 == 0 && K % 32 == 0);
 
-    bool use_optimized = !use_tf32 && !use_fp16_tc &&
+    // FP16/BF16 TensorCore GENERIC: supports M,N >= 16, K % 8 == 0
+    // Slower than FAST but more flexible
+    bool use_fp16_tc_generic = !use_fp16_tc_fast && fp16_tc_enabled &&
+                               (a.dtype() == DataType::Float16 || a.dtype() == DataType::BFloat16) &&
+                               (M >= 16 && N >= 16 && K >= 8) &&
+                               (K % 8 == 0);
+
+    bool use_optimized = !use_tf32 && !use_fp16_tc_fast && !use_fp16_tc_generic &&
                          (a.dtype() == DataType::Float32) &&
                          (M >= OPTIMIZED_MATMUL_THRESHOLD ||
                           N >= OPTIMIZED_MATMUL_THRESHOLD ||
                           K >= OPTIMIZED_MATMUL_THRESHOLD);
 
-    bool use_tiled = !use_optimized && !use_tf32 && !use_fp16_tc &&
+    bool use_tiled = !use_optimized && !use_tf32 && !use_fp16_tc_fast && !use_fp16_tc_generic &&
                      (M >= TILED_MATMUL_THRESHOLD ||
                       N >= TILED_MATMUL_THRESHOLD ||
                       K >= TILED_MATMUL_THRESHOLD);
@@ -1956,8 +1964,8 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 static_cast<float*>(c.data()),
                 M, N, K);
         }
-    } else if (use_fp16_tc) {
-        // FP16/BF16 TensorCore kernels with mma.sync.m16n8k16
+    } else if (use_fp16_tc_fast) {
+        // FP16/BF16 TensorCore FAST kernels with mma.sync.m16n8k16
         if (a.dtype() == DataType::Float16) {
             fp16_bf16_tc::launch_sgemm_f16_tc(
                 static_cast<const __half*>(a.data()),
@@ -1966,6 +1974,21 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                 M, N, K);
         } else {
             fp16_bf16_tc::launch_sgemm_bf16_tc(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                M, N, K);
+        }
+    } else if (use_fp16_tc_generic) {
+        // FP16/BF16 TensorCore GENERIC kernels with mma.sync.m16n8k8 (boundary handling)
+        if (a.dtype() == DataType::Float16) {
+            fp16_bf16_tc_generic::launch_sgemm_f16_tc_generic(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()),
+                M, N, K);
+        } else {
+            fp16_bf16_tc_generic::launch_sgemm_bf16_tc_generic(
                 static_cast<const __nv_bfloat16*>(a.data()),
                 static_cast<const __nv_bfloat16*>(b.data()),
                 static_cast<__nv_bfloat16*>(c.data()),
