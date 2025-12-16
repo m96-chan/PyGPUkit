@@ -64,7 +64,7 @@ jobs:
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
-          cuda: "12.6.0"
+          cuda: "13.1.0"
           method: "network"
           linux-local-args: '["--toolkit"]'
 
@@ -90,8 +90,8 @@ jobs:
           python -m build --wheel
         env:
           # PyGPUkit requires SM >= 80 (Ampere and newer)
-          # SM100/120 (Blackwell) requires CUDA 13.x - not available on GitHub runners yet
-          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90"
+          # SM100/120 (Blackwell) supported with CUDA 13.x
+          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
 
       - name: Show wheel info before repair
         run: |
@@ -107,7 +107,7 @@ jobs:
             --exclude libcudart.so.12 \
             --exclude libcuda.so.1 \
             --exclude libnvrtc.so.12 \
-            --exclude libnvrtc-builtins.so.12.6 \
+            --exclude libnvrtc-builtins.so.13.1 \
             --plat manylinux_2_35_x86_64
 
           # Replace original wheel with repaired one
