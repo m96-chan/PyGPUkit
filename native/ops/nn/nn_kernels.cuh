@@ -1164,6 +1164,50 @@ __global__ void concat_axis0_f32_kernel(
     }
 }
 
+// FP16 concat along axis 0
+__global__ void concat_axis0_f16_kernel(
+    const __half* __restrict__ src1,
+    const __half* __restrict__ src2,
+    __half* __restrict__ dst,
+    size_t dim0_1,
+    size_t dim0_2,
+    size_t stride
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_src1 = dim0_1 * stride;
+    size_t total = (dim0_1 + dim0_2) * stride;
+
+    if (idx < total) {
+        if (idx < total_src1) {
+            dst[idx] = src1[idx];
+        } else {
+            dst[idx] = src2[idx - total_src1];
+        }
+    }
+}
+
+// BF16 concat along axis 0
+__global__ void concat_axis0_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src1,
+    const __nv_bfloat16* __restrict__ src2,
+    __nv_bfloat16* __restrict__ dst,
+    size_t dim0_1,
+    size_t dim0_2,
+    size_t stride
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_src1 = dim0_1 * stride;
+    size_t total = (dim0_1 + dim0_2) * stride;
+
+    if (idx < total) {
+        if (idx < total_src1) {
+            dst[idx] = src1[idx];
+        } else {
+            dst[idx] = src2[idx - total_src1];
+        }
+    }
+}
+
 // Repeat tensor along axis 1 (for GQA expansion)
 // src: [dim0, dim1, dim2] -> dst: [dim0, dim1 * repeats, dim2]
 // Each element in dim1 is repeated 'repeats' times
@@ -1189,6 +1233,52 @@ __global__ void repeat_interleave_axis1_f32_kernel(
         size_t d1_in = d1_out / repeats;
 
         // Compute source index
+        size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
+        dst[idx] = src[src_idx];
+    }
+}
+
+// FP16 repeat interleave along axis 1
+__global__ void repeat_interleave_axis1_f16_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t repeats
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * repeats * dim2;
+
+    if (idx < total) {
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1_out = remaining % (dim1 * repeats);
+        size_t d0 = remaining / (dim1 * repeats);
+        size_t d1_in = d1_out / repeats;
+        size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
+        dst[idx] = src[src_idx];
+    }
+}
+
+// BF16 repeat interleave along axis 1
+__global__ void repeat_interleave_axis1_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t repeats
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * repeats * dim2;
+
+    if (idx < total) {
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1_out = remaining % (dim1 * repeats);
+        size_t d0 = remaining / (dim1 * repeats);
+        size_t d1_in = d1_out / repeats;
         size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
         dst[idx] = src[src_idx];
     }

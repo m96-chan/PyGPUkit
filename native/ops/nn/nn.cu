@@ -699,8 +699,9 @@ GPUArray concat_axis0(const GPUArray& a, const GPUArray& b) {
     if (a.dtype() != b.dtype()) {
         throw std::runtime_error("concat: dtype mismatch");
     }
-    if (a.dtype() != DataType::Float32) {
-        throw std::runtime_error("concat: only float32 supported");
+    if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float16 &&
+        a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("concat: only float32/float16/bfloat16 supported");
     }
     if (a.ndim() < 1 || b.ndim() < 1 || a.ndim() != b.ndim()) {
         throw std::runtime_error("concat: dimension mismatch");
@@ -729,11 +730,31 @@ GPUArray concat_axis0(const GPUArray& a, const GPUArray& b) {
     const int block_size = 256;
     const int grid_size = (total + block_size - 1) / block_size;
 
-    nn::concat_axis0_f32_kernel<<<grid_size, block_size>>>(
-        static_cast<const float*>(a.data()),
-        static_cast<const float*>(b.data()),
-        static_cast<float*>(result.data()),
-        a.shape()[0], b.shape()[0], stride);
+    switch (a.dtype()) {
+        case DataType::Float32:
+            nn::concat_axis0_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(a.data()),
+                static_cast<const float*>(b.data()),
+                static_cast<float*>(result.data()),
+                a.shape()[0], b.shape()[0], stride);
+            break;
+        case DataType::Float16:
+            nn::concat_axis0_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(result.data()),
+                a.shape()[0], b.shape()[0], stride);
+            break;
+        case DataType::BFloat16:
+            nn::concat_axis0_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                a.shape()[0], b.shape()[0], stride);
+            break;
+        default:
+            break;
+    }
 
     sync_and_check("concat_axis0 kernel failed");
     return result;
@@ -742,8 +763,9 @@ GPUArray concat_axis0(const GPUArray& a, const GPUArray& b) {
 // Repeat interleave along axis 1 (for GQA expansion)
 // input: [dim0, dim1, dim2] -> output: [dim0, dim1 * repeats, dim2]
 GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats) {
-    if (input.dtype() != DataType::Float32) {
-        throw std::runtime_error("repeat_interleave: only float32 supported");
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("repeat_interleave: only float32/float16/bfloat16 supported");
     }
     if (input.ndim() != 3) {
         throw std::runtime_error("repeat_interleave: expects 3D tensor [dim0, dim1, dim2]");
@@ -760,10 +782,28 @@ GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats) {
     const int block_size = 256;
     const int grid_size = (total + block_size - 1) / block_size;
 
-    nn::repeat_interleave_axis1_f32_kernel<<<grid_size, block_size>>>(
-        static_cast<const float*>(input.data()),
-        static_cast<float*>(result.data()),
-        dim0, dim1, dim2, repeats);
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::repeat_interleave_axis1_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                dim0, dim1, dim2, repeats);
+            break;
+        case DataType::Float16:
+            nn::repeat_interleave_axis1_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                dim0, dim1, dim2, repeats);
+            break;
+        case DataType::BFloat16:
+            nn::repeat_interleave_axis1_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                dim0, dim1, dim2, repeats);
+            break;
+        default:
+            break;
+    }
 
     sync_and_check("repeat_interleave_axis1 kernel failed");
     return result;

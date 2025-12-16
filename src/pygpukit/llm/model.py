@@ -23,10 +23,12 @@ from pygpukit.core.factory import from_numpy
 from pygpukit.ops.basic import (
     add,
     bias_add_inplace,
+    concat_axis0,
     gelu,
     layernorm,
     matmul,
     mul,
+    repeat_interleave_axis1,
     reshape_copy,
     rmsnorm,
     rope_inplace,
@@ -719,31 +721,38 @@ class Attention:
             if q_dtype in ("float32", "float16"):
                 rope_inplace(q, k, cos, sin)
 
-        # Convert to numpy for KV cache
-        k_np = k.to_numpy()
-        v_np = v.to_numpy()
-
-        # Concatenate with past KV
+        # GPU KV Cache - keep KV tensors on GPU to avoid CPU-GPU transfers
+        # Concatenate with past KV on GPU
         if past_kv is not None:
             past_k, past_v = past_kv
-            k_np = np.concatenate([past_k, k_np], axis=0)
-            v_np = np.concatenate([past_v, v_np], axis=0)
+            # past_kv can be GPUArray (from _forward_gpu) or numpy (from _forward_cpu)
+            if isinstance(past_k, GPUArray):
+                k = concat_axis0(past_k, k)
+                v = concat_axis0(past_v, v)
+            else:
+                # Legacy numpy format - convert to GPU
+                k_np = k.to_numpy()
+                v_np = v.to_numpy()
+                k_np = np.concatenate([past_k, k_np], axis=0)
+                v_np = np.concatenate([past_v, v_np], axis=0)
+                k = from_numpy(k_np)
+                v = from_numpy(v_np)
 
-        present_kv = (k_np.copy(), v_np.copy()) if use_cache else None
+        # Store KV cache as GPUArray for next iteration
+        present_kv = (k, v) if use_cache else None
 
-        # Expand for GQA
+        # Expand for GQA on GPU
         if self.num_kv_groups > 1:
-            k_expanded = np.repeat(k_np, self.num_kv_groups, axis=1)
-            v_expanded = np.repeat(v_np, self.num_kv_groups, axis=1)
+            k_expanded = repeat_interleave_axis1(k, self.num_kv_groups)
+            v_expanded = repeat_interleave_axis1(v, self.num_kv_groups)
         else:
-            k_expanded = k_np
-            v_expanded = v_np
+            k_expanded = k
+            v_expanded = v
 
-        # GPU SDPA (use same dtype as q)
+        # GPU SDPA - transpose [seq, heads, dim] -> [heads, seq, dim]
         q_t = transpose_3d_021(q)
-        kv_dtype = k_np.dtype  # Preserve dtype from KV cache
-        k_t = from_numpy(k_expanded.transpose(1, 0, 2).astype(kv_dtype))
-        v_t = from_numpy(v_expanded.transpose(1, 0, 2).astype(kv_dtype))
+        k_t = transpose_3d_021(k_expanded)
+        v_t = transpose_3d_021(v_expanded)
 
         attn_output = sdpa_causal(q_t, k_t, v_t)
 
@@ -798,10 +807,18 @@ class Attention:
         # Concatenate with past KV
         if past_kv is not None:
             past_k, past_v = past_kv
+            # past_kv can be GPUArray (from _forward_gpu) or numpy (from _forward_cpu)
+            if isinstance(past_k, GPUArray):
+                past_k = past_k.to_numpy()
+                past_v = past_v.to_numpy()
             k = np.concatenate([past_k, k], axis=0)
             v = np.concatenate([past_v, v], axis=0)
 
-        present_kv = (k.copy(), v.copy()) if use_cache else None
+        # Store KV cache - convert to GPU for next iteration (unified format)
+        if use_cache:
+            present_kv = (from_numpy(k), from_numpy(v))
+        else:
+            present_kv = None
 
         # Expand for GQA
         if self.num_kv_groups > 1:
