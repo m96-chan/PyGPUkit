@@ -79,10 +79,14 @@ inline CUdevice get_device(int device_id) {
  */
 inline CUcontext create_context(CUdevice device, unsigned int flags = 0) {
     CUcontext context;
-    // cuCtxCreate is the versioned macro that maps to the appropriate version
-    // CUDA 12.x: maps to cuCtxCreate_v2
-    // CUDA 13.x: maps to cuCtxCreate_v4
+#if CUDA_VERSION >= 13000
+    // CUDA 13.x: cuCtxCreate_v4 requires CUctxCreateParams*
+    // Pass nullptr for default params
+    check_driver_error(cuCtxCreate(&context, nullptr, flags, device), "Failed to create context");
+#else
+    // CUDA 12.x and earlier
     check_driver_error(cuCtxCreate(&context, flags, device), "Failed to create context");
+#endif
     return context;
 }
 
