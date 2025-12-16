@@ -13,7 +13,7 @@
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation, quick start, basic usage |
 | [API Reference](docs/api.md) | Complete API documentation with examples |
-| [LLM Guide](docs/llm.md) | SafeTensors, Tokenizer, GPT-2 model loading |
+| [LLM Guide](docs/llm.md) | SafeTensors, GPT-2/LLaMA/Qwen3 inference |
 | [Performance Tuning](docs/performance.md) | TF32, FP16, CUTLASS optimization |
 | [Scheduler Guide](docs/scheduler.md) | Multi-LLM concurrent execution |
 
@@ -30,6 +30,65 @@
 PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
 
 > **Note:** PyGPUkit is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads where full ML frameworks are overkill.
+
+---
+
+## What's New in v0.2.9
+
+### Unified LLM Interface
+A single `CausalTransformerModel` now supports multiple architectures through the `ModelSpec` abstraction.
+
+| Architecture | Features | Status |
+|--------------|----------|--------|
+| **GPT-2** | LayerNorm, GELU, Position Embedding | ✅ Tested |
+| **LLaMA 2/3** | RMSNorm, SiLU, RoPE, GQA | ✅ Tested |
+| **Qwen3** | RMSNorm, SiLU, RoPE, GQA, QK-Norm | ✅ Tested |
+
+```python
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
+
+# Auto-detect and load any supported model
+st = load_safetensors("model.safetensors")
+spec = detect_model_spec(st.tensor_names)  # Returns GPT2_SPEC, LLAMA_SPEC, or QWEN3_SPEC
+model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
+
+# Generate with KV-cache
+output_ids = model.generate(
+    input_ids,
+    max_new_tokens=64,
+    temperature=0.7,
+    top_k=50,
+    top_p=0.9,
+    use_cache=True,  # KV-cache for efficient generation
+)
+```
+
+### Hybrid Attention Execution
+Automatic CPU/GPU switching for optimal performance:
+
+| Phase | Backend | Reason |
+|-------|---------|--------|
+| **Prefill** (seq_len > 1) | GPU SDPA | Parallelizable |
+| **Decode** (seq_len = 1) | CPU | Avoids kernel launch overhead |
+
+### New LLM Operations
+| Operation | Description |
+|-----------|-------------|
+| `gpk.sdpa_causal(q, k, v)` | Scaled Dot-Product Attention with causal mask |
+| `gpk.rope_inplace(x, freqs)` | Rotary Position Embedding (in-place) |
+| `gpk.silu(x)` | SiLU/Swish activation |
+| `gpk.rmsnorm(x, weight, eps)` | RMS Layer Normalization |
+
+### Sharded Model Support
+Load large models split across multiple safetensors files:
+
+```python
+from pygpukit.llm import load_safetensors
+
+# Automatically handles sharded models
+st = load_safetensors("model.safetensors.index.json")  # Returns ShardedSafeTensorsFile
+print(f"Shards: {len(st._shard_files)}, Tensors: {st.num_tensors}")
+```
 
 ---
 
@@ -84,25 +143,34 @@ Runtime SM detection with architecture-optimized kernel variants:
 PyGPUkit includes built-in support for loading and running LLM models.
 See the [LLM Guide](docs/llm.md) for detailed documentation.
 
+**Important:** PyGPUkit's core responsibility is **GPU execution**, not tokenization.
+- The model API expects **token IDs as input**, not raw text
+- For production tokenization, use [HuggingFace tokenizers](https://github.com/huggingface/tokenizers)
+- The built-in `Tokenizer` class is **experimental** and intended for demos only
+
 ```python
-from pygpukit.llm import SafeTensorsFile, Tokenizer
+from pygpukit.llm import SafeTensorsFile, load_model_from_safetensors, detect_model_spec
 
 # Load safetensors (memory-mapped, zero-copy)
 st = SafeTensorsFile("model.safetensors")
 print(f"Tensors: {st.num_tensors}, Size: {st.file_size / 1e9:.2f} GB")
 
-# Tokenizer (HuggingFace format)
-tok = Tokenizer("tokenizer.json")
-ids = tok.encode("Hello, world!")
-text = tok.decode(ids)
+# Load model with automatic architecture detection
+spec = detect_model_spec(st.tensor_names)
+model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
+
+# Generate with token IDs (use HuggingFace tokenizers for production)
+input_ids = [1, 2, 3, 4]  # Your tokenizer's output
+output_ids = model.generate(input_ids, max_new_tokens=32)
 ```
 
 | Component | Description |
 |-----------|-------------|
 | `SafeTensorsFile` | Memory-mapped .safetensors loading |
-| `Tokenizer` | BPE tokenizer (HuggingFace format) |
-| `GPT2Model` | GPT-2 model (MLP-only MVP) |
-| `Linear`, `LayerNorm`, `MLP` | Model building blocks |
+| `CausalTransformerModel` | Unified model for GPT-2, LLaMA, Qwen3 |
+| `load_model_from_safetensors` | Load model with auto-detection |
+| `detect_model_spec` | Auto-detect model architecture |
+| `Tokenizer` | **Experimental** BPE tokenizer (demos only) |
 
 ---
 
@@ -422,7 +490,9 @@ PyGPUkit/
   rust/            # Rust backend (memory pool, scheduler)
     pygpukit-core/   # Pure Rust core logic
     pygpukit-python/ # PyO3 bindings
+  docs/            # Documentation guides
   examples/        # Demo scripts
+  scripts/         # Build scripts, benchmarks
   tests/           # Test suite
 ```
 
@@ -444,6 +514,7 @@ PyGPUkit/
 | **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
 | **v0.2.7** | **Epilogue fusion** (linear+bias+gelu), Multi-SM kernels, API review |
 | **v0.2.8** | CUTLASS v4.3.3 update, auto-update workflow |
+| **v0.2.9** | **Unified LLM interface** (CausalTransformerModel), ModelSpec abstraction, GPT-2/LLaMA/Qwen3 support |
 
 ### Planned
 
@@ -472,7 +543,8 @@ All functions exported via `pygpukit.*` are part of the stable public API:
 | **Reductions** | `sum`, `mean`, `max` |
 | **Neural** | `layernorm`, `bias_add_inplace`, `linear_bias_gelu` |
 | **Types** | `GPUArray`, `DataType`, `float32`, `float64`, `float16`, `bfloat16` |
-| **LLM** | `llm.SafeTensorsFile`, `llm.Tokenizer`, `llm.GPT2Model`, `llm.Linear` |
+| **LLM** | `llm.SafeTensorsFile`, `llm.CausalTransformerModel`, `llm.load_model_from_safetensors` |
+| **LLM (Experimental)** | `llm.Tokenizer` (use HuggingFace tokenizers for production) |
 
 ### Deprecation Policy
 APIs to be removed will emit `DeprecationWarning` for at least one minor version before removal.

@@ -287,6 +287,61 @@ GPUArray linear(const GPUArray& input, const GPUArray& weight, const GPUArray* b
 }
 
 // ============================================================================
+// Softmax
+// ============================================================================
+
+GPUArray softmax(const GPUArray& input) {
+    if (input.ndim() != 2) {
+        throw std::runtime_error("softmax expects 2D input [batch, features]");
+    }
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float64 &&
+        input.dtype() != DataType::Float16 && input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("softmax only supports float types");
+    }
+
+    size_t batch_size = input.shape()[0];
+    size_t features = input.shape()[1];
+
+    GPUArray result(input.shape(), input.dtype());
+
+    // One block per row
+    int block_size = std::min(256, (int)((features + 31) / 32 * 32));
+    block_size = std::max(32, block_size);
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::softmax_f32_kernel<<<batch_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                batch_size, features);
+            break;
+        case DataType::Float64:
+            nn::softmax_f64_kernel<<<batch_size, block_size>>>(
+                static_cast<const double*>(input.data()),
+                static_cast<double*>(result.data()),
+                batch_size, features);
+            break;
+        case DataType::Float16:
+            nn::softmax_f16_kernel<<<batch_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                batch_size, features);
+            break;
+        case DataType::BFloat16:
+            nn::softmax_bf16_kernel<<<batch_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                batch_size, features);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("softmax kernel failed");
+    return result;
+}
+
+// ============================================================================
 // LayerNorm
 // ============================================================================
 
@@ -356,6 +411,434 @@ GPUArray layernorm(const GPUArray& input, const GPUArray& gamma, const GPUArray&
     }
 
     sync_and_check("layernorm kernel failed");
+    return result;
+}
+
+// ============================================================================
+// RMSNorm (Root Mean Square Normalization)
+// ============================================================================
+
+GPUArray rmsnorm(const GPUArray& input, const GPUArray& gamma, float eps) {
+    // input: [batch, features]
+    // gamma: [features]
+
+    if (input.ndim() != 2) {
+        throw std::runtime_error("rmsnorm expects 2D input [batch, features]");
+    }
+    if (gamma.ndim() != 1) {
+        throw std::runtime_error("rmsnorm expects 1D gamma");
+    }
+    if (input.dtype() != gamma.dtype()) {
+        throw std::runtime_error("rmsnorm: dtype mismatch");
+    }
+
+    size_t batch_size = input.shape()[0];
+    size_t features = input.shape()[1];
+
+    if (gamma.shape()[0] != features) {
+        throw std::runtime_error("rmsnorm: gamma size must match features");
+    }
+
+    GPUArray result(input.shape(), input.dtype());
+
+    // One block per row, use enough threads to cover features
+    int block_size = std::min(256, (int)((features + 31) / 32 * 32));
+    block_size = std::max(32, block_size);
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::rmsnorm_f32_kernel<<<batch_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<const float*>(gamma.data()),
+                static_cast<float*>(result.data()),
+                batch_size, features, eps);
+            break;
+        case DataType::Float64:
+            nn::rmsnorm_f64_kernel<<<batch_size, block_size>>>(
+                static_cast<const double*>(input.data()),
+                static_cast<const double*>(gamma.data()),
+                static_cast<double*>(result.data()),
+                batch_size, features, (double)eps);
+            break;
+        case DataType::Float16:
+            nn::rmsnorm_f16_kernel<<<batch_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<const __half*>(gamma.data()),
+                static_cast<__half*>(result.data()),
+                batch_size, features, eps);
+            break;
+        case DataType::BFloat16:
+            nn::rmsnorm_bf16_kernel<<<batch_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<const __nv_bfloat16*>(gamma.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                batch_size, features, eps);
+            break;
+        default:
+            throw std::runtime_error("rmsnorm only supports float types");
+    }
+
+    sync_and_check("rmsnorm kernel failed");
+    return result;
+}
+
+// ============================================================================
+// RoPE (Rotary Position Embedding) - In-place
+// ============================================================================
+
+void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin) {
+    // q: [seq_len, n_heads_q, head_dim]
+    // k: [seq_len, n_heads_k, head_dim]
+    // cos, sin: [seq_len, head_dim]
+
+    if (q.ndim() != 3 || k.ndim() != 3 || cos.ndim() != 2 || sin.ndim() != 2) {
+        throw std::runtime_error("rope: invalid dimensions");
+    }
+    if (q.dtype() != DataType::Float32 || k.dtype() != DataType::Float32) {
+        throw std::runtime_error("rope: only float32 supported");
+    }
+
+    int seq_len = q.shape()[0];
+    int n_heads_q = q.shape()[1];
+    int n_heads_k = k.shape()[1];
+    int head_dim = q.shape()[2];
+
+    if (k.shape()[0] != seq_len || k.shape()[2] != head_dim) {
+        throw std::runtime_error("rope: q and k shape mismatch");
+    }
+    if (cos.shape()[0] != seq_len || cos.shape()[1] != head_dim) {
+        throw std::runtime_error("rope: cos shape mismatch");
+    }
+    if (sin.shape()[0] != seq_len || sin.shape()[1] != head_dim) {
+        throw std::runtime_error("rope: sin shape mismatch");
+    }
+
+    // Total work items: max of Q and K
+    int half_dim = head_dim / 2;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+    int total_work = std::max(total_q, total_k);
+
+    const int block_size = 256;
+    const int grid_size = (total_work + block_size - 1) / block_size;
+
+    nn::rope_f32_kernel<<<grid_size, block_size>>>(
+        static_cast<float*>(q.data()),
+        static_cast<float*>(k.data()),
+        static_cast<const float*>(cos.data()),
+        static_cast<const float*>(sin.data()),
+        seq_len, n_heads_q, n_heads_k, head_dim);
+
+    sync_and_check("rope kernel failed");
+}
+
+// ============================================================================
+// SiLU (Swish) Activation: x * sigmoid(x)
+// ============================================================================
+
+GPUArray silu(const GPUArray& input) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float64 &&
+        input.dtype() != DataType::Float16 && input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("silu only supports float types");
+    }
+
+    GPUArray result(input.shape(), input.dtype());
+    size_t n = input.size();
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::silu_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                n);
+            break;
+        case DataType::Float64:
+            nn::silu_f64_kernel<<<grid_size, block_size>>>(
+                static_cast<const double*>(input.data()),
+                static_cast<double*>(result.data()),
+                n);
+            break;
+        case DataType::Float16:
+            nn::silu_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                n);
+            break;
+        case DataType::BFloat16:
+            nn::silu_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                n);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("silu kernel failed");
+    return result;
+}
+
+// ============================================================================
+// Scaled Dot-Product Attention (SDPA) with Causal Mask
+// ============================================================================
+
+GPUArray sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, float scale) {
+    // Q: [n_heads, q_len, head_dim]
+    // K: [n_heads, kv_len, head_dim]
+    // V: [n_heads, kv_len, head_dim]
+    // Output: [n_heads, q_len, head_dim]
+
+    if (Q.ndim() != 3 || K.ndim() != 3 || V.ndim() != 3) {
+        throw std::runtime_error("sdpa expects 3D inputs [n_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype()) {
+        throw std::runtime_error("sdpa: dtype mismatch");
+    }
+
+    int n_heads = Q.shape()[0];
+    int q_len = Q.shape()[1];
+    int head_dim = Q.shape()[2];
+    int kv_len = K.shape()[1];
+
+    if (K.shape()[0] != n_heads || V.shape()[0] != n_heads) {
+        throw std::runtime_error("sdpa: n_heads mismatch");
+    }
+    if (K.shape()[2] != head_dim || V.shape()[2] != head_dim) {
+        throw std::runtime_error("sdpa: head_dim mismatch");
+    }
+    if (K.shape()[1] != V.shape()[1]) {
+        throw std::runtime_error("sdpa: K and V seq_len mismatch");
+    }
+
+    GPUArray result({(size_t)n_heads, (size_t)q_len, (size_t)head_dim}, Q.dtype());
+
+    // Compute scale if not provided
+    if (scale <= 0.0f) {
+        scale = 1.0f / sqrtf((float)head_dim);
+    }
+
+    // Causal offset for proper masking
+    int causal_offset = kv_len - q_len;
+
+    // Grid: one block per (head, query_position) pair
+    dim3 grid(n_heads, q_len);
+    int block_size = 128;  // Enough threads for reduction
+
+    // Shared memory: need space for attention scores [kv_len]
+    size_t shared_mem_size = kv_len * sizeof(float);
+
+    switch (Q.dtype()) {
+        case DataType::Float32:
+            nn::sdpa_causal_f32_kernel<<<grid, block_size, shared_mem_size>>>(
+                static_cast<const float*>(Q.data()),
+                static_cast<const float*>(K.data()),
+                static_cast<const float*>(V.data()),
+                static_cast<float*>(result.data()),
+                n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+            break;
+        case DataType::Float16:
+            nn::sdpa_causal_f16_kernel<<<grid, block_size, shared_mem_size>>>(
+                static_cast<const __half*>(Q.data()),
+                static_cast<const __half*>(K.data()),
+                static_cast<const __half*>(V.data()),
+                static_cast<__half*>(result.data()),
+                n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+            break;
+        case DataType::BFloat16:
+            nn::sdpa_causal_bf16_kernel<<<grid, block_size, shared_mem_size>>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+            break;
+        default:
+            throw std::runtime_error("sdpa only supports Float32, Float16, BFloat16");
+    }
+
+    sync_and_check("sdpa kernel failed");
+    return result;
+}
+
+// ============================================================================
+// Tensor Manipulation Operations
+// ============================================================================
+
+// Concat two tensors along axis 0
+// a: [dim0_a, ...], b: [dim0_b, ...] -> output: [dim0_a + dim0_b, ...]
+GPUArray concat_axis0(const GPUArray& a, const GPUArray& b) {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("concat: dtype mismatch");
+    }
+    if (a.dtype() != DataType::Float32) {
+        throw std::runtime_error("concat: only float32 supported");
+    }
+    if (a.ndim() < 1 || b.ndim() < 1 || a.ndim() != b.ndim()) {
+        throw std::runtime_error("concat: dimension mismatch");
+    }
+
+    // Check that all dimensions except axis 0 match
+    for (size_t i = 1; i < a.ndim(); i++) {
+        if (a.shape()[i] != b.shape()[i]) {
+            throw std::runtime_error("concat: shape mismatch on non-concat axis");
+        }
+    }
+
+    // Compute output shape
+    std::vector<size_t> out_shape = a.shape();
+    out_shape[0] = a.shape()[0] + b.shape()[0];
+
+    GPUArray result(out_shape, a.dtype());
+
+    // Compute stride (elements per "row" along axis 0)
+    size_t stride = 1;
+    for (size_t i = 1; i < a.ndim(); i++) {
+        stride *= a.shape()[i];
+    }
+
+    size_t total = result.size();
+    const int block_size = 256;
+    const int grid_size = (total + block_size - 1) / block_size;
+
+    nn::concat_axis0_f32_kernel<<<grid_size, block_size>>>(
+        static_cast<const float*>(a.data()),
+        static_cast<const float*>(b.data()),
+        static_cast<float*>(result.data()),
+        a.shape()[0], b.shape()[0], stride);
+
+    sync_and_check("concat_axis0 kernel failed");
+    return result;
+}
+
+// Repeat interleave along axis 1 (for GQA expansion)
+// input: [dim0, dim1, dim2] -> output: [dim0, dim1 * repeats, dim2]
+GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats) {
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("repeat_interleave: only float32 supported");
+    }
+    if (input.ndim() != 3) {
+        throw std::runtime_error("repeat_interleave: expects 3D tensor [dim0, dim1, dim2]");
+    }
+
+    size_t dim0 = input.shape()[0];
+    size_t dim1 = input.shape()[1];
+    size_t dim2 = input.shape()[2];
+
+    std::vector<size_t> out_shape = {dim0, dim1 * repeats, dim2};
+    GPUArray result(out_shape, input.dtype());
+
+    size_t total = result.size();
+    const int block_size = 256;
+    const int grid_size = (total + block_size - 1) / block_size;
+
+    nn::repeat_interleave_axis1_f32_kernel<<<grid_size, block_size>>>(
+        static_cast<const float*>(input.data()),
+        static_cast<float*>(result.data()),
+        dim0, dim1, dim2, repeats);
+
+    sync_and_check("repeat_interleave_axis1 kernel failed");
+    return result;
+}
+
+// Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]
+GPUArray transpose_3d_021(const GPUArray& input) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("transpose_3d_021: only float32/float16/bfloat16 supported");
+    }
+    if (input.ndim() != 3) {
+        throw std::runtime_error("transpose_3d_021: expects 3D tensor");
+    }
+
+    size_t dim0 = input.shape()[0];
+    size_t dim1 = input.shape()[1];
+    size_t dim2 = input.shape()[2];
+
+    // Output shape: [dim1, dim0, dim2]
+    std::vector<size_t> out_shape = {dim1, dim0, dim2};
+    GPUArray result(out_shape, input.dtype());
+
+    size_t total = input.size();
+    const int block_size = 256;
+    const int grid_size = (total + block_size - 1) / block_size;
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::transpose_021_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        case DataType::Float16:
+            nn::transpose_021_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        case DataType::BFloat16:
+            nn::transpose_021_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("transpose_3d_021 kernel failed");
+    return result;
+}
+
+// Reshape with copy (creates contiguous tensor with new shape)
+GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("reshape_copy: only float32/float16/bfloat16 supported");
+    }
+
+    // Verify total size matches
+    size_t input_size = input.size();
+    size_t output_size = 1;
+    for (size_t dim : new_shape) {
+        output_size *= dim;
+    }
+
+    if (input_size != output_size) {
+        throw std::runtime_error("reshape_copy: total size mismatch");
+    }
+
+    GPUArray result(new_shape, input.dtype());
+
+    const int block_size = 256;
+    const int grid_size = (input_size + block_size - 1) / block_size;
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::copy_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                input_size);
+            break;
+        case DataType::Float16:
+            nn::copy_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                input_size);
+            break;
+        case DataType::BFloat16:
+            nn::copy_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                input_size);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("reshape_copy kernel failed");
     return result;
 }
 

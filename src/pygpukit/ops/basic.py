@@ -674,6 +674,52 @@ def _layernorm_native(
     return GPUArray._wrap_native(c_native)
 
 
+def softmax(input: GPUArray) -> GPUArray:
+    """Softmax activation applied row-wise.
+
+    Computes: y[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
+
+    Args:
+        input: Input array of shape [batch, features].
+
+    Returns:
+        A new GPUArray containing the softmax output.
+
+    Raises:
+        ValueError: If input is not 2D or dtype is not a float type.
+    """
+    _validate_float_dtype(input, "softmax")
+
+    if input.ndim != 2:
+        raise ValueError(f"softmax expects 2D input [batch, features], got {input.ndim}D")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _softmax_native(input)
+    else:
+        return _softmax_cpu(input)
+
+
+def _softmax_cpu(input: GPUArray) -> GPUArray:
+    """CPU implementation of softmax."""
+    x = input.to_numpy()
+    # Numerical stability: subtract max
+    x_max = x.max(axis=1, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return from_numpy(exp_x / exp_x.sum(axis=1, keepdims=True))
+
+
+def _softmax_native(input: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of softmax (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    c_native = native.softmax(input_native)
+    return GPUArray._wrap_native(c_native)
+
+
 def transpose(a: GPUArray) -> GPUArray:
     """Matrix transpose.
 
@@ -778,6 +824,82 @@ def _bias_add_inplace_native(output: GPUArray, bias: GPUArray) -> None:
 # ============================================================================
 
 
+def rmsnorm(
+    input: GPUArray,
+    gamma: GPUArray,
+    eps: float = 1e-5,
+) -> GPUArray:
+    """RMS Normalization (Root Mean Square Normalization).
+
+    Computes: x / sqrt(mean(x^2) + eps) * gamma
+
+    Simpler than LayerNorm (no mean subtraction, no beta).
+    Used in Llama and other modern LLMs.
+
+    Args:
+        input: Input array of shape [batch, features].
+        gamma: Scale parameter of shape [features].
+        eps: Small epsilon for numerical stability.
+
+    Returns:
+        A new GPUArray containing the normalized output.
+
+    Raises:
+        ValueError: If shapes or dtypes don't match.
+    """
+    _validate_float_dtype(input, "rmsnorm")
+
+    if input.ndim != 2:
+        raise ValueError(f"rmsnorm expects 2D input [batch, features], got {input.ndim}D")
+    if gamma.ndim != 1:
+        raise ValueError("rmsnorm expects 1D gamma")
+    if input.dtype != gamma.dtype:
+        raise ValueError("rmsnorm: all inputs must have same dtype")
+
+    features = input.shape[1]
+    if gamma.shape[0] != features:
+        raise ValueError(f"rmsnorm: gamma size {gamma.shape[0]} must match features {features}")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _rmsnorm_native(input, gamma, eps)
+    else:
+        return _rmsnorm_cpu(input, gamma, eps)
+
+
+def _rmsnorm_cpu(
+    input: GPUArray,
+    gamma: GPUArray,
+    eps: float,
+) -> GPUArray:
+    """CPU implementation of rmsnorm."""
+    x = input.to_numpy()
+    g = gamma.to_numpy()
+
+    # RMS = sqrt(mean(x^2) + eps)
+    rms = np.sqrt(np.mean(x**2, axis=1, keepdims=True) + eps)
+
+    # Normalize and scale
+    result = (x / rms) * g
+    return from_numpy(result)
+
+
+def _rmsnorm_native(
+    input: GPUArray,
+    gamma: GPUArray,
+    eps: float,
+) -> GPUArray:
+    """Native C++ CUDA implementation of rmsnorm (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    gamma_native = gamma._get_native()
+    c_native = native.rmsnorm(input_native, gamma_native, eps)
+    return GPUArray._wrap_native(c_native)
+
+
 def linear_bias_gelu(
     input: GPUArray,
     weight: GPUArray,
@@ -877,4 +999,464 @@ def _linear_bias_gelu_native(
     weight_native = weight._get_native()
     bias_native = bias._get_native()
     c_native = native.linear_bias_gelu(input_native, weight_native, bias_native)
+    return GPUArray._wrap_native(c_native)
+
+
+# ============================================================================
+# Additional Neural Network Operations
+# ============================================================================
+
+
+def silu(a: GPUArray) -> GPUArray:
+    """SiLU (Swish) activation: y = x * sigmoid(x).
+
+    Used in Llama and other modern LLMs as the activation in MLP layers.
+
+    Args:
+        a: Input array.
+
+    Returns:
+        A new GPUArray containing the SiLU-activated values.
+
+    Raises:
+        ValueError: If dtype is not a float type.
+    """
+    _validate_float_dtype(a, "silu")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _silu_native(a)
+    else:
+        return _silu_cpu(a)
+
+
+def _silu_cpu(a: GPUArray) -> GPUArray:
+    """CPU implementation of SiLU."""
+    x = a.to_numpy()
+    # SiLU = x * sigmoid(x) = x / (1 + exp(-x))
+    result = x / (1.0 + np.exp(-x))
+    return from_numpy(result)
+
+
+def _silu_native(a: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of SiLU (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    c_native = native.silu(a_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def sdpa_causal(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    scale: float = 0.0,
+) -> GPUArray:
+    """Scaled Dot-Product Attention with causal mask.
+
+    Computes attention with automatic causal masking for autoregressive
+    sequence generation. This is the core attention operation used in
+    transformer models.
+
+    Algorithm:
+        scores = Q @ K^T / scale
+        scores = apply_causal_mask(scores)
+        weights = softmax(scores)
+        output = weights @ V
+
+    Args:
+        Q: Query tensor of shape [n_heads, q_len, head_dim].
+        K: Key tensor of shape [n_heads, kv_len, head_dim].
+        V: Value tensor of shape [n_heads, kv_len, head_dim].
+        scale: Scaling factor (typically 1/sqrt(head_dim)).
+               If <= 0, computed automatically from head_dim.
+
+    Returns:
+        Output tensor of shape [n_heads, q_len, head_dim].
+
+    Raises:
+        ValueError: If shapes or dtypes don't match.
+
+    Note:
+        For KV cache usage during inference, kv_len >= q_len.
+        The causal mask ensures query at position i can only attend
+        to key positions 0 to (kv_len - q_len + i).
+    """
+    _validate_float_dtype(Q, "sdpa_causal")
+
+    if Q.ndim != 3 or K.ndim != 3 or V.ndim != 3:
+        raise ValueError("sdpa_causal expects 3D inputs [n_heads, seq_len, head_dim]")
+    if Q.dtype != K.dtype or Q.dtype != V.dtype:
+        raise ValueError("sdpa_causal: Q, K, V must have same dtype")
+
+    n_heads, q_len, head_dim = Q.shape
+
+    if K.shape[0] != n_heads or V.shape[0] != n_heads:
+        raise ValueError("sdpa_causal: n_heads mismatch")
+    if K.shape[2] != head_dim or V.shape[2] != head_dim:
+        raise ValueError("sdpa_causal: head_dim mismatch")
+    if K.shape[1] != V.shape[1]:
+        raise ValueError("sdpa_causal: K and V seq_len mismatch")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _sdpa_causal_native(Q, K, V, scale)
+    else:
+        return _sdpa_causal_cpu(Q, K, V, scale)
+
+
+def _sdpa_causal_cpu(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    scale: float,
+) -> GPUArray:
+    """CPU implementation of SDPA with causal mask."""
+    q = Q.to_numpy()
+    k = K.to_numpy()
+    v = V.to_numpy()
+
+    n_heads, q_len, head_dim = q.shape
+    kv_len = k.shape[1]
+
+    if scale <= 0:
+        scale = 1.0 / np.sqrt(head_dim)
+
+    # scores: [n_heads, q_len, kv_len]
+    scores = np.matmul(q, k.transpose(0, 2, 1)) * scale
+
+    # Create causal mask
+    causal_offset = kv_len - q_len
+    for i in range(q_len):
+        max_attend = causal_offset + i + 1
+        if max_attend < kv_len:
+            scores[:, i, max_attend:] = -np.inf
+
+    # Softmax over last dimension
+    scores_max = scores.max(axis=-1, keepdims=True)
+    exp_scores = np.exp(scores - scores_max)
+    weights = exp_scores / exp_scores.sum(axis=-1, keepdims=True)
+
+    # output: [n_heads, q_len, head_dim]
+    output = np.matmul(weights, v)
+
+    return from_numpy(output.astype(q.dtype))
+
+
+def _sdpa_causal_native(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    scale: float,
+) -> GPUArray:
+    """Native C++ CUDA implementation of SDPA with causal mask."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    q_native = Q._get_native()
+    k_native = K._get_native()
+    v_native = V._get_native()
+    c_native = native.sdpa_causal(q_native, k_native, v_native, scale)
+    return GPUArray._wrap_native(c_native)
+
+
+def rope_inplace(
+    q: GPUArray,
+    k: GPUArray,
+    cos: GPUArray,
+    sin: GPUArray,
+) -> None:
+    """Apply Rotary Position Embedding (RoPE) to Q and K tensors in-place.
+
+    Args:
+        q: Query tensor of shape [seq_len, n_heads_q, head_dim] (modified in-place).
+        k: Key tensor of shape [seq_len, n_heads_k, head_dim] (modified in-place).
+        cos: Precomputed cosine of shape [seq_len, head_dim].
+        sin: Precomputed sine of shape [seq_len, head_dim].
+
+    Note:
+        This operation modifies q and k in-place.
+        Works with GQA (n_heads_k can be different from n_heads_q).
+    """
+    _validate_float_dtype(q, "rope_inplace")
+
+    if q.ndim != 3 or k.ndim != 3:
+        raise ValueError("rope_inplace expects 3D q, k [seq_len, n_heads, head_dim]")
+    if cos.ndim != 2 or sin.ndim != 2:
+        raise ValueError("rope_inplace expects 2D cos, sin [seq_len, head_dim]")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        _rope_inplace_native(q, k, cos, sin)
+    else:
+        _rope_inplace_cpu(q, k, cos, sin)
+
+
+def _rope_inplace_cpu(
+    q: GPUArray,
+    k: GPUArray,
+    cos: GPUArray,
+    sin: GPUArray,
+) -> None:
+    """CPU implementation of rope_inplace."""
+
+    q_np = q.to_numpy()
+    k_np = k.to_numpy()
+    cos_np = cos.to_numpy()
+    sin_np = sin.to_numpy()
+
+    seq_len, n_heads_q, head_dim = q_np.shape
+    n_heads_k = k_np.shape[1]
+    half_dim = head_dim // 2
+
+    # Apply RoPE to Q
+    for s in range(seq_len):
+        c = cos_np[s, :half_dim]
+        sn = sin_np[s, :half_dim]
+        for h in range(n_heads_q):
+            q0 = q_np[s, h, :half_dim].copy()
+            q1 = q_np[s, h, half_dim:].copy()
+            q_np[s, h, :half_dim] = q0 * c - q1 * sn
+            q_np[s, h, half_dim:] = q1 * c + q0 * sn
+
+    # Apply RoPE to K
+    for s in range(seq_len):
+        c = cos_np[s, :half_dim]
+        sn = sin_np[s, :half_dim]
+        for h in range(n_heads_k):
+            k0 = k_np[s, h, :half_dim].copy()
+            k1 = k_np[s, h, half_dim:].copy()
+            k_np[s, h, :half_dim] = k0 * c - k1 * sn
+            k_np[s, h, half_dim:] = k1 * c + k0 * sn
+
+    # Update the GPUArray data in-place
+    q._data = from_numpy(q_np)._data
+    k._data = from_numpy(k_np)._data
+
+
+def _rope_inplace_native(
+    q: GPUArray,
+    k: GPUArray,
+    cos: GPUArray,
+    sin: GPUArray,
+) -> None:
+    """Native C++ CUDA implementation of rope_inplace."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    q_native = q._get_native()
+    k_native = k._get_native()
+    cos_native = cos._get_native()
+    sin_native = sin._get_native()
+    native.rope_inplace(q_native, k_native, cos_native, sin_native)
+
+
+# ============================================================================
+# Tensor Manipulation Operations
+# ============================================================================
+
+
+def concat_axis0(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Concatenate two tensors along axis 0.
+
+    Args:
+        a: First tensor of shape [dim0_a, ...].
+        b: Second tensor of shape [dim0_b, ...].
+
+    Returns:
+        Concatenated tensor of shape [dim0_a + dim0_b, ...].
+
+    Raises:
+        ValueError: If shapes don't match along non-concatenation axes.
+    """
+    _validate_same_dtype(a, b, "concat_axis0")
+
+    if a.ndim != b.ndim:
+        raise ValueError(f"concat_axis0: dimension mismatch ({a.ndim}D vs {b.ndim}D)")
+
+    for i in range(1, a.ndim):
+        if a.shape[i] != b.shape[i]:
+            raise ValueError(
+                f"concat_axis0: shape mismatch at axis {i} ({a.shape[i]} vs {b.shape[i]})"
+            )
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _concat_axis0_native(a, b)
+    else:
+        return _concat_axis0_cpu(a, b)
+
+
+def _concat_axis0_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
+    """CPU implementation of concat_axis0."""
+    a_np = a.to_numpy()
+    b_np = b.to_numpy()
+    result = np.concatenate([a_np, b_np], axis=0)
+    return from_numpy(result)
+
+
+def _concat_axis0_native(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of concat_axis0."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    c_native = native.concat_axis0(a_native, b_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def repeat_interleave_axis1(input: GPUArray, repeats: int) -> GPUArray:
+    """Repeat tensor elements along axis 1 (interleaved).
+
+    For GQA: expands [n_heads_kv, seq_len, head_dim] to [n_heads, seq_len, head_dim]
+    by repeating each KV head `repeats` times.
+
+    Args:
+        input: Input tensor of shape [dim0, dim1, dim2].
+        repeats: Number of times to repeat each element along axis 1.
+
+    Returns:
+        Tensor of shape [dim0, dim1 * repeats, dim2].
+    """
+    _validate_float_dtype(input, "repeat_interleave_axis1")
+
+    if input.ndim != 3:
+        raise ValueError(
+            f"repeat_interleave_axis1 expects 3D input [d0, d1, d2], got {input.ndim}D"
+        )
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _repeat_interleave_axis1_native(input, repeats)
+    else:
+        return _repeat_interleave_axis1_cpu(input, repeats)
+
+
+def _repeat_interleave_axis1_cpu(input: GPUArray, repeats: int) -> GPUArray:
+    """CPU implementation of repeat_interleave_axis1."""
+    x = input.to_numpy()
+    # np.repeat with axis=1 gives interleaved repeat
+    result = np.repeat(x, repeats, axis=1)
+    return from_numpy(result)
+
+
+def _repeat_interleave_axis1_native(input: GPUArray, repeats: int) -> GPUArray:
+    """Native C++ CUDA implementation of repeat_interleave_axis1."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    c_native = native.repeat_interleave_axis1(input_native, repeats)
+    return GPUArray._wrap_native(c_native)
+
+
+def transpose_3d_021(input: GPUArray) -> GPUArray:
+    """Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2].
+
+    Swaps axes 0 and 1 while keeping axis 2 in place.
+    Useful for converting [seq_len, n_heads, head_dim] to [n_heads, seq_len, head_dim].
+
+    Args:
+        input: 3D tensor to transpose.
+
+    Returns:
+        Transposed tensor with axes 0 and 1 swapped.
+    """
+    _validate_float_dtype(input, "transpose_3d_021")
+
+    if input.ndim != 3:
+        raise ValueError(f"transpose_3d_021 expects 3D input, got {input.ndim}D")
+
+    backend = get_backend()
+
+    # Native transpose_3d_021 supports float32/float16/bfloat16
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        dtype_str = str(input.dtype)
+        if dtype_str in ("float32", "float16", "bfloat16"):
+            return _transpose_3d_021_native(input)
+        else:
+            return _transpose_3d_021_cpu(input)
+    else:
+        return _transpose_3d_021_cpu(input)
+
+
+def _transpose_3d_021_cpu(input: GPUArray) -> GPUArray:
+    """CPU implementation of transpose_3d_021."""
+    x = input.to_numpy()
+    result = np.transpose(x, (1, 0, 2)).copy()
+    return from_numpy(result)
+
+
+def _transpose_3d_021_native(input: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of transpose_3d_021."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    c_native = native.transpose_3d_021(input_native)
+    return GPUArray._wrap_native(c_native)
+
+
+def reshape_copy(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
+    """Reshape tensor with copy (ensures contiguous output).
+
+    Args:
+        input: Input tensor to reshape.
+        new_shape: Target shape (total elements must match).
+
+    Returns:
+        Reshaped tensor with new shape.
+
+    Raises:
+        ValueError: If total element count doesn't match.
+    """
+    _validate_float_dtype(input, "reshape_copy")
+
+    # Verify total size
+    input_size = 1
+    for dim in input.shape:
+        input_size *= dim
+
+    output_size = 1
+    for dim in new_shape:
+        output_size *= dim
+
+    if input_size != output_size:
+        raise ValueError(f"reshape_copy: total size mismatch ({input_size} vs {output_size})")
+
+    backend = get_backend()
+
+    # Native reshape_copy supports float32/float16/bfloat16
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        dtype_str = str(input.dtype)
+        if dtype_str in ("float32", "float16", "bfloat16"):
+            return _reshape_copy_native(input, new_shape)
+        else:
+            return _reshape_copy_cpu(input, new_shape)
+    else:
+        return _reshape_copy_cpu(input, new_shape)
+
+
+def _reshape_copy_cpu(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
+    """CPU implementation of reshape_copy."""
+    x = input.to_numpy()
+    result = x.reshape(new_shape).copy()
+    return from_numpy(result)
+
+
+def _reshape_copy_native(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
+    """Native C++ CUDA implementation of reshape_copy."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    c_native = native.reshape_copy(input_native, list(new_shape))
     return GPUArray._wrap_native(c_native)

@@ -3,6 +3,7 @@
 from pygpukit.ops.basic import (
     add,
     bias_add_inplace,
+    concat_axis0,
     div,
     exp,
     gelu,
@@ -14,9 +15,17 @@ from pygpukit.ops.basic import (
     mean,
     mul,
     relu,
+    repeat_interleave_axis1,
+    reshape_copy,
+    rmsnorm,
+    rope_inplace,
+    sdpa_causal,
+    silu,
+    softmax,
     sub,
     sum,
     transpose,
+    transpose_3d_021,
 )
 
 __all__ = [
@@ -28,7 +37,10 @@ __all__ = [
     "log",
     "relu",
     "gelu",
+    "silu",
+    "softmax",
     "layernorm",
+    "rmsnorm",
     "matmul",
     "sum",
     "mean",
@@ -36,4 +48,10 @@ __all__ = [
     "transpose",
     "bias_add_inplace",
     "linear_bias_gelu",
+    "rope_inplace",
+    "sdpa_causal",
+    "concat_axis0",
+    "repeat_interleave_axis1",
+    "transpose_3d_021",
+    "reshape_copy",
 ]

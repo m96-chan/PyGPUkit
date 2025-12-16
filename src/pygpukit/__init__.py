@@ -1,6 +1,6 @@
 """PyGPUkit - A lightweight GPU runtime for Python."""
 
-__version__ = "0.2.6"
+__version__ = "0.2.9"
 
 # LLM support (safetensors loader)
 from pygpukit import llm, ops
@@ -43,6 +43,7 @@ from pygpukit.ops.basic import (
     mean,
     mul,
     relu,
+    softmax,
     sub,
     sum,
     transpose,
@@ -108,6 +109,7 @@ __all__ = [
     "log",
     "relu",
     "gelu",
+    "softmax",
     "layernorm",
     "matmul",
     "transpose",

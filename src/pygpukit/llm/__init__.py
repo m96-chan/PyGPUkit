@@ -209,27 +209,188 @@ class SafeTensorsFile:
         return f"SafeTensorsFile(num_tensors={self.num_tensors}, file_size={self.file_size})"
 
 
-def load_safetensors(path: str) -> SafeTensorsFile:
-    """Load a safetensors file.
+class ShardedSafeTensorsFile:
+    """Sharded SafeTensors file loader.
+
+    Handles models split across multiple .safetensors files with an index.json.
+    Lazily opens shards on demand to minimize memory usage.
+
+    Example:
+        >>> st = ShardedSafeTensorsFile("model.safetensors.index.json")
+        >>> print(st.tensor_names[:5])
+        ['lm_head.weight', 'model.embed_tokens.weight', ...]
+        >>> info = st.tensor_info('model.embed_tokens.weight')
+        >>> data = st.tensor_bytes('model.embed_tokens.weight')
+    """
+
+    def __init__(self, index_json_path: str):
+        """Open a sharded safetensors model.
+
+        Args:
+            index_json_path: Path to model.safetensors.index.json
+        """
+        import json
+        from pathlib import Path
+
+        self._index_path = Path(index_json_path)
+        self._base_dir = self._index_path.parent
+
+        with open(index_json_path, encoding="utf-8") as f:
+            index = json.load(f)
+
+        # weight_map: { tensor_name: shard_filename }
+        self._weight_map: dict[str, str] = index.get("weight_map", {})
+        self._metadata = index.get("metadata", {})
+
+        # Lazy-loaded shard files
+        self._shards: dict[str, SafeTensorsFile] = {}
+
+        # Unique shard files
+        self._shard_files = list(set(self._weight_map.values()))
+
+    def _get_shard(self, shard_file: str) -> SafeTensorsFile:
+        """Lazily open a shard file."""
+        if shard_file not in self._shards:
+            shard_path = self._base_dir / shard_file
+            self._shards[shard_file] = SafeTensorsFile(str(shard_path))
+        return self._shards[shard_file]
+
+    @property
+    def tensor_names(self) -> list[str]:
+        """Get list of all tensor names across all shards."""
+        return list(self._weight_map.keys())
+
+    @property
+    def file_size(self) -> int:
+        """Total file size across all shards (lazy, opens all shards)."""
+        total = 0
+        for shard_file in self._shard_files:
+            total += self._get_shard(shard_file).file_size
+        return total
+
+    @property
+    def num_tensors(self) -> int:
+        """Number of tensors across all shards."""
+        return len(self._weight_map)
+
+    def tensor_info(self, name: str) -> TensorInfo:
+        """Get metadata for a tensor by name.
+
+        Args:
+            name: Tensor name
+
+        Returns:
+            TensorInfo with dtype, shape, offset, and size
+
+        Raises:
+            KeyError: If tensor name not found
+        """
+        if name not in self._weight_map:
+            raise KeyError(f"Tensor '{name}' not found")
+        shard_file = self._weight_map[name]
+        return self._get_shard(shard_file).tensor_info(name)
+
+    def tensor_bytes(self, name: str) -> bytes:
+        """Get raw tensor data as bytes.
+
+        Args:
+            name: Tensor name
+
+        Returns:
+            Raw bytes of the tensor data
+
+        Raises:
+            KeyError: If tensor name not found
+        """
+        if name not in self._weight_map:
+            raise KeyError(f"Tensor '{name}' not found")
+        shard_file = self._weight_map[name]
+        return self._get_shard(shard_file).tensor_bytes(name)
+
+    def tensor_as_f32(self, name: str):
+        """Get tensor data as numpy float32 array.
+
+        Args:
+            name: Tensor name
+
+        Returns:
+            1D numpy array of float32 values
+
+        Raises:
+            KeyError: If tensor name not found
+            ValueError: If tensor dtype is not Float32
+        """
+        if name not in self._weight_map:
+            raise KeyError(f"Tensor '{name}' not found")
+        shard_file = self._weight_map[name]
+        return self._get_shard(shard_file).tensor_as_f32(name)
+
+    def __len__(self) -> int:
+        return self.num_tensors
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._weight_map
+
+    def __repr__(self) -> str:
+        return (
+            f"ShardedSafeTensorsFile(num_tensors={self.num_tensors}, "
+            f"num_shards={len(self._shard_files)})"
+        )
+
+
+def load_safetensors(path: str) -> SafeTensorsFile | ShardedSafeTensorsFile:
+    """Load a safetensors file (single or sharded).
+
+    Automatically detects sharded models by .index.json extension.
 
     Args:
-        path: Path to the .safetensors file
+        path: Path to .safetensors file or .safetensors.index.json
 
     Returns:
-        SafeTensorsFile object for accessing tensor data
+        SafeTensorsFile or ShardedSafeTensorsFile for accessing tensor data
+
+    Example:
+        # Single file
+        st = load_safetensors("model.safetensors")
+
+        # Sharded model
+        st = load_safetensors("model.safetensors.index.json")
     """
-    return SafeTensorsFile(path)
+    if path.endswith(".index.json"):
+        return ShardedSafeTensorsFile(path)
+    else:
+        return SafeTensorsFile(path)
 
 
 class Tokenizer:
     """BPE Tokenizer for GPT-2 style models.
 
-    Loads tokenizer.json format and provides basic encode/decode functionality.
+    **⚠️ EXPERIMENTAL: This tokenizer is intended for demos and testing only.**
+
+    For production use, we recommend HuggingFace tokenizers:
+    - https://github.com/huggingface/tokenizers
+    - pip install tokenizers
+
+    PyGPUkit's core responsibility is GPU execution, not tokenization.
+    The model API expects token IDs as input - use your preferred tokenizer
+    to convert text to token IDs before passing to PyGPUkit models.
+
+    Limitations:
+    - Only supports a subset of HuggingFace tokenizer.json formats
+    - May not work with all models (e.g., Qwen3 uses unsupported format)
+    - No chat template support
+    - No special token handling beyond BOS/EOS/PAD
 
     Example:
+        >>> # For demos/testing only
         >>> tok = Tokenizer("tokenizer.json")
         >>> ids = tok.encode("Hello, world!")
         >>> text = tok.decode(ids)
+
+        >>> # For production, use HuggingFace tokenizers:
+        >>> from tokenizers import Tokenizer as HFTokenizer
+        >>> hf_tok = HFTokenizer.from_file("tokenizer.json")
+        >>> ids = hf_tok.encode("Hello, world!").ids
     """
 
     def __init__(self, path: str):
@@ -330,13 +491,40 @@ class Tokenizer:
 
 
 from pygpukit.llm.model import (  # noqa: E402
+    GPT2_SPEC,
+    LLAMA_SPEC,
     MLP,
+    MODEL_SPECS,
+    QWEN3_SPEC,
+    # Components
+    Attention,
+    CausalSelfAttention,
+    # Core model
+    CausalTransformerModel,
+    # Legacy config classes (for reference)
     GPT2Config,
+    # Type aliases (GPT2Model = LlamaModel = CausalTransformerModel)
     GPT2Model,
     LayerNorm,
     Linear,
+    LlamaAttention,
+    LlamaBlock,
+    LlamaConfig,
+    LlamaMLP,
+    LlamaModel,
+    # ModelSpec (v0.2.9)
+    ModelSpec,
+    Norm,
+    Qwen3Config,
+    RMSNorm,
     TransformerBlock,
+    TransformerConfig,
+    detect_model_spec,
     load_gpt2_from_safetensors,
+    load_llama_from_safetensors,
+    # Loaders
+    load_model_from_safetensors,
+    load_qwen3_from_safetensors,
 )
 
 __all__ = [
@@ -344,15 +532,41 @@ __all__ = [
     "Dtype",
     "TensorInfo",
     "SafeTensorsFile",
+    "ShardedSafeTensorsFile",
     "load_safetensors",
     # Tokenizer
     "Tokenizer",
-    # Model components
-    "GPT2Config",
-    "GPT2Model",
-    "LayerNorm",
-    "Linear",
+    # Core Transformer (v0.2.9)
+    "CausalTransformerModel",
+    "TransformerConfig",
+    "Attention",
     "MLP",
+    "Norm",
     "TransformerBlock",
+    "Linear",
+    # ModelSpec (v0.2.9)
+    "ModelSpec",
+    "GPT2_SPEC",
+    "LLAMA_SPEC",
+    "QWEN3_SPEC",
+    "MODEL_SPECS",
+    "detect_model_spec",
+    # Loaders
+    "load_model_from_safetensors",
     "load_gpt2_from_safetensors",
+    "load_llama_from_safetensors",
+    "load_qwen3_from_safetensors",
+    # Legacy config classes
+    "GPT2Config",
+    "LlamaConfig",
+    "Qwen3Config",
+    # Type aliases (all point to unified types)
+    "GPT2Model",
+    "LlamaModel",
+    "CausalSelfAttention",
+    "LayerNorm",
+    "LlamaAttention",
+    "LlamaBlock",
+    "LlamaMLP",
+    "RMSNorm",
 ]
