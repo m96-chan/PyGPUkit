@@ -176,5 +176,49 @@ GPUArray linear_int8(
 // weight_int8: [rows, cols] INT8, scale: [cols] FP16/FP32
 std::pair<GPUArray, GPUArray> quantize_to_int8(const GPUArray& input);
 
+// ============================================================================
+// Paged Attention (#87)
+// ============================================================================
+
+// Paged Attention v1: single-query attention with paged KV cache
+// Q: [num_seqs, num_heads, head_dim]
+// K_cache, V_cache: [num_blocks, num_kv_heads, block_size, head_dim]
+// block_tables: [num_seqs, max_num_blocks_per_seq] int32
+// context_lens: [num_seqs] int32
+GPUArray paged_attention_v1(
+    const GPUArray& Q,
+    const GPUArray& K_cache,
+    const GPUArray& V_cache,
+    const GPUArray& block_tables,
+    const GPUArray& context_lens,
+    float scale = 0.0f
+);
+
+// Copy new KV entries to paged cache (decode phase)
+// K_new, V_new: [num_seqs, num_kv_heads, head_dim]
+// slot_mapping: [num_seqs] int32 - physical slot indices
+void copy_to_paged_cache(
+    const GPUArray& K_new,
+    const GPUArray& V_new,
+    GPUArray& K_cache,
+    GPUArray& V_cache,
+    const GPUArray& slot_mapping
+);
+
+// Reshape and copy KV from prefill format to paged cache
+// K, V: [batch * seq_len, num_kv_heads, head_dim] (flattened prefill output)
+// slot_mapping: [total_tokens] int32
+void reshape_and_cache(
+    const GPUArray& K,
+    const GPUArray& V,
+    GPUArray& K_cache,
+    GPUArray& V_cache,
+    const GPUArray& slot_mapping
+);
+
+// Allocate KV cache blocks
+// Returns: [num_blocks, num_kv_heads, block_size, head_dim] FP16
+GPUArray allocate_kv_cache(int num_blocks, int num_kv_heads, int block_size, int head_dim);
+
 } // namespace ops
 } // namespace pygpukit
