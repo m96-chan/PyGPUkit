@@ -490,6 +490,13 @@ class Tokenizer:
         return f"Tokenizer(vocab_size={self.vocab_size})"
 
 
+# Chat template support (v0.2.10)
+from pygpukit.llm.chat import (  # noqa: E402
+    ChatMessage,
+    apply_chat_template,
+    create_chat_prompt,
+    format_chat_messages,
+)
 from pygpukit.llm.model import (  # noqa: E402
     GPT2_SPEC,
     LLAMA_SPEC,
@@ -569,4 +576,9 @@ __all__ = [
     "LlamaBlock",
     "LlamaMLP",
     "RMSNorm",
+    # Chat template support (v0.2.10)
+    "ChatMessage",
+    "apply_chat_template",
+    "format_chat_messages",
+    "create_chat_prompt",
 ]
