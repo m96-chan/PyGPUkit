@@ -1230,216 +1230,64 @@ class _LegacyMLP(MLP):
 
 
 # =============================================================================
-# Safetensors Loaders
+# Safetensors Loaders (thin wrappers over load_model_from_safetensors)
 # =============================================================================
 
 
 def load_gpt2_from_safetensors(
     model_path: str,
-    config: GPT2Config | None = None,
-    load_attention: bool = True,
+    config: GPT2Config | None = None,  # Ignored, auto-detected
+    dtype: str = "float32",
 ) -> GPT2Model:
     """Load GPT-2 model from safetensors file.
 
     Args:
         model_path: Path to model.safetensors
-        config: Model configuration (defaults to GPT-2 small)
-        load_attention: Whether to load attention weights
+        config: Ignored (auto-detected from tensor shapes)
+        dtype: Weight dtype ("float32" or "float16")
 
     Returns:
         GPT2Model instance (CausalTransformerModel)
     """
-    from pygpukit.llm import SafeTensorsFile
-
-    if config is None:
-        config = GPT2Config()
-
-    transformer_config = config.to_transformer_config()
-    st = SafeTensorsFile(model_path)
-
-    def load_tensor(name: str, do_transpose: bool = False) -> GPUArray:
-        data = st.tensor_bytes(name)
-        info = st.tensor_info(name)
-        dtype_map = {0: np.float32, 1: np.float16, 2: np.float32, 3: np.float64}
-        np_dtype = dtype_map.get(info.dtype, np.float32)
-        arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape)
-        if do_transpose and arr.ndim == 2:
-            arr = arr.T
-        return from_numpy(arr.copy().astype(np.float32))
-
-    def try_load(name: str, do_transpose: bool = False) -> GPUArray | None:
-        if name in st.tensor_names:
-            return load_tensor(name, do_transpose)
-        return None
-
-    # Embeddings
-    wte = load_tensor("wte.weight")
-    wpe = load_tensor("wpe.weight")
-
-    # Blocks
-    blocks = []
-    for i in range(config.n_layer):
-        prefix = f"h.{i}."
-
-        # Attention norm
-        ln_1_w = load_tensor(f"{prefix}ln_1.weight")
-        ln_1_b = load_tensor(f"{prefix}ln_1.bias")
-        attn_norm = Norm(ln_1_w, ln_1_b, "layernorm", config.layer_norm_eps)
-
-        # Attention
-        attn = None
-        if load_attention:
-            c_attn_w = load_tensor(f"{prefix}attn.c_attn.weight", do_transpose=True)
-            c_attn_b = try_load(f"{prefix}attn.c_attn.bias")
-            c_proj_w = load_tensor(f"{prefix}attn.c_proj.weight", do_transpose=True)
-            c_proj_b = try_load(f"{prefix}attn.c_proj.bias")
-            attn = CausalSelfAttention(
-                c_attn_w, c_attn_b, c_proj_w, c_proj_b, config.n_head, config.n_embd
-            )
-
-        # MLP norm
-        ln_2_w = load_tensor(f"{prefix}ln_2.weight")
-        ln_2_b = load_tensor(f"{prefix}ln_2.bias")
-        mlp_norm = Norm(ln_2_w, ln_2_b, "layernorm", config.layer_norm_eps)
-
-        # MLP
-        c_fc_w = load_tensor(f"{prefix}mlp.c_fc.weight", do_transpose=True)
-        c_fc_b = try_load(f"{prefix}mlp.c_fc.bias")
-        c_proj_w = load_tensor(f"{prefix}mlp.c_proj.weight", do_transpose=True)
-        c_proj_b = try_load(f"{prefix}mlp.c_proj.bias")
-        mlp = MLP(
-            transformer_config,
-            fc1_weight=c_fc_w,
-            fc1_bias=c_fc_b,
-            fc2_weight=c_proj_w,
-            fc2_bias=c_proj_b,
-        )
-
-        if attn is not None:
-            block = TransformerBlock(attn_norm, attn, mlp_norm, mlp)
-            blocks.append(block)
-
-    # Final norm
-    ln_f_w = load_tensor("ln_f.weight")
-    ln_f_b = load_tensor("ln_f.bias")
-    final_norm = Norm(ln_f_w, ln_f_b, "layernorm", config.layer_norm_eps)
-
-    return GPT2Model(transformer_config, wte, blocks, final_norm, None, wpe)
+    # Note: config parameter is ignored; config is auto-detected
+    model = load_model_from_safetensors(model_path, dtype=dtype, spec=GPT2_SPEC)
+    # Wrap as GPT2Model for backward compatibility
+    return GPT2Model(
+        model.config,
+        model.embed_tokens,
+        model.blocks,
+        model.final_norm,
+        model.lm_head,
+        model.position_embed,
+    )
 
 
 def load_llama_from_safetensors(
     model_path: str,
-    config: LlamaConfig | None = None,
+    config: LlamaConfig | None = None,  # Ignored, auto-detected
+    dtype: str = "float32",
 ) -> LlamaModel:
     """Load Llama model from safetensors file.
 
     Args:
         model_path: Path to model.safetensors
-        config: Model configuration (auto-detected if None)
+        config: Ignored (auto-detected from tensor shapes)
+        dtype: Weight dtype ("float32" or "float16")
 
     Returns:
         LlamaModel instance (CausalTransformerModel)
     """
-    from pygpukit.llm import SafeTensorsFile
-
-    st = SafeTensorsFile(model_path)
-
-    # Auto-detect config
-    if config is None:
-        embed_info = st.tensor_info("model.embed_tokens.weight")
-        vocab_size = embed_info.shape[0]
-        hidden_size = embed_info.shape[1]
-
-        num_layers = 0
-        while f"model.layers.{num_layers}.self_attn.q_proj.weight" in st.tensor_names:
-            num_layers += 1
-
-        q_info = st.tensor_info("model.layers.0.self_attn.q_proj.weight")
-        k_info = st.tensor_info("model.layers.0.self_attn.k_proj.weight")
-        gate_info = st.tensor_info("model.layers.0.mlp.gate_proj.weight")
-
-        head_dim = 64
-        num_heads = q_info.shape[0] // head_dim
-        num_kv_heads = k_info.shape[0] // head_dim
-
-        config = LlamaConfig(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            intermediate_size=gate_info.shape[0],
-            num_hidden_layers=num_layers,
-            num_attention_heads=num_heads,
-            num_key_value_heads=num_kv_heads,
-        )
-
-    transformer_config = config.to_transformer_config()
-
-    def load_tensor(name: str) -> GPUArray:
-        data = st.tensor_bytes(name)
-        info = st.tensor_info(name)
-        if info.dtype == 2:  # BFloat16
-            arr = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
-            arr_f32 = np.empty(arr.shape, dtype=np.float32)
-            arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
-            return from_numpy(arr_f32)
-        else:
-            dtype_map = {0: np.float32, 1: np.float16, 3: np.float64}
-            np_dtype = dtype_map.get(info.dtype, np.float32)
-            arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape)
-            return from_numpy(arr.copy().astype(np.float32))
-
-    # Embeddings
-    embed_tokens = load_tensor("model.embed_tokens.weight")
-
-    # Blocks
-    blocks = []
-    for i in range(config.num_hidden_layers):
-        prefix = f"model.layers.{i}."
-
-        # Attention norm
-        attn_norm = Norm(
-            load_tensor(f"{prefix}input_layernorm.weight"),
-            None,
-            "rmsnorm",
-            config.rms_norm_eps,
-        )
-
-        # Attention
-        attn = Attention(
-            load_tensor(f"{prefix}self_attn.q_proj.weight"),
-            load_tensor(f"{prefix}self_attn.k_proj.weight"),
-            load_tensor(f"{prefix}self_attn.v_proj.weight"),
-            load_tensor(f"{prefix}self_attn.o_proj.weight"),
-            transformer_config,
-        )
-
-        # MLP norm
-        mlp_norm = Norm(
-            load_tensor(f"{prefix}post_attention_layernorm.weight"),
-            None,
-            "rmsnorm",
-            config.rms_norm_eps,
-        )
-
-        # MLP
-        mlp = MLP(
-            transformer_config,
-            gate_proj=load_tensor(f"{prefix}mlp.gate_proj.weight"),
-            up_proj=load_tensor(f"{prefix}mlp.up_proj.weight"),
-            down_proj=load_tensor(f"{prefix}mlp.down_proj.weight"),
-        )
-
-        block = TransformerBlock(attn_norm, attn, mlp_norm, mlp)
-        blocks.append(block)
-
-    # Final norm
-    final_norm = Norm(load_tensor("model.norm.weight"), None, "rmsnorm", config.rms_norm_eps)
-
-    # LM head
-    lm_head = None
-    if "lm_head.weight" in st.tensor_names:
-        lm_head = load_tensor("lm_head.weight")
-
-    return LlamaModel(transformer_config, embed_tokens, blocks, final_norm, lm_head)
+    # Note: config parameter is ignored; config is auto-detected
+    model = load_model_from_safetensors(model_path, dtype=dtype, spec=LLAMA_SPEC)
+    # Wrap as LlamaModel for backward compatibility
+    return LlamaModel(
+        model.config,
+        model.embed_tokens,
+        model.blocks,
+        model.final_norm,
+        model.lm_head,
+        model.position_embed,
+    )
 
 
 # =============================================================================
@@ -1483,141 +1331,21 @@ class Qwen3Config:
 
 def load_qwen3_from_safetensors(
     model_path: str,
-    config: Qwen3Config | None = None,
+    config: Qwen3Config | None = None,  # Ignored, auto-detected
     dtype: str = "float32",
 ) -> CausalTransformerModel:
-    """Load Qwen3 model from safetensors file (single or sharded).
+    """Load Qwen3 model from safetensors file.
 
     Args:
         model_path: Path to model.safetensors or model.safetensors.index.json
-        config: Model configuration (auto-detected if None)
+        config: Ignored (auto-detected from tensor shapes)
         dtype: Weight dtype ("float32" or "float16")
 
     Returns:
         CausalTransformerModel instance
     """
-    from pygpukit.llm import load_safetensors
-
-    st = load_safetensors(model_path)
-    target_dtype = np.float16 if dtype == "float16" else np.float32
-
-    # Auto-detect config
-    if config is None:
-        embed_info = st.tensor_info("model.embed_tokens.weight")
-        vocab_size = embed_info.shape[0]
-        hidden_size = embed_info.shape[1]
-
-        num_layers = 0
-        while f"model.layers.{num_layers}.self_attn.q_proj.weight" in st.tensor_names:
-            num_layers += 1
-
-        q_info = st.tensor_info("model.layers.0.self_attn.q_proj.weight")
-        k_info = st.tensor_info("model.layers.0.self_attn.k_proj.weight")
-        gate_info = st.tensor_info("model.layers.0.mlp.gate_proj.weight")
-
-        # Qwen3 uses explicit head_dim from q_norm shape
-        q_norm_info = st.tensor_info("model.layers.0.self_attn.q_norm.weight")
-        head_dim = q_norm_info.shape[0]
-
-        num_heads = q_info.shape[0] // head_dim
-        num_kv_heads = k_info.shape[0] // head_dim
-
-        config = Qwen3Config(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            intermediate_size=gate_info.shape[0],
-            num_hidden_layers=num_layers,
-            num_attention_heads=num_heads,
-            num_key_value_heads=num_kv_heads,
-            head_dim=head_dim,
-        )
-
-    transformer_config = config.to_transformer_config()
-
-    def load_tensor(name: str) -> GPUArray:
-        data = st.tensor_bytes(name)
-        info = st.tensor_info(name)
-        if info.dtype == 2:  # BFloat16 -> target dtype
-            arr = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
-            # BF16 to FP32 first, then cast to target
-            arr_f32 = np.empty(arr.shape, dtype=np.float32)
-            arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
-            return from_numpy(arr_f32.astype(target_dtype))
-        else:
-            dtype_map = {0: np.float32, 1: np.float16, 3: np.float64}
-            np_dtype = dtype_map.get(info.dtype, np.float32)
-            arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape)
-            return from_numpy(arr.copy().astype(target_dtype))
-
-    # Embeddings
-    embed_tokens = load_tensor("model.embed_tokens.weight")
-
-    # Blocks
-    blocks = []
-    for i in range(config.num_hidden_layers):
-        prefix = f"model.layers.{i}."
-
-        # Attention norm
-        attn_norm = Norm(
-            load_tensor(f"{prefix}input_layernorm.weight"),
-            None,
-            "rmsnorm",
-            config.rms_norm_eps,
-        )
-
-        # QK Norm (Qwen3 specific)
-        q_norm = Norm(
-            load_tensor(f"{prefix}self_attn.q_norm.weight"),
-            None,
-            "rmsnorm",
-            config.rms_norm_eps,
-        )
-        k_norm = Norm(
-            load_tensor(f"{prefix}self_attn.k_norm.weight"),
-            None,
-            "rmsnorm",
-            config.rms_norm_eps,
-        )
-
-        # Attention with QK Norm
-        attn = Attention(
-            load_tensor(f"{prefix}self_attn.q_proj.weight"),
-            load_tensor(f"{prefix}self_attn.k_proj.weight"),
-            load_tensor(f"{prefix}self_attn.v_proj.weight"),
-            load_tensor(f"{prefix}self_attn.o_proj.weight"),
-            transformer_config,
-            q_norm=q_norm,
-            k_norm=k_norm,
-        )
-
-        # MLP norm
-        mlp_norm = Norm(
-            load_tensor(f"{prefix}post_attention_layernorm.weight"),
-            None,
-            "rmsnorm",
-            config.rms_norm_eps,
-        )
-
-        # MLP
-        mlp = MLP(
-            transformer_config,
-            gate_proj=load_tensor(f"{prefix}mlp.gate_proj.weight"),
-            up_proj=load_tensor(f"{prefix}mlp.up_proj.weight"),
-            down_proj=load_tensor(f"{prefix}mlp.down_proj.weight"),
-        )
-
-        block = TransformerBlock(attn_norm, attn, mlp_norm, mlp)
-        blocks.append(block)
-
-    # Final norm
-    final_norm = Norm(load_tensor("model.norm.weight"), None, "rmsnorm", config.rms_norm_eps)
-
-    # LM head
-    lm_head = None
-    if "lm_head.weight" in st.tensor_names:
-        lm_head = load_tensor("lm_head.weight")
-
-    return CausalTransformerModel(transformer_config, embed_tokens, blocks, final_norm, lm_head)
+    # Note: config parameter is ignored; config is auto-detected
+    return load_model_from_safetensors(model_path, dtype=dtype, spec=QWEN3_SPEC)
 
 
 # =============================================================================
