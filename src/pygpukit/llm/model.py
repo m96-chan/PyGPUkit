@@ -13,6 +13,7 @@ Key features:
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -1075,6 +1076,63 @@ class CausalTransformerModel:
                     break
 
         return tokens
+
+    def generate_stream(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int = 20,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        eos_token_id: int | None = None,
+    ) -> Generator[int, None, None]:
+        """Generate tokens autoregressively with streaming.
+
+        Yields tokens one at a time as they are generated, enabling
+        real-time text display in chat applications.
+
+        Args:
+            input_ids: Initial token IDs
+            max_new_tokens: Maximum new tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            eos_token_id: Stop at this token
+
+        Yields:
+            Generated token IDs one at a time
+
+        Example:
+            >>> for token_id in model.generate_stream(input_ids, max_new_tokens=50):
+            ...     token_str = tokenizer.decode([token_id])
+            ...     print(token_str, end="", flush=True)
+        """
+        past_key_values = None
+
+        # Prefill
+        hidden, past_key_values = self(input_ids, use_cache=True)
+        logits = self.get_logits(hidden)
+        last_logits = logits.to_numpy()[-1]
+        next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+        yield next_token
+
+        if eos_token_id is not None and next_token == eos_token_id:
+            return
+
+        # Decode
+        for _ in range(max_new_tokens - 1):
+            hidden, past_key_values = self(
+                [next_token], past_key_values=past_key_values, use_cache=True
+            )
+            logits = self.get_logits(hidden)
+            last_logits = logits.to_numpy()[-1]
+            next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+            yield next_token
+
+            if eos_token_id is not None and next_token == eos_token_id:
+                return
 
 
 # =============================================================================
