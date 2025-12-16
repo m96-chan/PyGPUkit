@@ -187,6 +187,16 @@ void kv_cache_prefill(const GPUArray& new_kv, GPUArray& cache, int start_pos);
 void kv_cache_update_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads, int position);
 void kv_cache_prefill_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads, int start_pos);
 
+// Embedding lookup - GPU-only, no CPU transfer
+// embed_matrix: [vocab_size, hidden_size], out: [1, hidden_size], token_id: row index
+void embedding_lookup(const GPUArray& embed_matrix, GPUArray& out, int token_id);
+
+// In-place addition: a += b
+void add_inplace(GPUArray& a, const GPUArray& b);
+
+// GPU-to-GPU copy
+void copy_to(const GPUArray& src, GPUArray& dst);
+
 // ============================================================================
 // Quantization Operations (#85)
 // ============================================================================

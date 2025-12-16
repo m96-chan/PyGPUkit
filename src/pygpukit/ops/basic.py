@@ -1653,9 +1653,7 @@ def kv_cache_prefill(new_kv: GPUArray, cache: GPUArray, start_pos: int = 0) -> N
     native.kv_cache_prefill(new_kv_native, cache_native, start_pos)
 
 
-def kv_cache_update_gqa(
-    new_kv: GPUArray, cache: GPUArray, num_heads: int, position: int
-) -> None:
+def kv_cache_update_gqa(new_kv: GPUArray, cache: GPUArray, num_heads: int, position: int) -> None:
     """Update GQA-expanded KV cache at a single position (decode step).
 
     For CUDA Graph optimization: writes to transposed, GQA-expanded cache.
@@ -1695,3 +1693,55 @@ def kv_cache_prefill_gqa(
     new_kv_native = new_kv._get_native()
     cache_native = cache._get_native()
     native.kv_cache_prefill_gqa(new_kv_native, cache_native, num_heads, start_pos)
+
+
+def embedding_lookup(embed_matrix: GPUArray, out: GPUArray, token_id: int) -> None:
+    """Lookup embedding on GPU without CPU transfer.
+
+    For CUDA Graph: no allocation, no CPU->GPU transfer.
+
+    Args:
+        embed_matrix: Embedding matrix [vocab_size, hidden_size].
+        out: Pre-allocated output buffer [1, hidden_size].
+        token_id: Token index to lookup.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    embed_native = embed_matrix._get_native()
+    out_native = out._get_native()
+    native.embedding_lookup(embed_native, out_native, token_id)
+
+
+def add_inplace(a: GPUArray, b: GPUArray) -> None:
+    """In-place addition: a += b.
+
+    For CUDA Graph: no allocation.
+
+    Args:
+        a: Tensor to add to (modified in-place).
+        b: Tensor to add.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    native.add_inplace(a_native, b_native)
+
+
+def copy_to(src: GPUArray, dst: GPUArray) -> None:
+    """GPU-to-GPU copy.
+
+    For CUDA Graph: no allocation.
+
+    Args:
+        src: Source tensor.
+        dst: Destination tensor (must be same size).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    src_native = src._get_native()
+    dst_native = dst._get_native()
+    native.copy_to(src_native, dst_native)

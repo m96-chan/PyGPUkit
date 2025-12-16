@@ -1334,5 +1334,134 @@ void kv_cache_prefill_gqa(
     sync_and_check("kv_cache_prefill_gqa kernel failed");
 }
 
+// Embedding lookup - copy row from embedding matrix to output buffer
+void embedding_lookup(
+    const GPUArray& embed_matrix,
+    GPUArray& out,
+    int token_id
+) {
+    // embed_matrix: [vocab_size, hidden_size]
+    // out: [1, hidden_size] or [hidden_size]
+    if (embed_matrix.ndim() != 2) {
+        throw std::runtime_error("embedding_lookup: embed_matrix must be 2D");
+    }
+    if (embed_matrix.dtype() != out.dtype()) {
+        throw std::runtime_error("embedding_lookup: dtype mismatch");
+    }
+
+    int hidden_size = static_cast<int>(embed_matrix.shape()[1]);
+
+    const int block_size = 256;
+    const int grid_size = (hidden_size + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (embed_matrix.dtype()) {
+        case DataType::Float16:
+            nn::embedding_lookup_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(embed_matrix.data()),
+                static_cast<__half*>(out.data()),
+                hidden_size, token_id);
+            break;
+        case DataType::BFloat16:
+            nn::embedding_lookup_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(embed_matrix.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                hidden_size, token_id);
+            break;
+        case DataType::Float32:
+            nn::embedding_lookup_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(embed_matrix.data()),
+                static_cast<float*>(out.data()),
+                hidden_size, token_id);
+            break;
+        default:
+            throw std::runtime_error("embedding_lookup: unsupported dtype");
+    }
+
+    sync_and_check("embedding_lookup kernel failed");
+}
+
+// In-place addition: a += b
+void add_inplace(GPUArray& a, const GPUArray& b) {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("add_inplace: dtype mismatch");
+    }
+    size_t n = a.size();
+    if (n != b.size()) {
+        throw std::runtime_error("add_inplace: size mismatch");
+    }
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (a.dtype()) {
+        case DataType::Float16:
+            nn::add_inplace_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<__half*>(a.data()),
+                static_cast<const __half*>(b.data()), n);
+            break;
+        case DataType::BFloat16:
+            nn::add_inplace_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<__nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()), n);
+            break;
+        case DataType::Float32:
+            nn::add_inplace_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<float*>(a.data()),
+                static_cast<const float*>(b.data()), n);
+            break;
+        case DataType::Float64:
+            nn::add_inplace_f64_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<double*>(a.data()),
+                static_cast<const double*>(b.data()), n);
+            break;
+        default:
+            throw std::runtime_error("add_inplace: unsupported dtype");
+    }
+
+    sync_and_check("add_inplace kernel failed");
+}
+
+// GPU-to-GPU copy
+void copy_to(const GPUArray& src, GPUArray& dst) {
+    if (src.dtype() != dst.dtype()) {
+        throw std::runtime_error("copy_to: dtype mismatch");
+    }
+    size_t n = src.size();
+    if (n != dst.size()) {
+        throw std::runtime_error("copy_to: size mismatch");
+    }
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (src.dtype()) {
+        case DataType::Float16:
+            nn::copy_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(src.data()),
+                static_cast<__half*>(dst.data()), n);
+            break;
+        case DataType::BFloat16:
+            nn::copy_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(src.data()),
+                static_cast<__nv_bfloat16*>(dst.data()), n);
+            break;
+        case DataType::Float32:
+            nn::copy_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(src.data()),
+                static_cast<float*>(dst.data()), n);
+            break;
+        default:
+            throw std::runtime_error("copy_to: unsupported dtype");
+    }
+
+    sync_and_check("copy_to kernel failed");
+}
+
 } // namespace ops
 } // namespace pygpukit

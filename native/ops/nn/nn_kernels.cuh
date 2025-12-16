@@ -2289,6 +2289,99 @@ __global__ void kv_cache_prefill_gqa_f32_kernel(
     }
 }
 
+// ============================================================================
+// Embedding Lookup (for CUDA Graph - no CPU→GPU transfer)
+// ============================================================================
+// Copy embedding from GPU matrix to output buffer
+// embed_matrix: [vocab_size, hidden_size]
+// out: [1, hidden_size]
+// token_id: which row to copy
+
+__global__ void embedding_lookup_f16_kernel(
+    const __half* __restrict__ embed_matrix,
+    __half* __restrict__ out,
+    int hidden_size,
+    int token_id
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_bf16_kernel(
+    const __nv_bfloat16* __restrict__ embed_matrix,
+    __nv_bfloat16* __restrict__ out,
+    int hidden_size,
+    int token_id
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_f32_kernel(
+    const float* __restrict__ embed_matrix,
+    float* __restrict__ out,
+    int hidden_size,
+    int token_id
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+// ============================================================================
+// Add In-place (for CUDA Graph - no allocation)
+// ============================================================================
+// a += b (element-wise)
+
+__global__ void add_inplace_f16_kernel(
+    __half* __restrict__ a,
+    const __half* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+__global__ void add_inplace_bf16_kernel(
+    __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+__global__ void add_inplace_f32_kernel(
+    float* __restrict__ a,
+    const float* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] + b[idx];
+    }
+}
+
+__global__ void add_inplace_f64_kernel(
+    double* __restrict__ a,
+    const double* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] + b[idx];
+    }
+}
+
 } // namespace nn
 } // namespace ops
 } // namespace pygpukit

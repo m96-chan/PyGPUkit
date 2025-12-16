@@ -274,6 +274,24 @@ void init_ops_bindings(py::module_& m) {
           "num_heads: total number of attention heads\n"
           "start_pos: where to start writing in cache");
 
+    // GPU-only embedding lookup (for CUDA Graph)
+    m.def("embedding_lookup", &ops::embedding_lookup,
+          py::arg("embed_matrix"), py::arg("out"), py::arg("token_id"),
+          "Lookup embedding on GPU without CPU transfer.\n"
+          "embed_matrix: [vocab_size, hidden_size]\n"
+          "out: [1, hidden_size] pre-allocated buffer\n"
+          "token_id: row index to copy");
+
+    // In-place addition (for CUDA Graph)
+    m.def("add_inplace", &ops::add_inplace,
+          py::arg("a"), py::arg("b"),
+          "In-place addition: a += b");
+
+    // GPU-to-GPU copy (for CUDA Graph)
+    m.def("copy_to", &ops::copy_to,
+          py::arg("src"), py::arg("dst"),
+          "Copy src to dst on GPU");
+
     // ========================================================================
     // Quantization Operations (#85)
     // ========================================================================

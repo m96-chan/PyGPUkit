@@ -395,7 +395,6 @@ def demo_llm_generation(model_path: str, tokenizer_path: str):
     print("This demonstrates the full inference pipeline.\n")
 
     try:
-        import pygpukit as gk
         from pygpukit.llm import (
             ChatMessage,
             detect_model_spec,
