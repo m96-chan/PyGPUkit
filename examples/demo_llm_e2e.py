@@ -98,6 +98,13 @@ def main():
         action="store_true",
         help="Run benchmark without text generation",
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        choices=["float32", "float16"],
+        default="float32",
+        help="Weight dtype (float32 or float16)",
+    )
     args = parser.parse_args()
 
     print("=" * 70)
@@ -120,10 +127,10 @@ def main():
     try:
         import pygpukit as gpk
         from pygpukit.llm import (
-            SafeTensorsFile,
             Tokenizer,
-            load_gpt2_from_safetensors,
-            load_llama_from_safetensors,
+            detect_model_spec,
+            load_model_from_safetensors,
+            load_safetensors,
         )
 
         print("\nPyGPUkit loaded successfully")
@@ -152,24 +159,20 @@ def main():
     # =========================================================================
     section("Detecting Model Type")
 
-    st = SafeTensorsFile(str(model_path))
+    st = load_safetensors(str(model_path))
     tensor_names = st.tensor_names
 
-    if args.model_type == "auto":
-        if "model.embed_tokens.weight" in tensor_names:
-            model_type = "llama"
-        elif "wte.weight" in tensor_names:
-            model_type = "gpt2"
-        else:
-            print("  Error: Could not auto-detect model type")
-            print(f"  First 10 tensor names: {tensor_names[:10]}")
-            return 1
-    else:
-        model_type = args.model_type
+    # Use ModelSpec-based detection
+    spec = detect_model_spec(tensor_names)
+    model_type = spec.name
 
     print(f"  Model type: {model_type.upper()}")
+    print(f"  ModelSpec: {spec.name}")
     print(f"  Total tensors: {len(tensor_names)}")
-    print(f"  File size: {st.file_size / 1024 / 1024:.1f} MB")
+    print(f"  Norm type: {spec.norm_type}")
+    print(f"  Activation: {spec.activation}")
+    print(f"  Use RoPE: {spec.use_rope}")
+    print(f"  Use QK Norm: {spec.use_qk_norm}")
 
     # =========================================================================
     # Load Model
@@ -177,10 +180,7 @@ def main():
     section("Loading Model")
 
     start = time.perf_counter()
-    if model_type == "llama":
-        model = load_llama_from_safetensors(str(model_path))
-    else:
-        model = load_gpt2_from_safetensors(str(model_path))
+    model = load_model_from_safetensors(str(model_path), dtype=args.dtype, spec=spec)
     load_time = (time.perf_counter() - start) * 1000
 
     config = model.config
@@ -196,6 +196,8 @@ def main():
     print(f"  Activation: {config.activation}")
     print(f"  Use RoPE: {config.use_rope}")
     print(f"  Load time: {format_time(load_time)}")
+    print(f"  model.spec: {model.spec.name if model.spec else 'None'}")
+    print(f"  dtype: {args.dtype}")
 
     # Estimate model size
     params = (
