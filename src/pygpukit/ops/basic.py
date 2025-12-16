@@ -674,6 +674,52 @@ def _layernorm_native(
     return GPUArray._wrap_native(c_native)
 
 
+def softmax(input: GPUArray) -> GPUArray:
+    """Softmax activation applied row-wise.
+
+    Computes: y[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
+
+    Args:
+        input: Input array of shape [batch, features].
+
+    Returns:
+        A new GPUArray containing the softmax output.
+
+    Raises:
+        ValueError: If input is not 2D or dtype is not a float type.
+    """
+    _validate_float_dtype(input, "softmax")
+
+    if input.ndim != 2:
+        raise ValueError(f"softmax expects 2D input [batch, features], got {input.ndim}D")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _softmax_native(input)
+    else:
+        return _softmax_cpu(input)
+
+
+def _softmax_cpu(input: GPUArray) -> GPUArray:
+    """CPU implementation of softmax."""
+    x = input.to_numpy()
+    # Numerical stability: subtract max
+    x_max = x.max(axis=1, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return from_numpy(exp_x / exp_x.sum(axis=1, keepdims=True))
+
+
+def _softmax_native(input: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of softmax (zero-copy)."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+    c_native = native.softmax(input_native)
+    return GPUArray._wrap_native(c_native)
+
+
 def transpose(a: GPUArray) -> GPUArray:
     """Matrix transpose.
 

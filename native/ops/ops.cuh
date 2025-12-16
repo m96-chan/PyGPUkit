@@ -98,6 +98,10 @@ void bias_add_inplace(GPUArray& output, const GPUArray& bias);
 // input: [batch, features], gamma/beta: [features]
 GPUArray layernorm(const GPUArray& input, const GPUArray& gamma, const GPUArray& beta, float eps = 1e-5f);
 
+// Softmax: y[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
+// Applied row-wise: input [batch, features] -> output [batch, features]
+GPUArray softmax(const GPUArray& input);
+
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
 // ============================================================================

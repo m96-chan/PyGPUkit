@@ -139,6 +139,12 @@ void init_ops_bindings(py::module_& m) {
           py::arg("input"), py::arg("gamma"), py::arg("beta"), py::arg("eps") = 1e-5f,
           "Layer normalization: (x - mean) / sqrt(var + eps) * gamma + beta");
 
+    // Softmax
+    m.def("softmax", &ops::softmax,
+          py::arg("input"),
+          "Softmax: y[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))\n"
+          "Applied row-wise: input [batch, features] -> output [batch, features]");
+
     // ========================================================================
     // Fused Operations (CUTLASS Epilogue Fusion)
     // ========================================================================

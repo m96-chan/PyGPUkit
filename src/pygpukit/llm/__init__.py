@@ -331,6 +331,7 @@ class Tokenizer:
 
 from pygpukit.llm.model import (  # noqa: E402
     MLP,
+    CausalSelfAttention,
     GPT2Config,
     GPT2Model,
     LayerNorm,
@@ -350,6 +351,7 @@ __all__ = [
     # Model components
     "GPT2Config",
     "GPT2Model",
+    "CausalSelfAttention",
     "LayerNorm",
     "Linear",
     "MLP",

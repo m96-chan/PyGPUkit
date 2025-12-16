@@ -169,54 +169,165 @@ class LayerNorm:
         return layernorm(x, self.weight, self.bias, self.eps)
 
 
-class TransformerBlock:
-    """Transformer block (MLP only, no attention for MVP).
+class CausalSelfAttention:
+    """Causal self-attention for GPT-2.
 
-    Structure: ln -> mlp -> residual
+    Structure:
+    - c_attn: [n_embd] -> [3*n_embd] (Q, K, V projection)
+    - Split into n_head heads
+    - Q @ K^T / sqrt(d_k) with causal mask
+    - Softmax
+    - Attention @ V
+    - c_proj: [n_embd] -> [n_embd]
     """
 
     def __init__(
         self,
-        ln_weight: GPUArray,
-        ln_bias: GPUArray,
+        c_attn_weight: GPUArray,
+        c_attn_bias: GPUArray | None,
+        c_proj_weight: GPUArray,
+        c_proj_bias: GPUArray | None,
+        n_head: int,
+        n_embd: int,
+    ):
+        """Initialize CausalSelfAttention.
+
+        Args:
+            c_attn_weight: QKV projection weight [3*n_embd, n_embd]
+            c_attn_bias: QKV projection bias [3*n_embd]
+            c_proj_weight: Output projection weight [n_embd, n_embd]
+            c_proj_bias: Output projection bias [n_embd]
+            n_head: Number of attention heads
+            n_embd: Embedding dimension
+        """
+        self.c_attn = Linear(c_attn_weight, c_attn_bias)
+        self.c_proj = Linear(c_proj_weight, c_proj_bias)
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.head_dim = n_embd // n_head
+
+    def __call__(self, x: GPUArray) -> GPUArray:
+        """Forward pass with causal self-attention.
+
+        Args:
+            x: Input tensor [seq_len, n_embd]
+
+        Returns:
+            Output tensor [seq_len, n_embd]
+        """
+        import numpy as np
+
+        seq_len = x.shape[0]
+
+        # QKV projection: [seq_len, n_embd] -> [seq_len, 3*n_embd]
+        qkv = self.c_attn(x)
+        qkv_np = qkv.to_numpy()
+
+        # Split into Q, K, V: each [seq_len, n_embd]
+        q_np = qkv_np[:, :self.n_embd]
+        k_np = qkv_np[:, self.n_embd:2*self.n_embd]
+        v_np = qkv_np[:, 2*self.n_embd:]
+
+        # Reshape for multi-head: [seq_len, n_head, head_dim]
+        q_np = q_np.reshape(seq_len, self.n_head, self.head_dim)
+        k_np = k_np.reshape(seq_len, self.n_head, self.head_dim)
+        v_np = v_np.reshape(seq_len, self.n_head, self.head_dim)
+
+        # Transpose to [n_head, seq_len, head_dim] for batched attention
+        q_np = q_np.transpose(1, 0, 2)
+        k_np = k_np.transpose(1, 0, 2)
+        v_np = v_np.transpose(1, 0, 2)
+
+        # Compute attention scores: [n_head, seq_len, seq_len]
+        scale = 1.0 / np.sqrt(self.head_dim)
+        # Q @ K^T: [n_head, seq_len, head_dim] @ [n_head, head_dim, seq_len]
+        attn_scores = np.matmul(q_np, k_np.transpose(0, 2, 1)) * scale
+
+        # Apply causal mask (lower triangular)
+        causal_mask = np.triu(np.ones((seq_len, seq_len)), k=1).astype(bool)
+        attn_scores[:, causal_mask] = -1e9
+
+        # Softmax over last dimension
+        attn_scores_max = attn_scores.max(axis=-1, keepdims=True)
+        attn_exp = np.exp(attn_scores - attn_scores_max)
+        attn_weights = attn_exp / attn_exp.sum(axis=-1, keepdims=True)
+
+        # Attention @ V: [n_head, seq_len, head_dim]
+        attn_output = np.matmul(attn_weights, v_np)
+
+        # Transpose back: [seq_len, n_head, head_dim]
+        attn_output = attn_output.transpose(1, 0, 2)
+
+        # Reshape to [seq_len, n_embd]
+        attn_output = attn_output.reshape(seq_len, self.n_embd)
+
+        # Output projection
+        out = from_numpy(attn_output.astype(np.float32))
+        out = self.c_proj(out)
+
+        return out
+
+
+class TransformerBlock:
+    """Full transformer block with attention and MLP.
+
+    Structure: ln_1 -> attention -> residual -> ln_2 -> mlp -> residual
+    """
+
+    def __init__(
+        self,
+        ln_1_weight: GPUArray,
+        ln_1_bias: GPUArray,
+        attn: CausalSelfAttention | None,
+        ln_2_weight: GPUArray,
+        ln_2_bias: GPUArray,
         mlp: MLP,
         eps: float = 1e-5,
     ):
         """Initialize TransformerBlock.
 
         Args:
-            ln_weight: LayerNorm weight [n_embd]
-            ln_bias: LayerNorm bias [n_embd]
+            ln_1_weight: First LayerNorm weight [n_embd]
+            ln_1_bias: First LayerNorm bias [n_embd]
+            attn: CausalSelfAttention module (None for MLP-only mode)
+            ln_2_weight: Second LayerNorm weight [n_embd]
+            ln_2_bias: Second LayerNorm bias [n_embd]
             mlp: MLP block
             eps: LayerNorm epsilon
         """
-        self.ln = LayerNorm(ln_weight, ln_bias, eps)
+        self.ln_1 = LayerNorm(ln_1_weight, ln_1_bias, eps)
+        self.attn = attn
+        self.ln_2 = LayerNorm(ln_2_weight, ln_2_bias, eps)
         self.mlp = mlp
 
     def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass: ln -> mlp -> residual
+        """Forward pass: ln_1 -> attn -> residual -> ln_2 -> mlp -> residual
 
         Args:
-            x: Input tensor [batch, n_embd]
+            x: Input tensor [seq_len, n_embd]
 
         Returns:
-            Output tensor [batch, n_embd]
+            Output tensor [seq_len, n_embd]
         """
-        # LayerNorm
-        h = self.ln(x)
-        # MLP
+        # Attention block (if available)
+        if self.attn is not None:
+            h = self.ln_1(x)
+            h = self.attn(h)
+            x = add(x, h)
+
+        # MLP block
+        h = self.ln_2(x)
         h = self.mlp(h)
-        # Residual
         return add(x, h)
 
 
 class GPT2Model:
-    """GPT-2 model (MLP only, no attention for MVP).
+    """GPT-2 model with full transformer blocks.
 
     Structure:
     - Token embedding
     - Position embedding
-    - Transformer blocks (MLP only)
+    - Transformer blocks (attention + MLP)
     - Final LayerNorm
     - LM head (tied to embedding)
     """
@@ -351,15 +462,14 @@ class GPT2Model:
 def load_gpt2_from_safetensors(
     model_path: str,
     config: GPT2Config | None = None,
+    load_attention: bool = True,
 ) -> GPT2Model:
     """Load GPT-2 model from safetensors file.
-
-    Note: This is an MVP that only loads MLP weights (no attention).
-    The model will not produce coherent text without attention.
 
     Args:
         model_path: Path to model.safetensors file
         config: Model configuration (defaults to GPT-2 small)
+        load_attention: Whether to load attention weights (default: True)
 
     Returns:
         GPT2Model instance
@@ -391,6 +501,12 @@ def load_gpt2_from_safetensors(
         arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape)
         return from_numpy(arr.copy())
 
+    def try_load_tensor(name: str) -> GPUArray | None:
+        """Try to load tensor, return None if not found."""
+        if name in st.tensor_names:
+            return load_tensor(name)
+        return None
+
     # Load embeddings
     wte = load_tensor("wte.weight")
     wpe = load_tensor("wpe.weight")
@@ -406,18 +522,42 @@ def load_gpt2_from_safetensors(
             # Skip blocks without MLP (shouldn't happen for GPT-2)
             continue
 
-        # LayerNorm 2 (before MLP in GPT-2)
+        # LayerNorm 1 (before attention)
+        ln_1_w = load_tensor(f"{prefix}ln_1.weight")
+        ln_1_b = load_tensor(f"{prefix}ln_1.bias")
+
+        # Attention (optional)
+        attn = None
+        if load_attention:
+            attn_c_attn_w_name = f"{prefix}attn.c_attn.weight"
+            if attn_c_attn_w_name in st.tensor_names:
+                attn_c_attn_w = load_tensor(attn_c_attn_w_name)
+                attn_c_attn_b = try_load_tensor(f"{prefix}attn.c_attn.bias")
+                attn_c_proj_w = load_tensor(f"{prefix}attn.c_proj.weight")
+                attn_c_proj_b = try_load_tensor(f"{prefix}attn.c_proj.bias")
+
+                attn = CausalSelfAttention(
+                    attn_c_attn_w, attn_c_attn_b,
+                    attn_c_proj_w, attn_c_proj_b,
+                    config.n_head, config.n_embd
+                )
+
+        # LayerNorm 2 (before MLP)
         ln_2_w = load_tensor(f"{prefix}ln_2.weight")
         ln_2_b = load_tensor(f"{prefix}ln_2.bias")
 
         # MLP
         mlp_c_fc_w = load_tensor(f"{prefix}mlp.c_fc.weight")
-        mlp_c_fc_b = load_tensor(f"{prefix}mlp.c_fc.bias")
+        mlp_c_fc_b = try_load_tensor(f"{prefix}mlp.c_fc.bias")
         mlp_c_proj_w = load_tensor(f"{prefix}mlp.c_proj.weight")
-        mlp_c_proj_b = load_tensor(f"{prefix}mlp.c_proj.bias")
+        mlp_c_proj_b = try_load_tensor(f"{prefix}mlp.c_proj.bias")
 
         mlp = MLP(mlp_c_fc_w, mlp_c_fc_b, mlp_c_proj_w, mlp_c_proj_b)
-        block = TransformerBlock(ln_2_w, ln_2_b, mlp, config.layer_norm_eps)
+        block = TransformerBlock(
+            ln_1_w, ln_1_b, attn,
+            ln_2_w, ln_2_b, mlp,
+            config.layer_norm_eps
+        )
         blocks.append(block)
 
     # Final LayerNorm

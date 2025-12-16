@@ -287,6 +287,61 @@ GPUArray linear(const GPUArray& input, const GPUArray& weight, const GPUArray* b
 }
 
 // ============================================================================
+// Softmax
+// ============================================================================
+
+GPUArray softmax(const GPUArray& input) {
+    if (input.ndim() != 2) {
+        throw std::runtime_error("softmax expects 2D input [batch, features]");
+    }
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float64 &&
+        input.dtype() != DataType::Float16 && input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("softmax only supports float types");
+    }
+
+    size_t batch_size = input.shape()[0];
+    size_t features = input.shape()[1];
+
+    GPUArray result(input.shape(), input.dtype());
+
+    // One block per row
+    int block_size = std::min(256, (int)((features + 31) / 32 * 32));
+    block_size = std::max(32, block_size);
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::softmax_f32_kernel<<<batch_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                batch_size, features);
+            break;
+        case DataType::Float64:
+            nn::softmax_f64_kernel<<<batch_size, block_size>>>(
+                static_cast<const double*>(input.data()),
+                static_cast<double*>(result.data()),
+                batch_size, features);
+            break;
+        case DataType::Float16:
+            nn::softmax_f16_kernel<<<batch_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                batch_size, features);
+            break;
+        case DataType::BFloat16:
+            nn::softmax_bf16_kernel<<<batch_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                batch_size, features);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("softmax kernel failed");
+    return result;
+}
+
+// ============================================================================
 // LayerNorm
 // ============================================================================
 
