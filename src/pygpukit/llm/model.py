@@ -941,7 +941,8 @@ class TransformerBlock:
 class CausalTransformerModel:
     """Unified causal transformer model.
 
-    Supports GPT-2 and LLaMA architectures through configuration.
+    The single runtime model for all architectures (GPT-2, LLaMA, Qwen3).
+    Model-specific behavior is controlled by the spec attribute.
     """
 
     def __init__(
@@ -952,13 +953,15 @@ class CausalTransformerModel:
         final_norm: Norm,
         lm_head: GPUArray | None = None,
         position_embed: GPUArray | None = None,  # For GPT-2 style
+        spec: ModelSpec | None = None,
     ):
         self.config = config
         self.embed_tokens = embed_tokens
         self.blocks = blocks
         self.final_norm = final_norm
-        self.lm_head = lm_head
+        self._lm_head = lm_head
         self.position_embed = position_embed
+        self.spec = spec
 
     def __call__(
         self,
@@ -1012,12 +1015,17 @@ class CausalTransformerModel:
             return hidden, present_key_values
         return hidden, None
 
+    @property
+    def lm_head(self) -> GPUArray | None:
+        """LM head weights (for backward compatibility)."""
+        return self._lm_head
+
     def get_logits(self, hidden: GPUArray) -> GPUArray:
         """Compute logits from hidden states."""
         hidden_np = hidden.to_numpy()
 
-        if self.lm_head is not None:
-            lm_head_np = self.lm_head.to_numpy()
+        if self._lm_head is not None:
+            lm_head_np = self._lm_head.to_numpy()
         else:
             # Tied embeddings
             lm_head_np = self.embed_tokens.to_numpy()
@@ -1090,204 +1098,58 @@ class CausalTransformerModel:
 
 
 # =============================================================================
-# Legacy Aliases (for backward compatibility)
+# Type Aliases
 # =============================================================================
 
+# GPT2Model and LlamaModel are now simple aliases for CausalTransformerModel.
+# All models use CausalTransformerModel as the single runtime type.
+GPT2Model = CausalTransformerModel
+LlamaModel = CausalTransformerModel
 
-# RMSNorm alias
-class RMSNorm(Norm):
-    """RMSNorm layer (legacy alias)."""
-
-    def __init__(self, weight: GPUArray, eps: float = 1e-5):
-        super().__init__(weight, None, "rmsnorm", eps)
-
-
-# LayerNorm alias
-class LayerNorm(Norm):
-    """LayerNorm layer (legacy alias)."""
-
-    def __init__(self, weight: GPUArray, bias: GPUArray, eps: float = 1e-5):
-        super().__init__(weight, bias, "layernorm", eps)
-
-
-# Legacy LlamaAttention alias
+# Legacy component aliases
+RMSNorm = Norm  # Use Norm with norm_type="rmsnorm"
+LayerNorm = Norm  # Use Norm with norm_type="layernorm"
 LlamaAttention = Attention
-
-
-# Legacy LlamaMLP
-class LlamaMLP(MLP):
-    """LLaMA MLP (legacy alias)."""
-
-    def __init__(
-        self,
-        gate_proj: GPUArray,
-        up_proj: GPUArray,
-        down_proj: GPUArray,
-    ):
-        # Create minimal config for SwiGLU
-        config = TransformerConfig(activation="silu")
-        super().__init__(config, gate_proj=gate_proj, up_proj=up_proj, down_proj=down_proj)
-
-
-# Legacy LlamaBlock alias
+LlamaMLP = MLP
 LlamaBlock = TransformerBlock
-
-
-# Legacy LlamaModel alias
-class LlamaModel(CausalTransformerModel):
-    """LLaMA model (legacy alias)."""
-
-    pass
-
-
-# Legacy GPT2Model alias
-class GPT2Model(CausalTransformerModel):
-    """GPT-2 model (legacy alias)."""
-
-    def lm_head(self, hidden: GPUArray) -> GPUArray:
-        """Legacy lm_head method."""
-        return self.get_logits(hidden)
+CausalSelfAttention = Attention
 
 
 # =============================================================================
-# Legacy Attention Classes (for backward compatibility)
-# =============================================================================
-
-
-class CausalSelfAttention(Attention):
-    """GPT-2 style causal self-attention (legacy alias)."""
-
-    def __init__(
-        self,
-        c_attn_weight: GPUArray,
-        c_attn_bias: GPUArray | None,
-        c_proj_weight: GPUArray,
-        c_proj_bias: GPUArray | None,
-        n_head: int,
-        n_embd: int,
-    ):
-        # GPT-2 uses combined QKV projection
-        # Split weights for unified Attention class
-        # c_attn: [3*n_embd, n_embd] -> Q, K, V each [n_embd, n_embd]
-        c_attn_np = c_attn_weight.to_numpy()
-        q_weight = from_numpy(c_attn_np[:n_embd].copy())
-        k_weight = from_numpy(c_attn_np[n_embd : 2 * n_embd].copy())
-        v_weight = from_numpy(c_attn_np[2 * n_embd :].copy())
-
-        q_bias, k_bias, v_bias = None, None, None
-        if c_attn_bias is not None:
-            c_attn_bias_np = c_attn_bias.to_numpy()
-            q_bias = from_numpy(c_attn_bias_np[:n_embd].copy())
-            k_bias = from_numpy(c_attn_bias_np[n_embd : 2 * n_embd].copy())
-            v_bias = from_numpy(c_attn_bias_np[2 * n_embd :].copy())
-
-        config = TransformerConfig(
-            hidden_size=n_embd,
-            num_heads=n_head,
-            num_kv_heads=n_head,  # MHA
-            norm_type="layernorm",
-            activation="gelu",
-            use_rope=False,
-            causal=True,
-        )
-
-        super().__init__(
-            q_weight,
-            k_weight,
-            v_weight,
-            c_proj_weight,
-            config,
-            q_bias,
-            k_bias,
-            v_bias,
-            c_proj_bias,
-        )
-
-
-# =============================================================================
-# Legacy MLP Class (for backward compatibility)
-# =============================================================================
-
-
-class _LegacyMLP(MLP):
-    """GPT-2 style MLP (legacy)."""
-
-    def __init__(
-        self,
-        c_fc_weight: GPUArray,
-        c_fc_bias: GPUArray | None,
-        c_proj_weight: GPUArray,
-        c_proj_bias: GPUArray | None,
-    ):
-        config = TransformerConfig(activation="gelu")
-        super().__init__(
-            config,
-            fc1_weight=c_fc_weight,
-            fc1_bias=c_fc_bias,
-            fc2_weight=c_proj_weight,
-            fc2_bias=c_proj_bias,
-        )
-
-
-# =============================================================================
-# Safetensors Loaders (thin wrappers over load_model_from_safetensors)
+# Safetensors Loaders
 # =============================================================================
 
 
 def load_gpt2_from_safetensors(
     model_path: str,
-    config: GPT2Config | None = None,  # Ignored, auto-detected
     dtype: str = "float32",
-) -> GPT2Model:
+) -> CausalTransformerModel:
     """Load GPT-2 model from safetensors file.
 
     Args:
         model_path: Path to model.safetensors
-        config: Ignored (auto-detected from tensor shapes)
         dtype: Weight dtype ("float32" or "float16")
 
     Returns:
-        GPT2Model instance (CausalTransformerModel)
+        CausalTransformerModel instance
     """
-    # Note: config parameter is ignored; config is auto-detected
-    model = load_model_from_safetensors(model_path, dtype=dtype, spec=GPT2_SPEC)
-    # Wrap as GPT2Model for backward compatibility
-    return GPT2Model(
-        model.config,
-        model.embed_tokens,
-        model.blocks,
-        model.final_norm,
-        model.lm_head,
-        model.position_embed,
-    )
+    return load_model_from_safetensors(model_path, dtype=dtype, spec=GPT2_SPEC)
 
 
 def load_llama_from_safetensors(
     model_path: str,
-    config: LlamaConfig | None = None,  # Ignored, auto-detected
     dtype: str = "float32",
-) -> LlamaModel:
+) -> CausalTransformerModel:
     """Load Llama model from safetensors file.
 
     Args:
         model_path: Path to model.safetensors
-        config: Ignored (auto-detected from tensor shapes)
         dtype: Weight dtype ("float32" or "float16")
 
     Returns:
-        LlamaModel instance (CausalTransformerModel)
+        CausalTransformerModel instance
     """
-    # Note: config parameter is ignored; config is auto-detected
-    model = load_model_from_safetensors(model_path, dtype=dtype, spec=LLAMA_SPEC)
-    # Wrap as LlamaModel for backward compatibility
-    return LlamaModel(
-        model.config,
-        model.embed_tokens,
-        model.blocks,
-        model.final_norm,
-        model.lm_head,
-        model.position_embed,
-    )
+    return load_model_from_safetensors(model_path, dtype=dtype, spec=LLAMA_SPEC)
 
 
 # =============================================================================
@@ -1331,20 +1193,17 @@ class Qwen3Config:
 
 def load_qwen3_from_safetensors(
     model_path: str,
-    config: Qwen3Config | None = None,  # Ignored, auto-detected
     dtype: str = "float32",
 ) -> CausalTransformerModel:
     """Load Qwen3 model from safetensors file.
 
     Args:
         model_path: Path to model.safetensors or model.safetensors.index.json
-        config: Ignored (auto-detected from tensor shapes)
         dtype: Weight dtype ("float32" or "float16")
 
     Returns:
         CausalTransformerModel instance
     """
-    # Note: config parameter is ignored; config is auto-detected
     return load_model_from_safetensors(model_path, dtype=dtype, spec=QWEN3_SPEC)
 
 
@@ -1621,5 +1480,5 @@ def load_model_from_safetensors(
         lm_head = load_tensor(spec.lm_head)
 
     return CausalTransformerModel(
-        transformer_config, embed_tokens, blocks, final_norm, lm_head, position_embed
+        transformer_config, embed_tokens, blocks, final_norm, lm_head, position_embed, spec
     )

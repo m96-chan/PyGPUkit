@@ -476,32 +476,33 @@ from pygpukit.llm.model import (  # noqa: E402
     MLP,
     MODEL_SPECS,
     QWEN3_SPEC,
+    # Components
     Attention,
     CausalSelfAttention,
+    # Core model
     CausalTransformerModel,
-    # Legacy GPT-2 aliases
+    # Legacy config classes (for reference)
     GPT2Config,
+    # Type aliases (GPT2Model = LlamaModel = CausalTransformerModel)
     GPT2Model,
     LayerNorm,
     Linear,
     LlamaAttention,
     LlamaBlock,
-    # Legacy Llama aliases
     LlamaConfig,
     LlamaMLP,
     LlamaModel,
-    # ModelSpec abstraction (v0.2.9)
+    # ModelSpec (v0.2.9)
     ModelSpec,
     Norm,
-    # Qwen3
     Qwen3Config,
     RMSNorm,
     TransformerBlock,
-    # Unified Transformer classes
     TransformerConfig,
     detect_model_spec,
     load_gpt2_from_safetensors,
     load_llama_from_safetensors,
+    # Loaders
     load_model_from_safetensors,
     load_qwen3_from_safetensors,
 )
@@ -515,37 +516,37 @@ __all__ = [
     "load_safetensors",
     # Tokenizer
     "Tokenizer",
-    # Unified Transformer (v0.2.9)
-    "TransformerConfig",
+    # Core Transformer (v0.2.9)
     "CausalTransformerModel",
+    "TransformerConfig",
     "Attention",
     "MLP",
     "Norm",
     "TransformerBlock",
     "Linear",
-    # ModelSpec abstraction (v0.2.9)
+    # ModelSpec (v0.2.9)
     "ModelSpec",
     "GPT2_SPEC",
     "LLAMA_SPEC",
     "QWEN3_SPEC",
     "MODEL_SPECS",
     "detect_model_spec",
+    # Loaders
     "load_model_from_safetensors",
-    # Legacy GPT-2 aliases
+    "load_gpt2_from_safetensors",
+    "load_llama_from_safetensors",
+    "load_qwen3_from_safetensors",
+    # Legacy config classes
     "GPT2Config",
+    "LlamaConfig",
+    "Qwen3Config",
+    # Type aliases (all point to unified types)
     "GPT2Model",
+    "LlamaModel",
     "CausalSelfAttention",
     "LayerNorm",
-    "load_gpt2_from_safetensors",
-    # Legacy Llama aliases
-    "LlamaConfig",
-    "LlamaModel",
     "LlamaAttention",
     "LlamaBlock",
     "LlamaMLP",
     "RMSNorm",
-    "load_llama_from_safetensors",
-    # Qwen3
-    "Qwen3Config",
-    "load_qwen3_from_safetensors",
 ]
