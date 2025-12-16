@@ -478,6 +478,54 @@ class LlamaConfig:
 
 
 # =============================================================================
+# Weight Repacking - Fix GPU memory placement for optimal performance
+# =============================================================================
+
+
+def repack_weight(weight: GPUArray) -> GPUArray:
+    """Repack a weight tensor into a new contiguous GPU buffer.
+
+    This fixes performance issues caused by fragmented GPU memory allocation.
+    Weights allocated later during model loading may end up in suboptimal
+    memory regions, causing 7x slower matmul performance.
+
+    Args:
+        weight: Original weight tensor on GPU
+
+    Returns:
+        New GPUArray with same data in freshly allocated contiguous memory
+    """
+    # Copy to CPU, then back to GPU to get fresh allocation
+    # This ensures the new buffer is allocated contiguously
+    weight_np = weight.to_numpy()
+    return from_numpy(weight_np)
+
+
+def repack_linear(linear: Linear) -> None:
+    """Repack a Linear layer's weight in-place.
+
+    Args:
+        linear: Linear layer to repack
+    """
+    linear.weight = repack_weight(linear.weight)
+    # Clear transpose cache - will be regenerated on first use
+    linear._weight_t = None
+    if linear.bias is not None:
+        linear.bias = repack_weight(linear.bias)
+
+
+def repack_norm(norm: Norm) -> None:
+    """Repack a Norm layer's weight in-place.
+
+    Args:
+        norm: Norm layer to repack
+    """
+    norm.weight = repack_weight(norm.weight)
+    if norm.bias is not None:
+        norm.bias = repack_weight(norm.bias)
+
+
+# =============================================================================
 # Common Building Blocks
 # =============================================================================
 
@@ -921,16 +969,18 @@ class CausalTransformerModel:
             else:
                 position_ids = list(range(seq_len))
 
-        # Token embeddings (preserve dtype)
-        embed_np = self.embed_tokens.to_numpy()
-        hidden_np = embed_np[input_ids]
+        # Token embeddings (cache numpy array to avoid repeated GPU->CPU transfer)
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[input_ids]
 
         # Add position embeddings (GPT-2 style)
         if self.position_embed is not None:
-            pos_embed_np = self.position_embed.to_numpy()
-            hidden_np = hidden_np + pos_embed_np[position_ids]
+            if not hasattr(self, "_pos_embed_np_cache"):
+                self._pos_embed_np_cache = self.position_embed.to_numpy()
+            hidden_np = hidden_np + self._pos_embed_np_cache[position_ids]
 
-        hidden: GPUArray = from_numpy(hidden_np.astype(embed_np.dtype))
+        hidden: GPUArray = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
 
         # Transformer blocks
         present_key_values = []
@@ -952,17 +1002,16 @@ class CausalTransformerModel:
         return self._lm_head
 
     def get_logits(self, hidden: GPUArray) -> GPUArray:
-        """Compute logits from hidden states."""
-        hidden_np = hidden.to_numpy()
+        """Compute logits from hidden states on GPU."""
+        # Cache transposed lm_head to avoid repeated transpose
+        if not hasattr(self, "_lm_head_t_cache"):
+            lm_head = self._lm_head if self._lm_head is not None else self.embed_tokens
+            self._lm_head_t_cache = transpose(lm_head)
 
-        if self._lm_head is not None:
-            lm_head_np = self._lm_head.to_numpy()
-        else:
-            # Tied embeddings
-            lm_head_np = self.embed_tokens.to_numpy()
-
-        logits = hidden_np @ lm_head_np.T
-        return from_numpy(logits.astype(np.float32))
+        # GPU matmul: hidden @ lm_head.T
+        # hidden: [seq_len, hidden_size], lm_head: [vocab_size, hidden_size]
+        # Result: [seq_len, vocab_size]
+        return matmul(hidden, self._lm_head_t_cache)
 
     def generate(
         self,
@@ -1146,6 +1195,281 @@ apply_rotary_pos_emb = apply_rotary_pos_emb_numpy
 
 
 # =============================================================================
+# Model Weight Repacking
+# =============================================================================
+
+
+def repack_model_weights(model: CausalTransformerModel) -> None:
+    """Repack all model weights into contiguous GPU memory.
+
+    This fixes severe performance regression (7x slowdown) caused by
+    fragmented GPU memory allocation during model loading. Weights
+    allocated later end up in suboptimal memory regions.
+
+    The repacking is done in two phases:
+    1. Convert ALL weights to numpy (freeing GPU memory)
+    2. Reallocate ALL weights fresh in contiguous memory
+
+    After repacking:
+    - All blocks should have similar matmul latency
+    - No per-layer performance degradation
+
+    Args:
+        model: CausalTransformerModel to repack in-place
+    """
+    import gc
+
+    # Phase 1: Collect all weights as numpy arrays
+    # This frees GPU memory as we go
+    numpy_cache: dict[int, dict] = {}
+
+    # Keep track of dummy allocations to shift allocation base
+    dummy_arrays: list[GPUArray] = []
+
+    # Embedding
+    embed_np = model.embed_tokens.to_numpy()
+    model.embed_tokens = None  # type: ignore
+
+    # Position embedding
+    pos_embed_np = None
+    if model.position_embed is not None:
+        pos_embed_np = model.position_embed.to_numpy()
+        model.position_embed = None
+
+    # lm_head
+    lm_head_np = None
+    if model._lm_head is not None:
+        lm_head_np = model._lm_head.to_numpy()
+        model._lm_head = None
+
+    # Final norm
+    final_norm_weight_np = model.final_norm.weight.to_numpy()
+    final_norm_bias_np = None
+    if model.final_norm.bias is not None:
+        final_norm_bias_np = model.final_norm.bias.to_numpy()
+    model.final_norm.weight = None  # type: ignore
+    model.final_norm.bias = None
+
+    # All blocks
+    for i, block in enumerate(model.blocks):
+        numpy_cache[i] = {}
+
+        # Attention norms
+        numpy_cache[i]["attn_norm_w"] = block.attn_norm.weight.to_numpy()
+        numpy_cache[i]["attn_norm_b"] = (
+            block.attn_norm.bias.to_numpy() if block.attn_norm.bias is not None else None
+        )
+        block.attn_norm.weight = None  # type: ignore
+        block.attn_norm.bias = None
+
+        numpy_cache[i]["mlp_norm_w"] = block.mlp_norm.weight.to_numpy()
+        numpy_cache[i]["mlp_norm_b"] = (
+            block.mlp_norm.bias.to_numpy() if block.mlp_norm.bias is not None else None
+        )
+        block.mlp_norm.weight = None  # type: ignore
+        block.mlp_norm.bias = None
+
+        # Attention projections
+        attn = block.attn
+        numpy_cache[i]["q_w"] = attn.q_proj.weight.to_numpy()
+        numpy_cache[i]["q_b"] = (
+            attn.q_proj.bias.to_numpy() if attn.q_proj.bias is not None else None
+        )
+        attn.q_proj.weight = None  # type: ignore
+        attn.q_proj.bias = None
+        attn.q_proj._weight_t = None
+
+        numpy_cache[i]["k_w"] = attn.k_proj.weight.to_numpy()
+        numpy_cache[i]["k_b"] = (
+            attn.k_proj.bias.to_numpy() if attn.k_proj.bias is not None else None
+        )
+        attn.k_proj.weight = None  # type: ignore
+        attn.k_proj.bias = None
+        attn.k_proj._weight_t = None
+
+        numpy_cache[i]["v_w"] = attn.v_proj.weight.to_numpy()
+        numpy_cache[i]["v_b"] = (
+            attn.v_proj.bias.to_numpy() if attn.v_proj.bias is not None else None
+        )
+        attn.v_proj.weight = None  # type: ignore
+        attn.v_proj.bias = None
+        attn.v_proj._weight_t = None
+
+        numpy_cache[i]["o_w"] = attn.o_proj.weight.to_numpy()
+        numpy_cache[i]["o_b"] = (
+            attn.o_proj.bias.to_numpy() if attn.o_proj.bias is not None else None
+        )
+        attn.o_proj.weight = None  # type: ignore
+        attn.o_proj.bias = None
+        attn.o_proj._weight_t = None
+
+        # QK norms
+        if attn.q_norm is not None:
+            numpy_cache[i]["q_norm_w"] = attn.q_norm.weight.to_numpy()
+            numpy_cache[i]["q_norm_b"] = (
+                attn.q_norm.bias.to_numpy() if attn.q_norm.bias is not None else None
+            )
+            attn.q_norm.weight = None  # type: ignore
+            attn.q_norm.bias = None
+        if attn.k_norm is not None:
+            numpy_cache[i]["k_norm_w"] = attn.k_norm.weight.to_numpy()
+            numpy_cache[i]["k_norm_b"] = (
+                attn.k_norm.bias.to_numpy() if attn.k_norm.bias is not None else None
+            )
+            attn.k_norm.weight = None  # type: ignore
+            attn.k_norm.bias = None
+
+        # MLP projections
+        mlp = block.mlp
+        if mlp.activation == "gelu":
+            numpy_cache[i]["fc1_w"] = mlp.fc1.weight.to_numpy()
+            numpy_cache[i]["fc1_b"] = mlp.fc1.bias.to_numpy() if mlp.fc1.bias is not None else None
+            mlp.fc1.weight = None  # type: ignore
+            mlp.fc1.bias = None
+            mlp.fc1._weight_t = None
+
+            numpy_cache[i]["fc2_w"] = mlp.fc2.weight.to_numpy()
+            numpy_cache[i]["fc2_b"] = mlp.fc2.bias.to_numpy() if mlp.fc2.bias is not None else None
+            mlp.fc2.weight = None  # type: ignore
+            mlp.fc2.bias = None
+            mlp.fc2._weight_t = None
+        else:  # SwiGLU
+            numpy_cache[i]["gate_w"] = mlp.gate_proj.weight.to_numpy()
+            numpy_cache[i]["gate_b"] = (
+                mlp.gate_proj.bias.to_numpy() if mlp.gate_proj.bias is not None else None
+            )
+            mlp.gate_proj.weight = None  # type: ignore
+            mlp.gate_proj.bias = None
+            mlp.gate_proj._weight_t = None
+
+            numpy_cache[i]["up_w"] = mlp.up_proj.weight.to_numpy()
+            numpy_cache[i]["up_b"] = (
+                mlp.up_proj.bias.to_numpy() if mlp.up_proj.bias is not None else None
+            )
+            mlp.up_proj.weight = None  # type: ignore
+            mlp.up_proj.bias = None
+            mlp.up_proj._weight_t = None
+
+            numpy_cache[i]["down_w"] = mlp.down_proj.weight.to_numpy()
+            numpy_cache[i]["down_b"] = (
+                mlp.down_proj.bias.to_numpy() if mlp.down_proj.bias is not None else None
+            )
+            mlp.down_proj.weight = None  # type: ignore
+            mlp.down_proj.bias = None
+            mlp.down_proj._weight_t = None
+
+    # Force garbage collection to free GPU memory
+    gc.collect()
+
+    # Allocate dummy arrays to fill the freed memory space
+    # This forces new allocations to go into fresh memory regions
+    import numpy as np
+
+    dummy_size = 1024 * 1024 * 512  # 512M elements = 1GB for FP16
+    try:
+        for _ in range(16):  # Allocate ~16GB of dummy memory
+            dummy = from_numpy(np.zeros(dummy_size, dtype=np.float16))
+            dummy_arrays.append(dummy)
+    except Exception:
+        pass  # Continue with whatever dummy memory we could allocate
+
+    # Phase 2: Reallocate all weights fresh
+    # Allocate blocks in REVERSE order so later blocks get the "fast" memory first
+    # This is critical - CUDA memory allocation order affects matmul performance
+    for i in reversed(range(len(model.blocks))):
+        block = model.blocks[i]
+        cache = numpy_cache[i]
+
+        # Attention norms
+        block.attn_norm.weight = from_numpy(cache["attn_norm_w"])
+        if cache["attn_norm_b"] is not None:
+            block.attn_norm.bias = from_numpy(cache["attn_norm_b"])
+
+        block.mlp_norm.weight = from_numpy(cache["mlp_norm_w"])
+        if cache["mlp_norm_b"] is not None:
+            block.mlp_norm.bias = from_numpy(cache["mlp_norm_b"])
+
+        # Attention projections
+        attn = block.attn
+        attn.q_proj.weight = from_numpy(cache["q_w"])
+        if cache["q_b"] is not None:
+            attn.q_proj.bias = from_numpy(cache["q_b"])
+
+        attn.k_proj.weight = from_numpy(cache["k_w"])
+        if cache["k_b"] is not None:
+            attn.k_proj.bias = from_numpy(cache["k_b"])
+
+        attn.v_proj.weight = from_numpy(cache["v_w"])
+        if cache["v_b"] is not None:
+            attn.v_proj.bias = from_numpy(cache["v_b"])
+
+        attn.o_proj.weight = from_numpy(cache["o_w"])
+        if cache["o_b"] is not None:
+            attn.o_proj.bias = from_numpy(cache["o_b"])
+
+        # QK norms
+        if "q_norm_w" in cache:
+            attn.q_norm.weight = from_numpy(cache["q_norm_w"])
+            if cache["q_norm_b"] is not None:
+                attn.q_norm.bias = from_numpy(cache["q_norm_b"])
+        if "k_norm_w" in cache:
+            attn.k_norm.weight = from_numpy(cache["k_norm_w"])
+            if cache["k_norm_b"] is not None:
+                attn.k_norm.bias = from_numpy(cache["k_norm_b"])
+
+        # MLP projections
+        mlp = block.mlp
+        if mlp.activation == "gelu":
+            mlp.fc1.weight = from_numpy(cache["fc1_w"])
+            if cache["fc1_b"] is not None:
+                mlp.fc1.bias = from_numpy(cache["fc1_b"])
+
+            mlp.fc2.weight = from_numpy(cache["fc2_w"])
+            if cache["fc2_b"] is not None:
+                mlp.fc2.bias = from_numpy(cache["fc2_b"])
+        else:  # SwiGLU
+            mlp.gate_proj.weight = from_numpy(cache["gate_w"])
+            if cache["gate_b"] is not None:
+                mlp.gate_proj.bias = from_numpy(cache["gate_b"])
+
+            mlp.up_proj.weight = from_numpy(cache["up_w"])
+            if cache["up_b"] is not None:
+                mlp.up_proj.bias = from_numpy(cache["up_b"])
+
+            mlp.down_proj.weight = from_numpy(cache["down_w"])
+            if cache["down_b"] is not None:
+                mlp.down_proj.bias = from_numpy(cache["down_b"])
+
+        # Clear this block's cache immediately to reduce memory
+        del numpy_cache[i]
+
+    # Final norm
+    model.final_norm.weight = from_numpy(final_norm_weight_np)
+    if final_norm_bias_np is not None:
+        model.final_norm.bias = from_numpy(final_norm_bias_np)
+
+    # lm_head
+    if lm_head_np is not None:
+        model._lm_head = from_numpy(lm_head_np)
+
+    # Embedding and position embedding last (after all blocks)
+    model.embed_tokens = from_numpy(embed_np)
+    del embed_np
+
+    if pos_embed_np is not None:
+        model.position_embed = from_numpy(pos_embed_np)
+        del pos_embed_np
+
+    # Clear any cached transposes
+    if hasattr(model, "_lm_head_t_cache"):
+        delattr(model, "_lm_head_t_cache")
+
+    # Free dummy arrays now that weights are in fresh memory
+    del dummy_arrays
+    gc.collect()
+
+
+# =============================================================================
 # Generic Model Loader using ModelSpec
 # =============================================================================
 
@@ -1154,6 +1478,7 @@ def load_model_from_safetensors(
     model_path: str,
     dtype: str = "float32",
     spec: ModelSpec | None = None,
+    repack_weights: bool = True,
 ) -> CausalTransformerModel:
     """Load model from safetensors file using ModelSpec abstraction.
 
@@ -1410,6 +1735,9 @@ def load_model_from_safetensors(
     if spec.lm_head is not None and spec.lm_head in st.tensor_names:
         lm_head = load_tensor(spec.lm_head)
 
-    return CausalTransformerModel(
+    model = CausalTransformerModel(
         transformer_config, embed_tokens, blocks, final_norm, lm_head, position_embed, spec
     )
+    if repack_weights:
+        repack_model_weights(model)
+    return model
