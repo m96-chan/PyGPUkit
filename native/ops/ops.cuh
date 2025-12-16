@@ -220,5 +220,64 @@ void reshape_and_cache(
 // Returns: [num_blocks, num_kv_heads, block_size, head_dim] FP16
 GPUArray allocate_kv_cache(int num_blocks, int num_kv_heads, int block_size, int head_dim);
 
+// ============================================================================
+// Continuous Batching (#86)
+// ============================================================================
+
+// Gather token embeddings for a batch
+// token_ids: [total_tokens] int32
+// embeddings: [vocab_size, hidden_size] FP16
+// Returns: [total_tokens, hidden_size] FP16
+GPUArray gather_embeddings(
+    const GPUArray& token_ids,
+    const GPUArray& embeddings,
+    int total_tokens
+);
+
+// Scatter last-token logits from batch output
+// logits: [batch_tokens, vocab_size] FP16
+// Returns: [batch_size, vocab_size] FP16
+GPUArray scatter_last_token_logits(
+    const GPUArray& logits,
+    const GPUArray& seq_start_positions,
+    const GPUArray& seq_lens,
+    int batch_size,
+    int vocab_size
+);
+
+// Prepare position IDs for rotary embeddings
+// Returns: [total_tokens] int32
+GPUArray prepare_position_ids(
+    const GPUArray& seq_start_positions,
+    const GPUArray& seq_context_lens,
+    const GPUArray& is_prefill,
+    const GPUArray& input_lens,
+    int batch_size,
+    int total_tokens
+);
+
+// Argmax sampling from logits
+// logits: [batch_size, vocab_size] FP16
+// Returns: [batch_size] int32 - sampled token IDs
+GPUArray argmax_sample(
+    const GPUArray& logits,
+    int batch_size,
+    int vocab_size
+);
+
+// Check for EOS tokens
+// tokens: [batch_size] int32
+// Returns: [batch_size] int32 - 1 if EOS, 0 otherwise
+GPUArray check_eos(const GPUArray& tokens, int eos_token_id);
+
+// Compute exclusive prefix sum (for seq_start_positions)
+GPUArray compute_cumsum(const GPUArray& input);
+
+// Prepare batch inputs from Python lists
+// Returns: (token_ids GPUArray, total_tokens count)
+std::pair<GPUArray, int> prepare_batch_inputs(
+    const std::vector<std::vector<int>>& token_lists
+);
+
 } // namespace ops
 } // namespace pygpukit
