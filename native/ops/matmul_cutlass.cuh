@@ -47,15 +47,18 @@
 #include "matmul_cutlass_sm90.cuh"
 #endif
 
-// SM100 (Blackwell datacenter: B200) - CUTLASS 4.x with 2SM MMA
-#if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-#include "matmul_cutlass_sm100.cuh"
-#endif
-
-// SM120 (Blackwell GeForce: RTX 5090) - CUTLASS 4.x with CLC scheduler
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
-#include "matmul_cutlass_sm120.cuh"
-#endif
+// NOTE: SM100/SM120 CUTLASS 4.x kernels are DISABLED for now.
+// CUTLASS 4.3.3's SM120 builder only supports F8F6F4 (FP8/FP6/FP4) MMA,
+// NOT FP32/FP16/BF16. SM100 has similar limitations.
+// These will be re-enabled when narrow precision support is added.
+//
+// #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
+// #include "matmul_cutlass_sm100.cuh"
+// #endif
+//
+// #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
+// #include "matmul_cutlass_sm120.cuh"
+// #endif
 
 namespace pygpukit {
 namespace ops {
@@ -586,19 +589,10 @@ inline cudaError_t gemm_tf32(
     // Runtime SM dispatch with tiered kernel selection
     int sm_tier = get_sm_tier();
 
-    // SM120+ (Blackwell GeForce: RTX 5090) - CUTLASS 4.x with CLC scheduler
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
-    if (sm_tier >= 120) {
-        return cutlass_gemm_sm120::gemm_tf32_sm120(A, B, C, M, N, K, alpha, beta, stream);
-    }
-#endif
-
-    // SM100+ (Blackwell datacenter: B200) - CUTLASS 4.x with 2SM MMA
-#if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-    if (sm_tier >= 100) {
-        return cutlass_gemm_sm100::gemm_tf32_sm100(A, B, C, M, N, K, alpha, beta, stream);
-    }
-#endif
+    // NOTE: SM100/SM120 CUTLASS 4.x kernels are DISABLED.
+    // CUTLASS 4.3.3's SM120 builder only supports F8F6F4 (FP8/FP6/FP4) MMA,
+    // NOT FP32/FP16/BF16. SM100 has similar limitations.
+    // Re-enable when narrow precision (FP8) support is added.
 
     // SM90+ (Hopper: H100) - CUTLASS 3.x with WGMMA/TMA
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
@@ -607,7 +601,7 @@ inline cudaError_t gemm_tf32(
     }
 #endif
 
-    // Fallback to CUTLASS 2.x API for SM80-89
+    // Fallback to CUTLASS 2.x API for SM80-89 (and SM100/SM120 until FP8 support)
     // Transpose trick: C^T (NxM col) = B^T (NxK col) @ A^T (KxM col)
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
@@ -642,19 +636,8 @@ inline cudaError_t gemm_fp16(
     // Runtime SM dispatch with tiered kernel selection
     int sm_tier = get_sm_tier();
 
-    // SM120+ (Blackwell GeForce: RTX 5090)
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
-    if (sm_tier >= 120) {
-        return cutlass_gemm_sm120::gemm_fp16_sm120(A, B, C, M, N, K, alpha, beta, stream);
-    }
-#endif
-
-    // SM100+ (Blackwell datacenter: B200)
-#if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-    if (sm_tier >= 100) {
-        return cutlass_gemm_sm100::gemm_fp16_sm100(A, B, C, M, N, K, alpha, beta, stream);
-    }
-#endif
+    // NOTE: SM100/SM120 CUTLASS 4.x kernels are DISABLED.
+    // CUTLASS 4.3.3's SM120 builder only supports F8F6F4 (FP8/FP6/FP4) MMA.
 
     // SM90+ (Hopper: H100)
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
@@ -663,7 +646,7 @@ inline cudaError_t gemm_fp16(
     }
 #endif
 
-    // Fallback to CUTLASS 2.x API for SM80-89
+    // Fallback to CUTLASS 2.x API for SM80-89 (and SM100/SM120 until FP8 support)
     // Transpose trick: C^T = B^T @ A^T
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
@@ -698,19 +681,8 @@ inline cudaError_t gemm_bf16(
     // Runtime SM dispatch with tiered kernel selection
     int sm_tier = get_sm_tier();
 
-    // SM120+ (Blackwell GeForce: RTX 5090)
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
-    if (sm_tier >= 120) {
-        return cutlass_gemm_sm120::gemm_bf16_sm120(A, B, C, M, N, K, alpha, beta, stream);
-    }
-#endif
-
-    // SM100+ (Blackwell datacenter: B200)
-#if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-    if (sm_tier >= 100) {
-        return cutlass_gemm_sm100::gemm_bf16_sm100(A, B, C, M, N, K, alpha, beta, stream);
-    }
-#endif
+    // NOTE: SM100/SM120 CUTLASS 4.x kernels are DISABLED.
+    // CUTLASS 4.3.3's SM120 builder only supports F8F6F4 (FP8/FP6/FP4) MMA.
 
     // SM90+ (Hopper: H100)
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
@@ -719,7 +691,7 @@ inline cudaError_t gemm_bf16(
     }
 #endif
 
-    // Fallback to CUTLASS 2.x API for SM80-89
+    // Fallback to CUTLASS 2.x API for SM80-89 (and SM100/SM120 until FP8 support)
     // Transpose trick: C^T = B^T @ A^T
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
