@@ -441,11 +441,20 @@ class Attention:
             k_2d = self.k_norm(k_2d)
             k = reshape_copy(k_2d, k_shape)
 
-        # Apply RoPE on GPU
+        # Apply RoPE on GPU (requires FP32)
         if self.config.use_rope:
             cos = from_numpy(self._cos[position_ids].astype(np.float32))
             sin = from_numpy(self._sin[position_ids].astype(np.float32))
-            rope_inplace(q, k, cos, sin)
+            # RoPE only supports FP32, convert if needed
+            orig_dtype = q.dtype
+            if orig_dtype != "float32":
+                q_f32 = from_numpy(q.to_numpy().astype(np.float32))
+                k_f32 = from_numpy(k.to_numpy().astype(np.float32))
+                rope_inplace(q_f32, k_f32, cos, sin)
+                q = from_numpy(q_f32.to_numpy().astype(np.float16))
+                k = from_numpy(k_f32.to_numpy().astype(np.float16))
+            else:
+                rope_inplace(q, k, cos, sin)
 
         # Convert to numpy for KV cache
         k_np = k.to_numpy()
@@ -467,10 +476,11 @@ class Attention:
             k_expanded = k_np
             v_expanded = v_np
 
-        # GPU SDPA
+        # GPU SDPA (use same dtype as q)
         q_t = transpose_3d_021(q)
-        k_t = from_numpy(k_expanded.transpose(1, 0, 2).astype(np.float32))
-        v_t = from_numpy(v_expanded.transpose(1, 0, 2).astype(np.float32))
+        kv_dtype = k_np.dtype  # Preserve dtype from KV cache
+        k_t = from_numpy(k_expanded.transpose(1, 0, 2).astype(kv_dtype))
+        v_t = from_numpy(v_expanded.transpose(1, 0, 2).astype(kv_dtype))
 
         attn_output = sdpa_causal(q_t, k_t, v_t)
 
@@ -501,17 +511,19 @@ class Attention:
         v = v.reshape(seq_len, self.num_kv_heads, self.head_dim)
 
         # QK Norm (Qwen3 style) - applied per head before RoPE
-        # Reshape to 2D for norm, then back to 3D
+        # Reshape to 2D for norm, then back to 3D (preserve dtype)
         if self.q_norm is not None:
             q_shape = q.shape
+            q_dtype = q.dtype
             q_2d = q.reshape(seq_len * self.num_heads, self.head_dim)
-            q_2d = self.q_norm(from_numpy(q_2d.astype(np.float32))).to_numpy()
-            q = q_2d.reshape(q_shape)
+            q_2d = self.q_norm(from_numpy(q_2d)).to_numpy()
+            q = q_2d.reshape(q_shape).astype(q_dtype)
         if self.k_norm is not None:
             k_shape = k.shape
+            k_dtype = k.dtype
             k_2d = k.reshape(seq_len * self.num_kv_heads, self.head_dim)
-            k_2d = self.k_norm(from_numpy(k_2d.astype(np.float32))).to_numpy()
-            k = k_2d.reshape(k_shape)
+            k_2d = self.k_norm(from_numpy(k_2d)).to_numpy()
+            k = k_2d.reshape(k_shape).astype(k_dtype)
 
         # Apply RoPE (CPU)
         if self.config.use_rope:
@@ -565,8 +577,10 @@ class Attention:
         attn_output = attn_output.transpose(1, 0, 2)
         attn_output = attn_output.reshape(seq_len, self.num_heads * self.head_dim)
 
-        # Output projection (GPU)
-        out = from_numpy(attn_output.astype(np.float32))
+        # Output projection (GPU) - use same dtype as weights
+        weight_dtype = str(self.o_proj.weight.dtype)
+        out_dtype = np.float16 if weight_dtype == "float16" else np.float32
+        out = from_numpy(attn_output.astype(out_dtype))
         return self.o_proj(out), present_kv
 
 
@@ -727,16 +741,16 @@ class CausalTransformerModel:
             else:
                 position_ids = list(range(seq_len))
 
-        # Token embeddings
+        # Token embeddings (preserve dtype)
         embed_np = self.embed_tokens.to_numpy()
-        hidden = embed_np[input_ids].astype(np.float32)
+        hidden = embed_np[input_ids]
 
         # Add position embeddings (GPT-2 style)
         if self.position_embed is not None:
             pos_embed_np = self.position_embed.to_numpy()
             hidden = hidden + pos_embed_np[position_ids]
 
-        hidden = from_numpy(hidden)
+        hidden = from_numpy(hidden.astype(embed_np.dtype))
 
         # Transformer blocks
         present_key_values = []
@@ -1224,12 +1238,14 @@ class Qwen3Config:
 def load_qwen3_from_safetensors(
     model_path: str,
     config: Qwen3Config | None = None,
+    dtype: str = "float32",
 ) -> CausalTransformerModel:
     """Load Qwen3 model from safetensors file (single or sharded).
 
     Args:
         model_path: Path to model.safetensors or model.safetensors.index.json
         config: Model configuration (auto-detected if None)
+        dtype: Weight dtype ("float32" or "float16")
 
     Returns:
         CausalTransformerModel instance
@@ -1237,6 +1253,7 @@ def load_qwen3_from_safetensors(
     from pygpukit.llm import load_safetensors
 
     st = load_safetensors(model_path)
+    target_dtype = np.float16 if dtype == "float16" else np.float32
 
     # Auto-detect config
     if config is None:
@@ -1274,16 +1291,17 @@ def load_qwen3_from_safetensors(
     def load_tensor(name: str) -> GPUArray:
         data = st.tensor_bytes(name)
         info = st.tensor_info(name)
-        if info.dtype == 2:  # BFloat16
+        if info.dtype == 2:  # BFloat16 -> target dtype
             arr = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
+            # BF16 to FP32 first, then cast to target
             arr_f32 = np.empty(arr.shape, dtype=np.float32)
             arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
-            return from_numpy(arr_f32)
+            return from_numpy(arr_f32.astype(target_dtype))
         else:
             dtype_map = {0: np.float32, 1: np.float16, 3: np.float64}
             np_dtype = dtype_map.get(info.dtype, np.float32)
             arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape)
-            return from_numpy(arr.copy().astype(np.float32))
+            return from_numpy(arr.copy().astype(target_dtype))
 
     # Embeddings
     embed_tokens = load_tensor("model.embed_tokens.weight")

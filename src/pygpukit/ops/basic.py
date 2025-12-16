@@ -1093,7 +1093,6 @@ def sdpa_causal(
         raise ValueError("sdpa_causal: Q, K, V must have same dtype")
 
     n_heads, q_len, head_dim = Q.shape
-    kv_len = K.shape[1]
 
     if K.shape[0] != n_heads or V.shape[0] != n_heads:
         raise ValueError("sdpa_causal: n_heads mismatch")
@@ -1205,7 +1204,6 @@ def _rope_inplace_cpu(
     sin: GPUArray,
 ) -> None:
     """CPU implementation of rope_inplace."""
-    import numpy as np
 
     q_np = q.to_numpy()
     k_np = k.to_numpy()
@@ -1379,8 +1377,12 @@ def transpose_3d_021(input: GPUArray) -> GPUArray:
 
     backend = get_backend()
 
+    # Native transpose_3d_021 only supports float32, fall back to CPU for other dtypes
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _transpose_3d_021_native(input)
+        if str(input.dtype) == "float32":
+            return _transpose_3d_021_native(input)
+        else:
+            return _transpose_3d_021_cpu(input)
     else:
         return _transpose_3d_021_cpu(input)
 
@@ -1427,14 +1429,16 @@ def reshape_copy(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
         output_size *= dim
 
     if input_size != output_size:
-        raise ValueError(
-            f"reshape_copy: total size mismatch ({input_size} vs {output_size})"
-        )
+        raise ValueError(f"reshape_copy: total size mismatch ({input_size} vs {output_size})")
 
     backend = get_backend()
 
+    # Native reshape_copy only supports float32, fall back to CPU for other dtypes
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _reshape_copy_native(input, new_shape)
+        if str(input.dtype) == "float32":
+            return _reshape_copy_native(input, new_shape)
+        else:
+            return _reshape_copy_cpu(input, new_shape)
     else:
         return _reshape_copy_cpu(input, new_shape)
 
