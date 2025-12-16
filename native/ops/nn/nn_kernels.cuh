@@ -1368,6 +1368,118 @@ __global__ void rope_f32_kernel(
     }
 }
 
+// FP16 RoPE kernel (compute in FP32 for precision, store in FP16)
+__global__ void rope_f16_kernel(
+    __half* __restrict__ q,      // [seq_len, n_heads_q, head_dim] - modified in-place
+    __half* __restrict__ k,      // [seq_len, n_heads_k, head_dim] - modified in-place
+    const __half* __restrict__ cos,  // [seq_len, head_dim]
+    const __half* __restrict__ sin,  // [seq_len, head_dim]
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = __half2float(q[base + d]);
+        float q1 = __half2float(q[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __half2float(cos[cos_idx]);
+        float sn = __half2float(sin[cos_idx]);
+
+        q[base + d] = __float2half(q0 * c - q1 * sn);
+        q[base + d + half_dim] = __float2half(q1 * c + q0 * sn);
+    }
+
+    // Process K tensor
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = __half2float(k[base + d]);
+        float k1 = __half2float(k[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __half2float(cos[cos_idx]);
+        float sn = __half2float(sin[cos_idx]);
+
+        k[base + d] = __float2half(k0 * c - k1 * sn);
+        k[base + d + half_dim] = __float2half(k1 * c + k0 * sn);
+    }
+}
+
+// BF16 RoPE kernel (compute in FP32 for precision, store in BF16)
+__global__ void rope_bf16_kernel(
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ cos,
+    const __nv_bfloat16* __restrict__ sin,
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = __bfloat162float(q[base + d]);
+        float q1 = __bfloat162float(q[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __bfloat162float(cos[cos_idx]);
+        float sn = __bfloat162float(sin[cos_idx]);
+
+        q[base + d] = __float2bfloat16(q0 * c - q1 * sn);
+        q[base + d + half_dim] = __float2bfloat16(q1 * c + q0 * sn);
+    }
+
+    // Process K tensor
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = __bfloat162float(k[base + d]);
+        float k1 = __bfloat162float(k[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __bfloat162float(cos[cos_idx]);
+        float sn = __bfloat162float(sin[cos_idx]);
+
+        k[base + d] = __float2bfloat16(k0 * c - k1 * sn);
+        k[base + d + half_dim] = __float2bfloat16(k1 * c + k0 * sn);
+    }
+}
+
 // ============================================================================
 // SiLU (Swish) Activation: x * sigmoid(x)
 // ============================================================================

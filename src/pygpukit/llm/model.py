@@ -691,20 +691,32 @@ class Attention:
             k_2d = self.k_norm(k_2d)
             k = reshape_copy(k_2d, k_shape)
 
-        # Apply RoPE on GPU (requires FP32)
+        # Apply RoPE on GPU (native FP32/FP16/BF16 support)
         if self.config.use_rope:
             assert self._cos is not None and self._sin is not None
-            cos = from_numpy(self._cos[position_ids].astype(np.float32))
-            sin = from_numpy(self._sin[position_ids].astype(np.float32))
-            # RoPE only supports FP32, convert if needed
-            orig_dtype = q.dtype
-            if orig_dtype != "float32":
+            # Match cos/sin dtype to q/k dtype for native kernel support
+            q_dtype = q.dtype
+            if q_dtype == "float16":
+                cos = from_numpy(self._cos[position_ids].astype(np.float16))
+                sin = from_numpy(self._sin[position_ids].astype(np.float16))
+            elif q_dtype == "bfloat16":
+                # NumPy doesn't support bfloat16, so use float32 -> convert on GPU
+                cos = from_numpy(self._cos[position_ids].astype(np.float32))
+                sin = from_numpy(self._sin[position_ids].astype(np.float32))
+                # TODO: Add bfloat16 conversion when available
+                # For now, fall back to float32 computation
                 q_f32 = from_numpy(q.to_numpy().astype(np.float32))
                 k_f32 = from_numpy(k.to_numpy().astype(np.float32))
                 rope_inplace(q_f32, k_f32, cos, sin)
+                # Convert back - using float16 as proxy since bfloat16 not in numpy
                 q = from_numpy(q_f32.to_numpy().astype(np.float16))
                 k = from_numpy(k_f32.to_numpy().astype(np.float16))
             else:
+                # FP32 path
+                cos = from_numpy(self._cos[position_ids].astype(np.float32))
+                sin = from_numpy(self._sin[position_ids].astype(np.float32))
+            # Apply RoPE in-place (FP32 and FP16 have native kernel support)
+            if q_dtype in ("float32", "float16"):
                 rope_inplace(q, k, cos, sin)
 
         # Convert to numpy for KV cache
