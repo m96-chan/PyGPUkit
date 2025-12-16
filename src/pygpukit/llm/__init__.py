@@ -471,7 +471,11 @@ class Tokenizer:
 
 
 from pygpukit.llm.model import (  # noqa: E402
+    GPT2_SPEC,
+    LLAMA_SPEC,
     MLP,
+    MODEL_SPECS,
+    QWEN3_SPEC,
     Attention,
     CausalSelfAttention,
     CausalTransformerModel,
@@ -486,6 +490,8 @@ from pygpukit.llm.model import (  # noqa: E402
     LlamaConfig,
     LlamaMLP,
     LlamaModel,
+    # ModelSpec abstraction (v0.2.9)
+    ModelSpec,
     Norm,
     # Qwen3
     Qwen3Config,
@@ -493,8 +499,10 @@ from pygpukit.llm.model import (  # noqa: E402
     TransformerBlock,
     # Unified Transformer classes
     TransformerConfig,
+    detect_model_spec,
     load_gpt2_from_safetensors,
     load_llama_from_safetensors,
+    load_model_from_safetensors,
     load_qwen3_from_safetensors,
 )
 
@@ -515,6 +523,14 @@ __all__ = [
     "Norm",
     "TransformerBlock",
     "Linear",
+    # ModelSpec abstraction (v0.2.9)
+    "ModelSpec",
+    "GPT2_SPEC",
+    "LLAMA_SPEC",
+    "QWEN3_SPEC",
+    "MODEL_SPECS",
+    "detect_model_spec",
+    "load_model_from_safetensors",
     # Legacy GPT-2 aliases
     "GPT2Config",
     "GPT2Model",

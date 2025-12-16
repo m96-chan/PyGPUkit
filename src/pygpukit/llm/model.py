@@ -1,13 +1,14 @@
 """Unified Transformer implementation for PyGPUkit.
 
-Provides a common Transformer abstraction that supports both GPT-2 and LLaMA
-architectures through configuration differences only.
+Provides a common Transformer abstraction that supports GPT-2, LLaMA, and Qwen3
+architectures through ModelSpec configuration.
 
 Key features:
+- ModelSpec abstraction for model-specific differences
 - Hybrid Attention: CPU for seq_len=1 (decode), GPU for prefill
 - GPU-native operations: RMSNorm, LayerNorm, SDPA, SiLU, GELU, RoPE
 - Unified TransformerConfig for all model variants
-- Backward-compatible loaders for GPT-2 and LLaMA safetensors
+- Generic loader with automatic model detection
 """
 
 from __future__ import annotations
@@ -37,6 +38,251 @@ from pygpukit.ops.basic import (
 
 if TYPE_CHECKING:
     pass
+
+
+# =============================================================================
+# ModelSpec - Data-only abstraction for model-specific differences
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Model specification defining architecture-specific configurations.
+
+    This is a data-only structure with no methods or behavior.
+    All model-specific differences are expressed as configuration values.
+    """
+
+    # Model identifier
+    name: str
+
+    # Weight name patterns (HF name patterns for tensor lookup)
+    # These are format strings with {layer} placeholder
+    embed_tokens: str
+    position_embed: str | None  # None if using RoPE
+    lm_head: str | None  # None if tied embeddings
+    final_norm: str
+    final_norm_bias: str | None
+
+    # Per-layer weight patterns
+    attn_norm: str
+    attn_norm_bias: str | None
+    q_proj: str
+    k_proj: str
+    v_proj: str
+    o_proj: str
+    q_bias: str | None
+    k_bias: str | None
+    v_bias: str | None
+    o_bias: str | None
+    q_norm: str | None  # QK Norm (Qwen3)
+    k_norm: str | None
+
+    mlp_norm: str
+    mlp_norm_bias: str | None
+
+    # MLP weights (GELU style)
+    fc1: str | None
+    fc1_bias: str | None
+    fc2: str | None
+    fc2_bias: str | None
+
+    # MLP weights (SwiGLU style)
+    gate_proj: str | None
+    up_proj: str | None
+    down_proj: str | None
+
+    # Architecture flags
+    norm_type: Literal["rmsnorm", "layernorm"]
+    activation: Literal["gelu", "silu"]
+    use_rope: bool
+    use_qk_norm: bool
+    use_position_embed: bool  # GPT-2 style absolute position embeddings
+    qkv_combined: bool  # GPT-2 uses combined QKV projection
+    weight_transpose: bool  # GPT-2 weights need transpose
+
+    # Default hyperparameters
+    default_norm_eps: float = 1e-5
+    default_rope_theta: float = 10000.0
+
+    # Config class name for detection
+    hf_model_type: str = ""
+
+
+# =============================================================================
+# Concrete Model Specs
+# =============================================================================
+
+
+GPT2_SPEC = ModelSpec(
+    name="gpt2",
+    # Embeddings
+    embed_tokens="wte.weight",
+    position_embed="wpe.weight",
+    lm_head=None,  # Tied to embed_tokens
+    final_norm="ln_f.weight",
+    final_norm_bias="ln_f.bias",
+    # Attention (combined QKV)
+    attn_norm="h.{layer}.ln_1.weight",
+    attn_norm_bias="h.{layer}.ln_1.bias",
+    q_proj="h.{layer}.attn.c_attn.weight",  # Combined QKV
+    k_proj="h.{layer}.attn.c_attn.weight",  # Same tensor, split at load
+    v_proj="h.{layer}.attn.c_attn.weight",
+    o_proj="h.{layer}.attn.c_proj.weight",
+    q_bias="h.{layer}.attn.c_attn.bias",
+    k_bias="h.{layer}.attn.c_attn.bias",
+    v_bias="h.{layer}.attn.c_attn.bias",
+    o_bias="h.{layer}.attn.c_proj.bias",
+    q_norm=None,
+    k_norm=None,
+    # MLP (GELU)
+    mlp_norm="h.{layer}.ln_2.weight",
+    mlp_norm_bias="h.{layer}.ln_2.bias",
+    fc1="h.{layer}.mlp.c_fc.weight",
+    fc1_bias="h.{layer}.mlp.c_fc.bias",
+    fc2="h.{layer}.mlp.c_proj.weight",
+    fc2_bias="h.{layer}.mlp.c_proj.bias",
+    gate_proj=None,
+    up_proj=None,
+    down_proj=None,
+    # Architecture
+    norm_type="layernorm",
+    activation="gelu",
+    use_rope=False,
+    use_qk_norm=False,
+    use_position_embed=True,
+    qkv_combined=True,
+    weight_transpose=True,
+    default_norm_eps=1e-5,
+    default_rope_theta=10000.0,
+    hf_model_type="gpt2",
+)
+
+
+LLAMA_SPEC = ModelSpec(
+    name="llama",
+    # Embeddings
+    embed_tokens="model.embed_tokens.weight",
+    position_embed=None,
+    lm_head="lm_head.weight",
+    final_norm="model.norm.weight",
+    final_norm_bias=None,
+    # Attention
+    attn_norm="model.layers.{layer}.input_layernorm.weight",
+    attn_norm_bias=None,
+    q_proj="model.layers.{layer}.self_attn.q_proj.weight",
+    k_proj="model.layers.{layer}.self_attn.k_proj.weight",
+    v_proj="model.layers.{layer}.self_attn.v_proj.weight",
+    o_proj="model.layers.{layer}.self_attn.o_proj.weight",
+    q_bias=None,
+    k_bias=None,
+    v_bias=None,
+    o_bias=None,
+    q_norm=None,
+    k_norm=None,
+    # MLP (SwiGLU)
+    mlp_norm="model.layers.{layer}.post_attention_layernorm.weight",
+    mlp_norm_bias=None,
+    fc1=None,
+    fc1_bias=None,
+    fc2=None,
+    fc2_bias=None,
+    gate_proj="model.layers.{layer}.mlp.gate_proj.weight",
+    up_proj="model.layers.{layer}.mlp.up_proj.weight",
+    down_proj="model.layers.{layer}.mlp.down_proj.weight",
+    # Architecture
+    norm_type="rmsnorm",
+    activation="silu",
+    use_rope=True,
+    use_qk_norm=False,
+    use_position_embed=False,
+    qkv_combined=False,
+    weight_transpose=False,
+    default_norm_eps=1e-5,
+    default_rope_theta=10000.0,
+    hf_model_type="llama",
+)
+
+
+QWEN3_SPEC = ModelSpec(
+    name="qwen3",
+    # Embeddings
+    embed_tokens="model.embed_tokens.weight",
+    position_embed=None,
+    lm_head="lm_head.weight",
+    final_norm="model.norm.weight",
+    final_norm_bias=None,
+    # Attention
+    attn_norm="model.layers.{layer}.input_layernorm.weight",
+    attn_norm_bias=None,
+    q_proj="model.layers.{layer}.self_attn.q_proj.weight",
+    k_proj="model.layers.{layer}.self_attn.k_proj.weight",
+    v_proj="model.layers.{layer}.self_attn.v_proj.weight",
+    o_proj="model.layers.{layer}.self_attn.o_proj.weight",
+    q_bias=None,
+    k_bias=None,
+    v_bias=None,
+    o_bias=None,
+    q_norm="model.layers.{layer}.self_attn.q_norm.weight",
+    k_norm="model.layers.{layer}.self_attn.k_norm.weight",
+    # MLP (SwiGLU)
+    mlp_norm="model.layers.{layer}.post_attention_layernorm.weight",
+    mlp_norm_bias=None,
+    fc1=None,
+    fc1_bias=None,
+    fc2=None,
+    fc2_bias=None,
+    gate_proj="model.layers.{layer}.mlp.gate_proj.weight",
+    up_proj="model.layers.{layer}.mlp.up_proj.weight",
+    down_proj="model.layers.{layer}.mlp.down_proj.weight",
+    # Architecture
+    norm_type="rmsnorm",
+    activation="silu",
+    use_rope=True,
+    use_qk_norm=True,
+    use_position_embed=False,
+    qkv_combined=False,
+    weight_transpose=False,
+    default_norm_eps=1e-6,
+    default_rope_theta=1000000.0,
+    hf_model_type="qwen3",
+)
+
+
+# Registry for model detection
+MODEL_SPECS: dict[str, ModelSpec] = {
+    "gpt2": GPT2_SPEC,
+    "llama": LLAMA_SPEC,
+    "qwen3": QWEN3_SPEC,
+    "qwen2": LLAMA_SPEC,  # Qwen2 uses same structure as LLaMA
+}
+
+
+def detect_model_spec(tensor_names: list[str]) -> ModelSpec:
+    """Detect model type from tensor names.
+
+    Args:
+        tensor_names: List of tensor names from safetensors file
+
+    Returns:
+        ModelSpec for the detected model type
+
+    Raises:
+        ValueError: If model type cannot be detected
+    """
+    # Check for Qwen3-specific QK norm
+    if any("q_norm" in name for name in tensor_names):
+        return QWEN3_SPEC
+    # Check for LLaMA-style structure
+    if "model.embed_tokens.weight" in tensor_names:
+        return LLAMA_SPEC
+    # Check for GPT-2 structure
+    if "wte.weight" in tensor_names:
+        return GPT2_SPEC
+
+    raise ValueError(
+        f"Cannot detect model type from tensor names. First 10 names: {tensor_names[:10]}"
+    )
 
 
 # =============================================================================
@@ -1379,3 +1625,273 @@ def load_qwen3_from_safetensors(
 # =============================================================================
 
 apply_rotary_pos_emb = apply_rotary_pos_emb_numpy
+
+
+# =============================================================================
+# Generic Model Loader using ModelSpec
+# =============================================================================
+
+
+def load_model_from_safetensors(
+    model_path: str,
+    dtype: str = "float32",
+    spec: ModelSpec | None = None,
+) -> CausalTransformerModel:
+    """Load model from safetensors file using ModelSpec abstraction.
+
+    Automatically detects model type (GPT-2, LLaMA, Qwen3) from tensor names
+    and loads using the appropriate ModelSpec configuration.
+
+    Args:
+        model_path: Path to model.safetensors or model.safetensors.index.json
+        dtype: Weight dtype ("float32" or "float16")
+        spec: Optional ModelSpec to use (auto-detected if None)
+
+    Returns:
+        CausalTransformerModel instance
+
+    Example:
+        # Auto-detect model type
+        model = load_model_from_safetensors("/path/to/model.safetensors")
+
+        # Explicit model type
+        model = load_model_from_safetensors("/path/to/model.safetensors", spec=LLAMA_SPEC)
+    """
+    from pygpukit.llm import load_safetensors
+
+    st = load_safetensors(model_path)
+    target_dtype = np.float16 if dtype == "float16" else np.float32
+
+    # Detect model type if not specified
+    if spec is None:
+        spec = detect_model_spec(st.tensor_names)
+
+    # Helper to load tensor with dtype conversion
+    def load_tensor(name: str, do_transpose: bool = False) -> GPUArray:
+        data = st.tensor_bytes(name)
+        info = st.tensor_info(name)
+        if info.dtype == 2:  # BFloat16
+            arr = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
+            arr_f32 = np.empty(arr.shape, dtype=np.float32)
+            arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
+            arr = arr_f32
+        else:
+            dtype_map = {0: np.float32, 1: np.float16, 3: np.float64}
+            np_dtype = dtype_map.get(info.dtype, np.float32)
+            arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape).copy()
+        if do_transpose and arr.ndim == 2:
+            arr = arr.T
+        return from_numpy(arr.astype(target_dtype))
+
+    def try_load(name: str | None, do_transpose: bool = False) -> GPUArray | None:
+        if name is None or name not in st.tensor_names:
+            return None
+        return load_tensor(name, do_transpose)
+
+    def layer_name(pattern: str | None, layer: int) -> str | None:
+        if pattern is None:
+            return None
+        return pattern.format(layer=layer)
+
+    def required_name(pattern: str, layer: int) -> str:
+        """Get layer name for a required pattern (never None)."""
+        return pattern.format(layer=layer)
+
+    # Auto-detect config from tensor shapes
+    embed_info = st.tensor_info(spec.embed_tokens)
+    vocab_size = embed_info.shape[0]
+    hidden_size = embed_info.shape[1]
+
+    # Count layers
+    num_layers = 0
+    while required_name(spec.q_proj, num_layers) in st.tensor_names:
+        num_layers += 1
+
+    # Detect num_heads and num_kv_heads from projection shapes
+    q_info = st.tensor_info(required_name(spec.q_proj, 0))
+    head_dim = 64  # Default
+
+    # Try to get head_dim from q_norm if present (Qwen3)
+    if spec.use_qk_norm and spec.q_norm is not None:
+        q_norm_name = required_name(spec.q_norm, 0)
+        if q_norm_name in st.tensor_names:
+            q_norm_info = st.tensor_info(q_norm_name)
+            head_dim = q_norm_info.shape[0]
+
+    num_heads = q_info.shape[0] // head_dim
+
+    # For GQA models, detect num_kv_heads
+    num_kv_heads = num_heads
+    if not spec.qkv_combined:
+        k_info = st.tensor_info(required_name(spec.k_proj, 0))
+        num_kv_heads = k_info.shape[0] // head_dim
+
+    # Detect intermediate_size
+    intermediate_size = 4 * hidden_size
+    if spec.activation == "silu" and spec.gate_proj is not None:
+        gate_info = st.tensor_info(required_name(spec.gate_proj, 0))
+        intermediate_size = gate_info.shape[0]
+    elif spec.activation == "gelu" and spec.fc1 is not None:
+        fc1_info = st.tensor_info(required_name(spec.fc1, 0))
+        intermediate_size = fc1_info.shape[0]
+
+    # Build TransformerConfig
+    transformer_config = TransformerConfig(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        intermediate_size=intermediate_size,
+        norm_type=spec.norm_type,
+        activation=spec.activation,
+        use_rope=spec.use_rope,
+        causal=True,
+        norm_eps=spec.default_norm_eps,
+        rope_theta=spec.default_rope_theta,
+    )
+
+    # Load embeddings
+    embed_tokens = load_tensor(spec.embed_tokens)
+    position_embed = try_load(spec.position_embed) if spec.use_position_embed else None
+
+    # Load blocks
+    blocks = []
+    for layer_idx in range(num_layers):
+        # Attention norm (required)
+        attn_norm_weight = load_tensor(required_name(spec.attn_norm, layer_idx))
+        attn_norm_bias = try_load(layer_name(spec.attn_norm_bias, layer_idx))
+        attn_norm = Norm(attn_norm_weight, attn_norm_bias, spec.norm_type, spec.default_norm_eps)
+
+        # QK Norm (Qwen3, optional)
+        q_norm_layer = None
+        k_norm_layer = None
+        if spec.use_qk_norm:
+            q_norm_weight = try_load(layer_name(spec.q_norm, layer_idx))
+            k_norm_weight = try_load(layer_name(spec.k_norm, layer_idx))
+            if q_norm_weight is not None:
+                q_norm_layer = Norm(q_norm_weight, None, spec.norm_type, spec.default_norm_eps)
+            if k_norm_weight is not None:
+                k_norm_layer = Norm(k_norm_weight, None, spec.norm_type, spec.default_norm_eps)
+
+        # Attention projections
+        if spec.qkv_combined:
+            # GPT-2 style: combined QKV tensor needs to be split
+            c_attn_weight = load_tensor(
+                required_name(spec.q_proj, layer_idx), do_transpose=spec.weight_transpose
+            )
+            c_attn_bias = try_load(layer_name(spec.q_bias, layer_idx))
+
+            # Split combined QKV
+            c_attn_np = c_attn_weight.to_numpy()
+            q_weight = from_numpy(c_attn_np[:hidden_size].copy().astype(target_dtype))
+            k_weight = from_numpy(
+                c_attn_np[hidden_size : 2 * hidden_size].copy().astype(target_dtype)
+            )
+            v_weight = from_numpy(c_attn_np[2 * hidden_size :].copy().astype(target_dtype))
+
+            q_bias, k_bias, v_bias = None, None, None
+            if c_attn_bias is not None:
+                c_attn_bias_np = c_attn_bias.to_numpy()
+                q_bias = from_numpy(c_attn_bias_np[:hidden_size].copy().astype(target_dtype))
+                k_bias = from_numpy(
+                    c_attn_bias_np[hidden_size : 2 * hidden_size].copy().astype(target_dtype)
+                )
+                v_bias = from_numpy(c_attn_bias_np[2 * hidden_size :].copy().astype(target_dtype))
+
+            o_weight = load_tensor(
+                required_name(spec.o_proj, layer_idx), do_transpose=spec.weight_transpose
+            )
+            o_bias = try_load(layer_name(spec.o_bias, layer_idx))
+
+            attn = Attention(
+                q_weight,
+                k_weight,
+                v_weight,
+                o_weight,
+                transformer_config,
+                q_bias,
+                k_bias,
+                v_bias,
+                o_bias,
+                q_norm_layer,
+                k_norm_layer,
+            )
+        else:
+            # Separate Q, K, V projections (LLaMA/Qwen3 style)
+            q_weight = load_tensor(required_name(spec.q_proj, layer_idx))
+            k_weight = load_tensor(required_name(spec.k_proj, layer_idx))
+            v_weight = load_tensor(required_name(spec.v_proj, layer_idx))
+            o_weight = load_tensor(required_name(spec.o_proj, layer_idx))
+
+            q_bias = try_load(layer_name(spec.q_bias, layer_idx))
+            k_bias = try_load(layer_name(spec.k_bias, layer_idx))
+            v_bias = try_load(layer_name(spec.v_bias, layer_idx))
+            o_bias = try_load(layer_name(spec.o_bias, layer_idx))
+
+            attn = Attention(
+                q_weight,
+                k_weight,
+                v_weight,
+                o_weight,
+                transformer_config,
+                q_bias,
+                k_bias,
+                v_bias,
+                o_bias,
+                q_norm_layer,
+                k_norm_layer,
+            )
+
+        # MLP norm (required)
+        mlp_norm_weight = load_tensor(required_name(spec.mlp_norm, layer_idx))
+        mlp_norm_bias = try_load(layer_name(spec.mlp_norm_bias, layer_idx))
+        mlp_norm = Norm(mlp_norm_weight, mlp_norm_bias, spec.norm_type, spec.default_norm_eps)
+
+        # MLP
+        if spec.activation == "gelu" and spec.fc1 is not None and spec.fc2 is not None:
+            fc1_weight = load_tensor(
+                required_name(spec.fc1, layer_idx), do_transpose=spec.weight_transpose
+            )
+            fc1_bias = try_load(layer_name(spec.fc1_bias, layer_idx))
+            fc2_weight = load_tensor(
+                required_name(spec.fc2, layer_idx), do_transpose=spec.weight_transpose
+            )
+            fc2_bias = try_load(layer_name(spec.fc2_bias, layer_idx))
+            mlp = MLP(
+                transformer_config,
+                fc1_weight=fc1_weight,
+                fc1_bias=fc1_bias,
+                fc2_weight=fc2_weight,
+                fc2_bias=fc2_bias,
+            )
+        elif spec.gate_proj is not None and spec.up_proj is not None and spec.down_proj is not None:
+            # SwiGLU
+            gate_proj = load_tensor(required_name(spec.gate_proj, layer_idx))
+            up_proj = load_tensor(required_name(spec.up_proj, layer_idx))
+            down_proj = load_tensor(required_name(spec.down_proj, layer_idx))
+            mlp = MLP(
+                transformer_config,
+                gate_proj=gate_proj,
+                up_proj=up_proj,
+                down_proj=down_proj,
+            )
+        else:
+            raise ValueError(f"ModelSpec {spec.name} has invalid MLP configuration")
+
+        block = TransformerBlock(attn_norm, attn, mlp_norm, mlp)
+        blocks.append(block)
+
+    # Final norm
+    final_norm_weight = load_tensor(spec.final_norm)
+    final_norm_bias = try_load(spec.final_norm_bias)
+    final_norm = Norm(final_norm_weight, final_norm_bias, spec.norm_type, spec.default_norm_eps)
+
+    # LM head
+    lm_head = None
+    if spec.lm_head is not None and spec.lm_head in st.tensor_names:
+        lm_head = load_tensor(spec.lm_head)
+
+    return CausalTransformerModel(
+        transformer_config, embed_tokens, blocks, final_norm, lm_head, position_embed
+    )
