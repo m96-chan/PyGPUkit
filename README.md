@@ -13,7 +13,7 @@
 |-------|-------------|
 | [Getting Started](docs/getting-started.md) | Installation, quick start, basic usage |
 | [API Reference](docs/api.md) | Complete API documentation with examples |
-| [LLM Guide](docs/llm.md) | SafeTensors, Tokenizer, GPT-2 model loading |
+| [LLM Guide](docs/llm.md) | SafeTensors, GPT-2/LLaMA/Qwen3 inference |
 | [Performance Tuning](docs/performance.md) | TF32, FP16, CUTLASS optimization |
 | [Scheduler Guide](docs/scheduler.md) | Multi-LLM concurrent execution |
 
@@ -30,6 +30,65 @@
 PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
 
 > **Note:** PyGPUkit is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads where full ML frameworks are overkill.
+
+---
+
+## What's New in v0.2.9
+
+### Unified LLM Interface
+A single `CausalTransformerModel` now supports multiple architectures through the `ModelSpec` abstraction.
+
+| Architecture | Features | Status |
+|--------------|----------|--------|
+| **GPT-2** | LayerNorm, GELU, Position Embedding | ✅ Tested |
+| **LLaMA 2/3** | RMSNorm, SiLU, RoPE, GQA | ✅ Tested |
+| **Qwen3** | RMSNorm, SiLU, RoPE, GQA, QK-Norm | ✅ Tested |
+
+```python
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
+
+# Auto-detect and load any supported model
+st = load_safetensors("model.safetensors")
+spec = detect_model_spec(st.tensor_names)  # Returns GPT2_SPEC, LLAMA_SPEC, or QWEN3_SPEC
+model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
+
+# Generate with KV-cache
+output_ids = model.generate(
+    input_ids,
+    max_new_tokens=64,
+    temperature=0.7,
+    top_k=50,
+    top_p=0.9,
+    use_cache=True,  # KV-cache for efficient generation
+)
+```
+
+### Hybrid Attention Execution
+Automatic CPU/GPU switching for optimal performance:
+
+| Phase | Backend | Reason |
+|-------|---------|--------|
+| **Prefill** (seq_len > 1) | GPU SDPA | Parallelizable |
+| **Decode** (seq_len = 1) | CPU | Avoids kernel launch overhead |
+
+### New LLM Operations
+| Operation | Description |
+|-----------|-------------|
+| `gpk.sdpa_causal(q, k, v)` | Scaled Dot-Product Attention with causal mask |
+| `gpk.rope_inplace(x, freqs)` | Rotary Position Embedding (in-place) |
+| `gpk.silu(x)` | SiLU/Swish activation |
+| `gpk.rmsnorm(x, weight, eps)` | RMS Layer Normalization |
+
+### Sharded Model Support
+Load large models split across multiple safetensors files:
+
+```python
+from pygpukit.llm import load_safetensors
+
+# Automatically handles sharded models
+st = load_safetensors("model.safetensors.index.json")  # Returns ShardedSafeTensorsFile
+print(f"Shards: {len(st._shard_files)}, Tensors: {st.num_tensors}")
+```
 
 ---
 
