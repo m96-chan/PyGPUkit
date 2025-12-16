@@ -396,6 +396,7 @@ class TransformerConfig:
     @property
     def num_kv_groups(self) -> int:
         """Number of query heads per KV head (for GQA)."""
+        assert self.num_kv_heads is not None  # Set in __post_init__
         return self.num_heads // self.num_kv_heads
 
 
@@ -614,10 +615,13 @@ class Attention:
         self.config = config
         self.head_dim = config.head_dim
         self.num_heads = config.num_heads
-        self.num_kv_heads = config.num_kv_heads
+        assert config.num_kv_heads is not None  # Set in __post_init__
+        self.num_kv_heads: int = config.num_kv_heads
         self.num_kv_groups = config.num_kv_groups
 
         # Precompute RoPE if enabled
+        self._cos: np.ndarray | None
+        self._sin: np.ndarray | None
         if config.use_rope:
             self._cos, self._sin = precompute_freqs_cis(
                 self.head_dim, config.max_position_embeddings, config.rope_theta
@@ -689,6 +693,7 @@ class Attention:
 
         # Apply RoPE on GPU (requires FP32)
         if self.config.use_rope:
+            assert self._cos is not None and self._sin is not None
             cos = from_numpy(self._cos[position_ids].astype(np.float32))
             sin = from_numpy(self._sin[position_ids].astype(np.float32))
             # RoPE only supports FP32, convert if needed
@@ -773,6 +778,7 @@ class Attention:
 
         # Apply RoPE (CPU)
         if self.config.use_rope:
+            assert self._cos is not None and self._sin is not None
             cos = self._cos[position_ids]
             sin = self._sin[position_ids]
             q, k = apply_rotary_pos_emb_numpy(q, k, cos, sin)
@@ -967,9 +973,9 @@ class CausalTransformerModel:
         self,
         input_ids: list[int],
         position_ids: list[int] | None = None,
-        past_key_values: list[tuple] | None = None,
+        past_key_values: list[tuple | None] | None = None,
         use_cache: bool = False,
-    ) -> tuple[GPUArray, list[tuple] | None]:
+    ) -> tuple[GPUArray, list[tuple | None] | None]:
         """Forward pass.
 
         Args:
@@ -992,14 +998,14 @@ class CausalTransformerModel:
 
         # Token embeddings (preserve dtype)
         embed_np = self.embed_tokens.to_numpy()
-        hidden = embed_np[input_ids]
+        hidden_np = embed_np[input_ids]
 
         # Add position embeddings (GPT-2 style)
         if self.position_embed is not None:
             pos_embed_np = self.position_embed.to_numpy()
-            hidden = hidden + pos_embed_np[position_ids]
+            hidden_np = hidden_np + pos_embed_np[position_ids]
 
-        hidden = from_numpy(hidden.astype(embed_np.dtype))
+        hidden: GPUArray = from_numpy(hidden_np.astype(embed_np.dtype))
 
         # Transformer blocks
         present_key_values = []
