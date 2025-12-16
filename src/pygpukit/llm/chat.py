@@ -24,7 +24,12 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Union
+
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    Messages: TypeAlias = Union[list["ChatMessage"], list[dict[str, str]]]
 
 
 @dataclass
@@ -38,10 +43,6 @@ class ChatMessage:
 
     role: str  # "system", "user", "assistant"
     content: str
-
-
-# Type alias for message list
-Messages = list[ChatMessage] | list[dict[str, str]]
 
 
 def _normalize_messages(messages: Messages) -> list[dict[str, str]]:

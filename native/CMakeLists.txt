@@ -22,8 +22,12 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # CUTLASS (header-only library)
+# Can be disabled via environment variable PYGPUKIT_DISABLE_CUTLASS=1
 set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass")
-if(EXISTS "${CUTLASS_DIR}/include")
+if(DEFINED ENV{PYGPUKIT_DISABLE_CUTLASS})
+    message(STATUS "CUTLASS disabled via PYGPUKIT_DISABLE_CUTLASS environment variable")
+    add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
+elseif(EXISTS "${CUTLASS_DIR}/include")
     message(STATUS "CUTLASS found at: ${CUTLASS_DIR}")
     include_directories(${CUTLASS_DIR}/include)
     include_directories(${CUTLASS_DIR}/tools/util/include)

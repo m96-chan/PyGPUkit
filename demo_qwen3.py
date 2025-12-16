@@ -9,6 +9,7 @@ Demonstrates text generation with:
 """
 
 import time
+
 from transformers import AutoTokenizer
 
 from pygpukit.llm import detect_model_spec, load_model_from_safetensors, load_safetensors
@@ -17,10 +18,11 @@ from pygpukit.llm import detect_model_spec, load_model_from_safetensors, load_sa
 MODEL_ID = "Aratako/Qwen3-8B-ERP-v0.1"
 MODEL_PATH = None
 
+
 def find_model_path():
     """Find the cached model path."""
-    from pathlib import Path
     import os
+    from pathlib import Path
 
     # Check HF cache
     cache_dir = Path(os.path.expanduser("~/.cache/huggingface/hub"))
@@ -36,6 +38,7 @@ def find_model_path():
                     return str(index_file)
 
     return None
+
 
 def main():
     print("=" * 70)
@@ -152,6 +155,7 @@ def main():
     print("=" * 70)
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

@@ -2,9 +2,11 @@
  * Neural Network operations dispatch
  */
 #include "nn_kernels.cuh"
+#include "flash_attention.cuh"
 #include "../common/error.cuh"
 #include "../../core/memory.hpp"
 #include <algorithm>
+#include <cstdlib>
 
 namespace pygpukit {
 namespace ops {
@@ -611,6 +613,16 @@ GPUArray silu(const GPUArray& input) {
 // Scaled Dot-Product Attention (SDPA) with Causal Mask
 // ============================================================================
 
+// Check if Flash Attention is enabled via environment variable
+static bool is_flash_attention_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("PYGPUKIT_FLASH_ATTENTION");
+        cached = (env != nullptr && (std::string(env) == "1" || std::string(env) == "true"));
+    }
+    return cached != 0;
+}
+
 GPUArray sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, float scale) {
     // Q: [n_heads, q_len, head_dim]
     // K: [n_heads, kv_len, head_dim]
@@ -653,39 +665,79 @@ GPUArray sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, fl
     dim3 grid(n_heads, q_len);
     int block_size = 128;  // Enough threads for reduction
 
-    // Shared memory: need space for attention scores [kv_len]
-    size_t shared_mem_size = kv_len * sizeof(float);
+    // Use Flash Attention if enabled and head_dim is reasonable
+    bool use_flash = is_flash_attention_enabled() && head_dim <= 128;
 
-    switch (Q.dtype()) {
-        case DataType::Float32:
-            nn::sdpa_causal_f32_kernel<<<grid, block_size, shared_mem_size>>>(
-                static_cast<const float*>(Q.data()),
-                static_cast<const float*>(K.data()),
-                static_cast<const float*>(V.data()),
-                static_cast<float*>(result.data()),
-                n_heads, q_len, kv_len, head_dim, scale, causal_offset);
-            break;
-        case DataType::Float16:
-            nn::sdpa_causal_f16_kernel<<<grid, block_size, shared_mem_size>>>(
-                static_cast<const __half*>(Q.data()),
-                static_cast<const __half*>(K.data()),
-                static_cast<const __half*>(V.data()),
-                static_cast<__half*>(result.data()),
-                n_heads, q_len, kv_len, head_dim, scale, causal_offset);
-            break;
-        case DataType::BFloat16:
-            nn::sdpa_causal_bf16_kernel<<<grid, block_size, shared_mem_size>>>(
-                static_cast<const __nv_bfloat16*>(Q.data()),
-                static_cast<const __nv_bfloat16*>(K.data()),
-                static_cast<const __nv_bfloat16*>(V.data()),
-                static_cast<__nv_bfloat16*>(result.data()),
-                n_heads, q_len, kv_len, head_dim, scale, causal_offset);
-            break;
-        default:
-            throw std::runtime_error("sdpa only supports Float32, Float16, BFloat16");
+    if (use_flash) {
+        // Flash Attention 2: O(n) memory, tiled computation
+        size_t shared_mem_size = nn::flash_attention_smem_size(head_dim);
+
+        switch (Q.dtype()) {
+            case DataType::Float32:
+                nn::flash_attention_f32_kernel<<<grid, block_size, shared_mem_size>>>(
+                    static_cast<const float*>(Q.data()),
+                    static_cast<const float*>(K.data()),
+                    static_cast<const float*>(V.data()),
+                    static_cast<float*>(result.data()),
+                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                break;
+            case DataType::Float16:
+                nn::flash_attention_f16_kernel<<<grid, block_size, shared_mem_size>>>(
+                    static_cast<const __half*>(Q.data()),
+                    static_cast<const __half*>(K.data()),
+                    static_cast<const __half*>(V.data()),
+                    static_cast<__half*>(result.data()),
+                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                break;
+            case DataType::BFloat16:
+                nn::flash_attention_bf16_kernel<<<grid, block_size, shared_mem_size>>>(
+                    static_cast<const __nv_bfloat16*>(Q.data()),
+                    static_cast<const __nv_bfloat16*>(K.data()),
+                    static_cast<const __nv_bfloat16*>(V.data()),
+                    static_cast<__nv_bfloat16*>(result.data()),
+                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                break;
+            default:
+                throw std::runtime_error("sdpa only supports Float32, Float16, BFloat16");
+        }
+
+        sync_and_check("flash_attention kernel failed");
+    } else {
+        // Standard SDPA: O(n²) memory for attention scores
+        size_t shared_mem_size = kv_len * sizeof(float);
+
+        switch (Q.dtype()) {
+            case DataType::Float32:
+                nn::sdpa_causal_f32_kernel<<<grid, block_size, shared_mem_size>>>(
+                    static_cast<const float*>(Q.data()),
+                    static_cast<const float*>(K.data()),
+                    static_cast<const float*>(V.data()),
+                    static_cast<float*>(result.data()),
+                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                break;
+            case DataType::Float16:
+                nn::sdpa_causal_f16_kernel<<<grid, block_size, shared_mem_size>>>(
+                    static_cast<const __half*>(Q.data()),
+                    static_cast<const __half*>(K.data()),
+                    static_cast<const __half*>(V.data()),
+                    static_cast<__half*>(result.data()),
+                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                break;
+            case DataType::BFloat16:
+                nn::sdpa_causal_bf16_kernel<<<grid, block_size, shared_mem_size>>>(
+                    static_cast<const __nv_bfloat16*>(Q.data()),
+                    static_cast<const __nv_bfloat16*>(K.data()),
+                    static_cast<const __nv_bfloat16*>(V.data()),
+                    static_cast<__nv_bfloat16*>(result.data()),
+                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                break;
+            default:
+                throw std::runtime_error("sdpa only supports Float32, Float16, BFloat16");
+        }
+
+        sync_and_check("sdpa kernel failed");
     }
 
-    sync_and_check("sdpa kernel failed");
     return result;
 }
 
