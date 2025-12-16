@@ -102,6 +102,28 @@ GPUArray layernorm(const GPUArray& input, const GPUArray& gamma, const GPUArray&
 // Applied row-wise: input [batch, features] -> output [batch, features]
 GPUArray softmax(const GPUArray& input);
 
+// RMSNorm: y = x / sqrt(mean(x^2) + eps) * gamma
+// input: [batch, features], gamma: [features]
+// Simpler than LayerNorm (no mean subtraction, no beta)
+GPUArray rmsnorm(const GPUArray& input, const GPUArray& gamma, float eps = 1e-5f);
+
+// SiLU (Swish) activation: y = x * sigmoid(x)
+GPUArray silu(const GPUArray& input);
+
+// RoPE (Rotary Position Embedding) - In-place
+// q: [seq_len, n_heads_q, head_dim]
+// k: [seq_len, n_heads_k, head_dim]
+// cos, sin: [seq_len, head_dim]
+void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
+
+// Scaled Dot-Product Attention with Causal Mask
+// Q: [n_heads, q_len, head_dim]
+// K: [n_heads, kv_len, head_dim]
+// V: [n_heads, kv_len, head_dim]
+// Output: [n_heads, q_len, head_dim]
+// scale: 1/sqrt(head_dim), computed automatically if <= 0
+GPUArray sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, float scale = 0.0f);
+
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
 // ============================================================================
@@ -111,6 +133,24 @@ GPUArray softmax(const GPUArray& input);
 // input: [batch, in_features], weight: [out_features, in_features], bias: [out_features]
 // output: [batch, out_features]
 GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias);
+
+// ============================================================================
+// Tensor Manipulation Operations
+// ============================================================================
+
+// Concat two tensors along axis 0
+// a: [dim0_a, ...], b: [dim0_b, ...] -> output: [dim0_a + dim0_b, ...]
+GPUArray concat_axis0(const GPUArray& a, const GPUArray& b);
+
+// Repeat interleave along axis 1 (for GQA expansion)
+// input: [dim0, dim1, dim2] -> output: [dim0, dim1 * repeats, dim2]
+GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats);
+
+// Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]
+GPUArray transpose_3d_021(const GPUArray& input);
+
+// Reshape with copy (creates contiguous tensor with new shape)
+GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);
 
 } // namespace ops
 } // namespace pygpukit

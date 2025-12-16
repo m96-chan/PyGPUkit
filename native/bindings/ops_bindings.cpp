@@ -145,6 +145,13 @@ void init_ops_bindings(py::module_& m) {
           "Softmax: y[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))\n"
           "Applied row-wise: input [batch, features] -> output [batch, features]");
 
+    // RMSNorm
+    m.def("rmsnorm", &ops::rmsnorm,
+          py::arg("input"), py::arg("gamma"), py::arg("eps") = 1e-5f,
+          "RMS normalization: x / sqrt(mean(x^2) + eps) * gamma\n"
+          "Simpler than LayerNorm (no mean subtraction, no beta)\n"
+          "input: [batch, features], gamma: [features]");
+
     // ========================================================================
     // Fused Operations (CUTLASS Epilogue Fusion)
     // ========================================================================
@@ -155,4 +162,58 @@ void init_ops_bindings(py::module_& m) {
           "Fused linear + bias + GELU: output = gelu(input @ weight^T + bias)\n"
           "Uses CUTLASS TensorCore epilogue fusion for efficiency.\n"
           "input: [batch, in_features], weight: [out_features, in_features], bias: [out_features]");
+
+    // ========================================================================
+    // Additional Neural Network Operations
+    // ========================================================================
+
+    // SiLU (Swish) activation
+    m.def("silu", &ops::silu,
+          py::arg("input"),
+          "SiLU (Swish) activation: y = x * sigmoid(x)");
+
+    // RoPE (Rotary Position Embedding) - In-place
+    m.def("rope_inplace", &ops::rope_inplace,
+          py::arg("q"), py::arg("k"), py::arg("cos"), py::arg("sin"),
+          "Apply RoPE to Q and K tensors in-place.\n"
+          "q: [seq_len, n_heads_q, head_dim]\n"
+          "k: [seq_len, n_heads_k, head_dim]\n"
+          "cos, sin: [seq_len, head_dim]");
+
+    // Scaled Dot-Product Attention with Causal Mask
+    m.def("sdpa_causal", &ops::sdpa_causal,
+          py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("scale") = 0.0f,
+          "Scaled Dot-Product Attention with causal mask.\n"
+          "Q: [n_heads, q_len, head_dim]\n"
+          "K: [n_heads, kv_len, head_dim]\n"
+          "V: [n_heads, kv_len, head_dim]\n"
+          "Output: [n_heads, q_len, head_dim]\n"
+          "scale: 1/sqrt(head_dim), auto-computed if <= 0");
+
+    // ========================================================================
+    // Tensor Manipulation Operations
+    // ========================================================================
+
+    // Concat along axis 0
+    m.def("concat_axis0", &ops::concat_axis0,
+          py::arg("a"), py::arg("b"),
+          "Concat two tensors along axis 0.\n"
+          "a: [dim0_a, ...], b: [dim0_b, ...]\n"
+          "Output: [dim0_a + dim0_b, ...]");
+
+    // Repeat interleave along axis 1 (for GQA)
+    m.def("repeat_interleave_axis1", &ops::repeat_interleave_axis1,
+          py::arg("input"), py::arg("repeats"),
+          "Repeat tensor along axis 1 (interleaved).\n"
+          "input: [dim0, dim1, dim2] -> output: [dim0, dim1 * repeats, dim2]");
+
+    // Transpose 3D: [d0, d1, d2] -> [d1, d0, d2]
+    m.def("transpose_3d_021", &ops::transpose_3d_021,
+          py::arg("input"),
+          "Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]");
+
+    // Reshape with copy
+    m.def("reshape_copy", &ops::reshape_copy,
+          py::arg("input"), py::arg("new_shape"),
+          "Reshape tensor with copy (ensures contiguous output).");
 }

@@ -500,7 +500,7 @@ def get_rust_module() -> Any | None:
 
     _rust_import_attempted = True
     try:
-        from pygpukit import _pygpukit_rust  # type: ignore[attr-defined]
+        import _pygpukit_rust  # type: ignore[import-not-found]
 
         _rust_module = _pygpukit_rust
     except ImportError:

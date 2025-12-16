@@ -478,6 +478,225 @@ __global__ void layernorm_bf16_kernel(const __nv_bfloat16* __restrict__ input,
 }
 
 // ============================================================================
+// RMSNorm (Root Mean Square Normalization)
+// ============================================================================
+
+// RMSNorm: y = x / sqrt(mean(x^2) + eps) * gamma
+// Input: [batch, features], normalize over features dimension
+// Simpler than LayerNorm: no mean subtraction, no beta
+
+__global__ void rmsnorm_f32_kernel(const float* __restrict__ input,
+                                    const float* __restrict__ gamma,
+                                    float* __restrict__ output,
+                                    size_t batch_size,
+                                    size_t features,
+                                    float eps) {
+    int row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const float* row_input = input + row * features;
+    float* row_output = output + row * features;
+
+    // Compute sum of squares using parallel reduction
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        float val = row_input[i];
+        sum_sq += val * val;
+    }
+
+    // Warp-level reduction
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+
+    // Block-level reduction using shared memory
+    __shared__ float shared_sum[32];  // Max 32 warps
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        shared_sum[warp_id] = sum_sq;
+    }
+    __syncthreads();
+
+    // First warp reduces across warps
+    if (warp_id == 0) {
+        sum_sq = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+        }
+    }
+
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        // RMS = sqrt(mean(x^2) + eps)
+        inv_rms = rsqrtf(sum_sq / features + eps);
+    }
+    __syncthreads();
+
+    // Normalize and apply scale (gamma)
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        float x = row_input[i];
+        row_output[i] = x * inv_rms * gamma[i];
+    }
+}
+
+// Double precision RMSNorm
+__global__ void rmsnorm_f64_kernel(const double* __restrict__ input,
+                                    const double* __restrict__ gamma,
+                                    double* __restrict__ output,
+                                    size_t batch_size,
+                                    size_t features,
+                                    double eps) {
+    int row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const double* row_input = input + row * features;
+    double* row_output = output + row * features;
+
+    double sum_sq = 0.0;
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        double val = row_input[i];
+        sum_sq += val * val;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+
+    __shared__ double shared_sum[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        shared_sum[warp_id] = sum_sq;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum_sq = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+        }
+    }
+
+    __shared__ double inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrt(sum_sq / features + eps);
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        double x = row_input[i];
+        row_output[i] = x * inv_rms * gamma[i];
+    }
+}
+
+// FP16 RMSNorm (compute in FP32 for precision)
+__global__ void rmsnorm_f16_kernel(const __half* __restrict__ input,
+                                    const __half* __restrict__ gamma,
+                                    __half* __restrict__ output,
+                                    size_t batch_size,
+                                    size_t features,
+                                    float eps) {
+    int row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const __half* row_input = input + row * features;
+    __half* row_output = output + row * features;
+
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        float val = __half2float(row_input[i]);
+        sum_sq += val * val;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+
+    __shared__ float shared_sum[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        shared_sum[warp_id] = sum_sq;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum_sq = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+        }
+    }
+
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum_sq / features + eps);
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        float x = __half2float(row_input[i]);
+        float g = __half2float(gamma[i]);
+        row_output[i] = __float2half(x * inv_rms * g);
+    }
+}
+
+// BF16 RMSNorm (compute in FP32 for precision)
+__global__ void rmsnorm_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                     const __nv_bfloat16* __restrict__ gamma,
+                                     __nv_bfloat16* __restrict__ output,
+                                     size_t batch_size,
+                                     size_t features,
+                                     float eps) {
+    int row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const __nv_bfloat16* row_input = input + row * features;
+    __nv_bfloat16* row_output = output + row * features;
+
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        float val = __bfloat162float(row_input[i]);
+        sum_sq += val * val;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+    }
+
+    __shared__ float shared_sum[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    if (lane == 0) {
+        shared_sum[warp_id] = sum_sq;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum_sq = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum_sq += __shfl_down_sync(0xffffffff, sum_sq, offset);
+        }
+    }
+
+    __shared__ float inv_rms;
+    if (threadIdx.x == 0) {
+        inv_rms = rsqrtf(sum_sq / features + eps);
+    }
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < features; i += blockDim.x) {
+        float x = __bfloat162float(row_input[i]);
+        float g = __bfloat162float(gamma[i]);
+        row_output[i] = __float2bfloat16(x * inv_rms * g);
+    }
+}
+
+// ============================================================================
 // Softmax
 // ============================================================================
 
@@ -914,6 +1133,565 @@ __global__ void transpose_bf16_kernel(const __nv_bfloat16* __restrict__ input,
         if ((y + j) < cols && x < rows) {
             output[(y + j) * rows + x] = tile[threadIdx.x][threadIdx.y + j];
         }
+    }
+}
+
+// ============================================================================
+// Tensor Manipulation Operations
+// ============================================================================
+
+// Concat two tensors along axis 0
+// src1: [dim0_1, dim1, dim2], src2: [dim0_2, dim1, dim2]
+// dst: [dim0_1 + dim0_2, dim1, dim2]
+__global__ void concat_axis0_f32_kernel(
+    const float* __restrict__ src1,
+    const float* __restrict__ src2,
+    float* __restrict__ dst,
+    size_t dim0_1,      // First tensor's dim0
+    size_t dim0_2,      // Second tensor's dim0
+    size_t stride       // dim1 * dim2 (elements per row)
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_src1 = dim0_1 * stride;
+    size_t total = (dim0_1 + dim0_2) * stride;
+
+    if (idx < total) {
+        if (idx < total_src1) {
+            dst[idx] = src1[idx];
+        } else {
+            dst[idx] = src2[idx - total_src1];
+        }
+    }
+}
+
+// Repeat tensor along axis 1 (for GQA expansion)
+// src: [dim0, dim1, dim2] -> dst: [dim0, dim1 * repeats, dim2]
+// Each element in dim1 is repeated 'repeats' times
+__global__ void repeat_interleave_axis1_f32_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t repeats
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * repeats * dim2;
+
+    if (idx < total) {
+        // Compute output coordinates
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1_out = remaining % (dim1 * repeats);
+        size_t d0 = remaining / (dim1 * repeats);
+
+        // Map output d1 to input d1 (integer division gives the source index)
+        size_t d1_in = d1_out / repeats;
+
+        // Compute source index
+        size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
+        dst[idx] = src[src_idx];
+    }
+}
+
+// Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]
+// Swaps axes 0 and 1
+__global__ void transpose_021_f32_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * dim2;
+
+    if (idx < total) {
+        // Compute source coordinates [d0, d1, d2]
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1 = remaining % dim1;
+        size_t d0 = remaining / dim1;
+
+        // Compute destination index [d1, d0, d2]
+        size_t dst_idx = d1 * dim0 * dim2 + d0 * dim2 + d2;
+        dst[dst_idx] = src[idx];
+    }
+}
+
+// Reshape with copy (ensures contiguous output)
+// Simply copies data - reshape is handled by changing shape metadata
+__global__ void copy_f32_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = src[idx];
+    }
+}
+
+// ============================================================================
+// RoPE (Rotary Position Embedding)
+// ============================================================================
+//
+// Applies rotary position embeddings to Q and K tensors
+// q, k: [seq_len, n_heads, head_dim] - input tensors (modified in-place)
+// cos, sin: [seq_len, head_dim] - precomputed rotary frequencies
+//
+// For each position i and head h:
+//   q_rot[i,h,0:d/2] = q[i,h,0:d/2] * cos[i,0:d/2] - q[i,h,d/2:d] * sin[i,0:d/2]
+//   q_rot[i,h,d/2:d] = q[i,h,d/2:d] * cos[i,0:d/2] + q[i,h,0:d/2] * sin[i,0:d/2]
+
+__global__ void rope_f32_kernel(
+    float* __restrict__ q,      // [seq_len, n_heads_q, head_dim] - modified in-place
+    float* __restrict__ k,      // [seq_len, n_heads_k, head_dim] - modified in-place
+    const float* __restrict__ cos,  // [seq_len, head_dim]
+    const float* __restrict__ sin,  // [seq_len, head_dim]
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    // Each thread handles one (seq_pos, head, dim_pair)
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;  // Which pair (0 to half_dim-1)
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = q[base + d];
+        float q1 = q[base + d + half_dim];
+
+        int cos_idx = s * head_dim + d;
+        float c = cos[cos_idx];
+        float sn = sin[cos_idx];
+
+        q[base + d] = q0 * c - q1 * sn;
+        q[base + d + half_dim] = q1 * c + q0 * sn;
+    }
+
+    // Process K tensor (may have fewer heads than Q due to GQA)
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = k[base + d];
+        float k1 = k[base + d + half_dim];
+
+        int cos_idx = s * head_dim + d;
+        float c = cos[cos_idx];
+        float sn = sin[cos_idx];
+
+        k[base + d] = k0 * c - k1 * sn;
+        k[base + d + half_dim] = k1 * c + k0 * sn;
+    }
+}
+
+// ============================================================================
+// SiLU (Swish) Activation: x * sigmoid(x)
+// ============================================================================
+
+__device__ __forceinline__ float silu_f32(float x) {
+    return x / (1.0f + expf(-x));
+}
+
+__global__ void silu_f32_kernel(const float* __restrict__ input,
+                                 float* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = silu_f32(input[idx]);
+    }
+}
+
+__global__ void silu_f64_kernel(const double* __restrict__ input,
+                                 double* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        double x = input[idx];
+        output[idx] = x / (1.0 + exp(-x));
+    }
+}
+
+__global__ void silu_f16_kernel(const __half* __restrict__ input,
+                                 __half* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(silu_f32(x));
+    }
+}
+
+__global__ void silu_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                  __nv_bfloat16* __restrict__ output,
+                                  size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __bfloat162float(input[idx]);
+        output[idx] = __float2bfloat16(silu_f32(x));
+    }
+}
+
+// ============================================================================
+// Scaled Dot-Product Attention (SDPA) with Causal Mask
+// ============================================================================
+//
+// For multi-head attention:
+//   Q: [n_heads, q_len, head_dim]
+//   K: [n_heads, kv_len, head_dim]
+//   V: [n_heads, kv_len, head_dim]
+//   Output: [n_heads, q_len, head_dim]
+//
+// Algorithm:
+//   1. scores = Q @ K^T / sqrt(head_dim)  -> [n_heads, q_len, kv_len]
+//   2. Apply causal mask (future positions = -inf)
+//   3. weights = softmax(scores, dim=-1)
+//   4. output = weights @ V               -> [n_heads, q_len, head_dim]
+//
+// This kernel handles one (head, query_position) pair per block.
+// Each block computes attention for one query position in one head.
+
+__global__ void sdpa_causal_f32_kernel(
+    const float* __restrict__ Q,      // [n_heads, q_len, head_dim]
+    const float* __restrict__ K,      // [n_heads, kv_len, head_dim]
+    const float* __restrict__ V,      // [n_heads, kv_len, head_dim]
+    float* __restrict__ output,       // [n_heads, q_len, head_dim]
+    int n_heads,
+    int q_len,
+    int kv_len,
+    int head_dim,
+    float scale,                      // 1/sqrt(head_dim)
+    int causal_offset                 // kv_len - q_len (for proper causal masking)
+) {
+    // Each block handles one (head, query_pos) pair
+    int head_idx = blockIdx.x;
+    int q_pos = blockIdx.y;
+
+    if (head_idx >= n_heads || q_pos >= q_len) return;
+
+    // Pointers for this head
+    const float* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
+    const float* K_head = K + head_idx * kv_len * head_dim;
+    const float* V_head = V + head_idx * kv_len * head_dim;
+    float* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
+
+    // Causal mask: query at position q_pos can attend to positions 0..(causal_offset + q_pos)
+    int max_attend = causal_offset + q_pos + 1;
+    if (max_attend > kv_len) max_attend = kv_len;
+
+    // Step 1: Compute attention scores and find max (for numerical stability)
+    extern __shared__ float shared[];
+    float* scores = shared;  // [kv_len]
+
+    float max_score = -INFINITY;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        float score = 0.0f;
+        if (kv_pos < max_attend) {
+            // Dot product Q[q_pos] @ K[kv_pos]
+            for (int d = 0; d < head_dim; d++) {
+                score += Q_head[d] * K_head[kv_pos * head_dim + d];
+            }
+            score *= scale;
+        } else {
+            score = -INFINITY;  // Masked position
+        }
+        scores[kv_pos] = score;
+        if (score > max_score) max_score = score;
+    }
+
+    // Reduce max across threads
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        float other = __shfl_down_sync(0xffffffff, max_score, offset);
+        max_score = fmaxf(max_score, other);
+    }
+
+    __shared__ float shared_max[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+    if (lane == 0) shared_max[warp_id] = max_score;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_score = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_max[threadIdx.x] : -INFINITY;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            max_score = fmaxf(max_score, __shfl_down_sync(0xffffffff, max_score, offset));
+        }
+    }
+
+    __shared__ float row_max;
+    if (threadIdx.x == 0) row_max = max_score;
+    __syncthreads();
+
+    // Step 2: Compute exp(score - max) and sum
+    float sum = 0.0f;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        float exp_score = expf(scores[kv_pos] - row_max);
+        scores[kv_pos] = exp_score;
+        sum += exp_score;
+    }
+
+    // Reduce sum
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    __shared__ float shared_sum[32];
+    if (lane == 0) shared_sum[warp_id] = sum;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+    }
+
+    __shared__ float row_sum;
+    if (threadIdx.x == 0) row_sum = sum;
+    __syncthreads();
+
+    // Step 3: Normalize scores to get attention weights
+    float inv_sum = 1.0f / row_sum;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        scores[kv_pos] *= inv_sum;
+    }
+    __syncthreads();
+
+    // Step 4: Compute output = weights @ V
+    // Each thread handles a subset of head_dim
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float out_val = 0.0f;
+        for (int kv_pos = 0; kv_pos < kv_len; kv_pos++) {
+            out_val += scores[kv_pos] * V_head[kv_pos * head_dim + d];
+        }
+        out_head[d] = out_val;
+    }
+}
+
+// FP16 SDPA (compute in FP32 for precision)
+__global__ void sdpa_causal_f16_kernel(
+    const __half* __restrict__ Q,
+    const __half* __restrict__ K,
+    const __half* __restrict__ V,
+    __half* __restrict__ output,
+    int n_heads,
+    int q_len,
+    int kv_len,
+    int head_dim,
+    float scale,
+    int causal_offset
+) {
+    int head_idx = blockIdx.x;
+    int q_pos = blockIdx.y;
+
+    if (head_idx >= n_heads || q_pos >= q_len) return;
+
+    const __half* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
+    const __half* K_head = K + head_idx * kv_len * head_dim;
+    const __half* V_head = V + head_idx * kv_len * head_dim;
+    __half* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
+
+    int max_attend = causal_offset + q_pos + 1;
+    if (max_attend > kv_len) max_attend = kv_len;
+
+    extern __shared__ float shared[];
+    float* scores = shared;
+
+    float max_score = -INFINITY;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        float score = 0.0f;
+        if (kv_pos < max_attend) {
+            for (int d = 0; d < head_dim; d++) {
+                score += __half2float(Q_head[d]) * __half2float(K_head[kv_pos * head_dim + d]);
+            }
+            score *= scale;
+        } else {
+            score = -INFINITY;
+        }
+        scores[kv_pos] = score;
+        if (score > max_score) max_score = score;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        max_score = fmaxf(max_score, __shfl_down_sync(0xffffffff, max_score, offset));
+    }
+
+    __shared__ float shared_max[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+    if (lane == 0) shared_max[warp_id] = max_score;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_score = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_max[threadIdx.x] : -INFINITY;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            max_score = fmaxf(max_score, __shfl_down_sync(0xffffffff, max_score, offset));
+        }
+    }
+
+    __shared__ float row_max;
+    if (threadIdx.x == 0) row_max = max_score;
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        float exp_score = expf(scores[kv_pos] - row_max);
+        scores[kv_pos] = exp_score;
+        sum += exp_score;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    __shared__ float shared_sum[32];
+    if (lane == 0) shared_sum[warp_id] = sum;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+    }
+
+    __shared__ float row_sum;
+    if (threadIdx.x == 0) row_sum = sum;
+    __syncthreads();
+
+    float inv_sum = 1.0f / row_sum;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        scores[kv_pos] *= inv_sum;
+    }
+    __syncthreads();
+
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float out_val = 0.0f;
+        for (int kv_pos = 0; kv_pos < kv_len; kv_pos++) {
+            out_val += scores[kv_pos] * __half2float(V_head[kv_pos * head_dim + d]);
+        }
+        out_head[d] = __float2half(out_val);
+    }
+}
+
+// BF16 SDPA
+__global__ void sdpa_causal_bf16_kernel(
+    const __nv_bfloat16* __restrict__ Q,
+    const __nv_bfloat16* __restrict__ K,
+    const __nv_bfloat16* __restrict__ V,
+    __nv_bfloat16* __restrict__ output,
+    int n_heads,
+    int q_len,
+    int kv_len,
+    int head_dim,
+    float scale,
+    int causal_offset
+) {
+    int head_idx = blockIdx.x;
+    int q_pos = blockIdx.y;
+
+    if (head_idx >= n_heads || q_pos >= q_len) return;
+
+    const __nv_bfloat16* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
+    const __nv_bfloat16* K_head = K + head_idx * kv_len * head_dim;
+    const __nv_bfloat16* V_head = V + head_idx * kv_len * head_dim;
+    __nv_bfloat16* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
+
+    int max_attend = causal_offset + q_pos + 1;
+    if (max_attend > kv_len) max_attend = kv_len;
+
+    extern __shared__ float shared[];
+    float* scores = shared;
+
+    float max_score = -INFINITY;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        float score = 0.0f;
+        if (kv_pos < max_attend) {
+            for (int d = 0; d < head_dim; d++) {
+                score += __bfloat162float(Q_head[d]) * __bfloat162float(K_head[kv_pos * head_dim + d]);
+            }
+            score *= scale;
+        } else {
+            score = -INFINITY;
+        }
+        scores[kv_pos] = score;
+        if (score > max_score) max_score = score;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        max_score = fmaxf(max_score, __shfl_down_sync(0xffffffff, max_score, offset));
+    }
+
+    __shared__ float shared_max[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+    if (lane == 0) shared_max[warp_id] = max_score;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_score = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_max[threadIdx.x] : -INFINITY;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            max_score = fmaxf(max_score, __shfl_down_sync(0xffffffff, max_score, offset));
+        }
+    }
+
+    __shared__ float row_max;
+    if (threadIdx.x == 0) row_max = max_score;
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        float exp_score = expf(scores[kv_pos] - row_max);
+        scores[kv_pos] = exp_score;
+        sum += exp_score;
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    __shared__ float shared_sum[32];
+    if (lane == 0) shared_sum[warp_id] = sum;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum = (threadIdx.x < (blockDim.x + warpSize - 1) / warpSize) ? shared_sum[threadIdx.x] : 0.0f;
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+    }
+
+    __shared__ float row_sum;
+    if (threadIdx.x == 0) row_sum = sum;
+    __syncthreads();
+
+    float inv_sum = 1.0f / row_sum;
+    for (int kv_pos = threadIdx.x; kv_pos < kv_len; kv_pos += blockDim.x) {
+        scores[kv_pos] *= inv_sum;
+    }
+    __syncthreads();
+
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float out_val = 0.0f;
+        for (int kv_pos = 0; kv_pos < kv_len; kv_pos++) {
+            out_val += scores[kv_pos] * __bfloat162float(V_head[kv_pos * head_dim + d]);
+        }
+        out_head[d] = __float2bfloat16(out_val);
     }
 }
 

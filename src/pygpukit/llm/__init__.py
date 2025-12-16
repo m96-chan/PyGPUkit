@@ -330,14 +330,28 @@ class Tokenizer:
 
 
 from pygpukit.llm.model import (  # noqa: E402
+    # Unified Transformer classes
+    TransformerConfig,
+    CausalTransformerModel,
+    Attention,
     MLP,
-    CausalSelfAttention,
+    Norm,
+    TransformerBlock,
+    Linear,
+    # Legacy GPT-2 aliases
     GPT2Config,
     GPT2Model,
+    CausalSelfAttention,
     LayerNorm,
-    Linear,
-    TransformerBlock,
     load_gpt2_from_safetensors,
+    # Legacy Llama aliases
+    LlamaConfig,
+    LlamaModel,
+    LlamaAttention,
+    LlamaBlock,
+    LlamaMLP,
+    RMSNorm,
+    load_llama_from_safetensors,
 )
 
 __all__ = [
@@ -348,13 +362,26 @@ __all__ = [
     "load_safetensors",
     # Tokenizer
     "Tokenizer",
-    # Model components
+    # Unified Transformer (v0.2.9)
+    "TransformerConfig",
+    "CausalTransformerModel",
+    "Attention",
+    "MLP",
+    "Norm",
+    "TransformerBlock",
+    "Linear",
+    # Legacy GPT-2 aliases
     "GPT2Config",
     "GPT2Model",
     "CausalSelfAttention",
     "LayerNorm",
-    "Linear",
-    "MLP",
-    "TransformerBlock",
     "load_gpt2_from_safetensors",
+    # Legacy Llama aliases
+    "LlamaConfig",
+    "LlamaModel",
+    "LlamaAttention",
+    "LlamaBlock",
+    "LlamaMLP",
+    "RMSNorm",
+    "load_llama_from_safetensors",
 ]
