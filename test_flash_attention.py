@@ -2,14 +2,14 @@
 """Test Flash Attention kernel correctness."""
 
 import os
+
 import numpy as np
 
 # Enable Flash Attention
 os.environ["PYGPUKIT_FLASH_ATTENTION"] = "1"
 
-import pygpukit as pk
-from pygpukit.ops import sdpa_causal
 from pygpukit.core.factory import from_numpy
+from pygpukit.ops import sdpa_causal
 
 
 def test_flash_attention_correctness():

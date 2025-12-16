@@ -10,6 +10,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "../../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {
@@ -357,25 +358,29 @@ __global__ void matmul_f64_tiled_kernel(
 inline void launch_l2opt_f32(const float* A, const float* B, float* C, size_t M, size_t N, size_t K) {
     dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
     dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    matmul_f32_l2opt_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
+    cudaStream_t stream = internal::get_capture_stream();
+    matmul_f32_l2opt_kernel<<<grid_size, block_size, 0, stream>>>(A, B, C, M, N, K);
 }
 
 inline void launch_l2opt_f64(const double* A, const double* B, double* C, size_t M, size_t N, size_t K) {
     dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
     dim3 grid_size((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    matmul_f64_l2opt_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
+    cudaStream_t stream = internal::get_capture_stream();
+    matmul_f64_l2opt_kernel<<<grid_size, block_size, 0, stream>>>(A, B, C, M, N, K);
 }
 
 inline void launch_tiled_f32(const float* A, const float* B, float* C, size_t M, size_t N, size_t K) {
     dim3 block_size(TILE_N / THREAD_N, TILE_M / THREAD_M);
     dim3 grid_size((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
-    matmul_f32_tiled_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
+    cudaStream_t stream = internal::get_capture_stream();
+    matmul_f32_tiled_kernel<<<grid_size, block_size, 0, stream>>>(A, B, C, M, N, K);
 }
 
 inline void launch_tiled_f64(const double* A, const double* B, double* C, size_t M, size_t N, size_t K) {
     dim3 block_size(TILE_N / THREAD_N, TILE_M / THREAD_M);
     dim3 grid_size((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
-    matmul_f64_tiled_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
+    cudaStream_t stream = internal::get_capture_stream();
+    matmul_f64_tiled_kernel<<<grid_size, block_size, 0, stream>>>(A, B, C, M, N, K);
 }
 
 } // namespace matmul_fp32

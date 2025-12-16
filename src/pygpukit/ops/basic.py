@@ -334,23 +334,39 @@ def _relu_native(a: GPUArray) -> GPUArray:
     return GPUArray._wrap_native(c_native)
 
 
-def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArray:
+def matmul(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+    use_tf32: bool | None = None,
+) -> GPUArray:
     """Matrix multiplication of two 2D arrays.
 
     Args:
         a: First input array (M x K).
         b: Second input array (K x N).
+        out: Optional output array (M x N). If provided, result is written to this
+            array instead of allocating a new one. This enables CUDA Graph capture
+            since no memory allocation occurs during the operation.
         use_tf32: Whether to use TF32 TensorCore acceleration (Ampere+ only).
             - None (default): Use PYGPUKIT_ALLOW_TF32 environment variable
             - True: Force TF32 mode (requires SM >= 80 and float32)
             - False: Force FP32 mode
 
     Returns:
-        A new GPUArray containing the matrix product (M x N).
+        The result GPUArray (M x N). If out is provided, returns out.
 
     Raises:
         ValueError: If arrays are not 2D or dimensions don't match.
         RuntimeError: If use_tf32=True but GPU doesn't support it or dtype is not float32.
+
+    Example:
+        # Allocate new output
+        y = pk.matmul(x, W)
+
+        # Write to existing buffer (for CUDA Graph capture)
+        pk.matmul(x, W, out=y)
     """
     if a.ndim != 2:
         raise ValueError(f"matmul requires 2D arrays, got {a.ndim}D for first argument")
@@ -365,6 +381,18 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
 
     _validate_same_dtype(a, b, "matmul")
 
+    # Validate out array if provided
+    if out is not None:
+        expected_shape = (a.shape[0], b.shape[1])
+        if out.shape != expected_shape:
+            raise ValueError(
+                f"out shape {out.shape} does not match expected {expected_shape}"
+            )
+        if out.dtype != a.dtype:
+            raise ValueError(
+                f"out dtype {out.dtype} does not match input dtype {a.dtype}"
+            )
+
     # Check TF32 dtype requirement early (before backend dispatch)
     if use_tf32 is True:
         from pygpukit.core.dtypes import float32
@@ -375,25 +403,39 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _matmul_native(a, b, use_tf32=use_tf32)
+        return _matmul_native(a, b, out=out, use_tf32=use_tf32)
     else:
-        return _matmul_cpu(a, b)
+        return _matmul_cpu(a, b, out=out)
 
 
-def _matmul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
+def _matmul_cpu(a: GPUArray, b: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """CPU implementation of matmul."""
     a_np = a.to_numpy()
     b_np = b.to_numpy()
-    result_np = np.matmul(a_np, b_np)
-    return from_numpy(result_np)
+    if out is not None:
+        out_np = out.to_numpy()
+        np.matmul(a_np, b_np, out=out_np)
+        # Copy back to GPU - this is inefficient but CPU backend is for fallback only
+        out._data = from_numpy(out_np)._data
+        return out
+    else:
+        result_np = np.matmul(a_np, b_np)
+        return from_numpy(result_np)
 
 
-def _matmul_native(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArray:
+def _matmul_native(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+    use_tf32: bool | None = None,
+) -> GPUArray:
     """Native C++ CUDA implementation of matmul (zero-copy).
 
     Args:
         a: First input array.
         b: Second input array.
+        out: Optional output array. If provided, result is written in-place.
         use_tf32: Whether to use TF32 TensorCore acceleration.
             None means use environment variable PYGPUKIT_ALLOW_TF32.
     """
@@ -405,16 +447,21 @@ def _matmul_native(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) ->
     a_native = a._get_native()
     b_native = b._get_native()
 
-    # Perform operation on GPU
-    if use_tf32 is not None:
-        # Use explicit TF32 control
-        c_native = native.matmul_tf32(a_native, b_native, use_tf32)
+    if out is not None:
+        # In-place operation - write to existing buffer
+        out_native = out._get_native()
+        if use_tf32 is not None:
+            native.matmul_tf32_(a_native, b_native, out_native, use_tf32)
+        else:
+            native.matmul_(a_native, b_native, out_native)
+        return out
     else:
-        # Use environment variable for TF32 control
-        c_native = native.matmul(a_native, b_native)
-
-    # Wrap result (zero-copy)
-    return GPUArray._wrap_native(c_native)
+        # Allocate new output
+        if use_tf32 is not None:
+            c_native = native.matmul_tf32(a_native, b_native, use_tf32)
+        else:
+            c_native = native.matmul(a_native, b_native)
+        return GPUArray._wrap_native(c_native)
 
 
 # ============================================================================
@@ -828,6 +875,8 @@ def rmsnorm(
     input: GPUArray,
     gamma: GPUArray,
     eps: float = 1e-5,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """RMS Normalization (Root Mean Square Normalization).
 
@@ -840,9 +889,11 @@ def rmsnorm(
         input: Input array of shape [batch, features].
         gamma: Scale parameter of shape [features].
         eps: Small epsilon for numerical stability.
+        out: Optional output buffer. If provided, result is written in-place
+            (for CUDA Graph capture).
 
     Returns:
-        A new GPUArray containing the normalized output.
+        A new GPUArray containing the normalized output (or out if provided).
 
     Raises:
         ValueError: If shapes or dtypes don't match.
@@ -860,18 +911,27 @@ def rmsnorm(
     if gamma.shape[0] != features:
         raise ValueError(f"rmsnorm: gamma size {gamma.shape[0]} must match features {features}")
 
+    # Validate out array if provided
+    if out is not None:
+        if out.shape != input.shape:
+            raise ValueError(f"out shape {out.shape} does not match input shape {input.shape}")
+        if out.dtype != input.dtype:
+            raise ValueError(f"out dtype {out.dtype} does not match input dtype {input.dtype}")
+
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _rmsnorm_native(input, gamma, eps)
+        return _rmsnorm_native(input, gamma, eps, out=out)
     else:
-        return _rmsnorm_cpu(input, gamma, eps)
+        return _rmsnorm_cpu(input, gamma, eps, out=out)
 
 
 def _rmsnorm_cpu(
     input: GPUArray,
     gamma: GPUArray,
     eps: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """CPU implementation of rmsnorm."""
     x = input.to_numpy()
@@ -882,6 +942,12 @@ def _rmsnorm_cpu(
 
     # Normalize and scale
     result = (x / rms) * g
+
+    if out is not None:
+        out_np = out.to_numpy()
+        np.copyto(out_np, result)
+        out._data = from_numpy(out_np)._data
+        return out
     return from_numpy(result)
 
 
@@ -889,6 +955,8 @@ def _rmsnorm_native(
     input: GPUArray,
     gamma: GPUArray,
     eps: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """Native C++ CUDA implementation of rmsnorm (zero-copy)."""
     from pygpukit.core.backend import get_native_module
@@ -896,8 +964,14 @@ def _rmsnorm_native(
     native = get_native_module()
     input_native = input._get_native()
     gamma_native = gamma._get_native()
-    c_native = native.rmsnorm(input_native, gamma_native, eps)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.rmsnorm_(input_native, gamma_native, out_native, eps)
+        return out
+    else:
+        c_native = native.rmsnorm(input_native, gamma_native, eps)
+        return GPUArray._wrap_native(c_native)
 
 
 def linear_bias_gelu(

@@ -68,6 +68,12 @@ except ImportError:
     DeviceCapabilities = FallbackDeviceCapabilities
     KernelType = None
 
+# Import CUDA Graph from native module
+try:
+    from pygpukit._pygpukit_native import CudaGraph
+except ImportError:
+    CudaGraph = None
+
 __all__ = [
     # Version
     "__version__",
@@ -136,4 +142,6 @@ __all__ = [
     "max",
     # LLM support
     "llm",
+    # CUDA Graph
+    "CudaGraph",
 ]

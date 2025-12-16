@@ -5,6 +5,7 @@
 #include "../core/device.hpp"
 #include "../core/memory.hpp"
 #include "../core/stream.hpp"
+#include "../core/cuda_graph.hpp"
 
 namespace py = pybind11;
 using namespace pygpukit;
@@ -191,5 +192,43 @@ void init_core_bindings(py::module_& m) {
         .def("__repr__", [](const Stream& self) {
             return std::string("Stream(priority=") +
                    (self.priority() == StreamPriority::High ? "High" : "Low") + ")";
+        });
+
+    // CudaGraph class for optimized decode
+    py::class_<CudaGraph>(m, "CudaGraph")
+        .def(py::init<>(),
+             "Create a CUDA Graph for capturing and replaying operations.\n\n"
+             "CUDA Graphs reduce kernel launch overhead by capturing a sequence of\n"
+             "operations and replaying them with minimal CPU involvement.\n\n"
+             "Usage:\n"
+             "  graph = CudaGraph()\n"
+             "  graph.begin_capture()\n"
+             "  # ... execute operations to capture ...\n"
+             "  graph.end_capture()\n"
+             "  graph.replay()  # Fast execution")
+        .def("begin_capture", &CudaGraph::begin_capture,
+             "Begin capturing CUDA operations.\n"
+             "All subsequent CUDA operations will be recorded into the graph.")
+        .def("end_capture", &CudaGraph::end_capture,
+             "End capturing and create an executable graph.\n"
+             "After this call, the graph can be replayed.")
+        .def("replay", &CudaGraph::replay,
+             "Replay the captured graph.\n"
+             "Executes all captured operations with minimal CPU overhead.")
+        .def("reset", &CudaGraph::reset,
+             "Reset the graph, freeing all resources.\n"
+             "After reset, begin_capture() can be called again.")
+        .def("is_ready", &CudaGraph::is_ready,
+             "Check if the graph has been captured and is ready for replay.")
+        .def("is_capturing", &CudaGraph::is_capturing,
+             "Check if the graph is currently capturing operations.")
+        .def_property_readonly("num_nodes", &CudaGraph::num_nodes,
+             "Get the number of nodes in the captured graph.")
+        .def("__repr__", [](const CudaGraph& self) {
+            if (self.is_ready()) {
+                return "CudaGraph(ready, nodes=" + std::to_string(self.num_nodes()) + ")";
+            } else {
+                return std::string("CudaGraph(not ready)");
+            }
         });
 }

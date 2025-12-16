@@ -12,6 +12,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include "../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {
@@ -399,9 +400,9 @@ sgemm_bf16_tc_generic_kernel(
 // ============================================================
 inline cudaError_t launch_sgemm_f16_tc_generic(
     const __half* A, const __half* B, __half* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     dim3 block(128);  // 4 warps
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
     sgemm_f16_tc_generic_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
@@ -410,9 +411,9 @@ inline cudaError_t launch_sgemm_f16_tc_generic(
 
 inline cudaError_t launch_sgemm_bf16_tc_generic(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     dim3 block(128);  // 4 warps
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
     sgemm_bf16_tc_generic_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);

@@ -546,7 +546,14 @@ class Linear:
         self.in_features = weight.shape[1]
         self._weight_t: GPUArray | None = None
 
-    def __call__(self, x: GPUArray) -> GPUArray:
+    def __call__(self, x: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
+        """Forward pass: y = xW^T + b
+
+        Args:
+            x: Input tensor [batch, in_features]
+            out: Optional output buffer [batch, out_features]. If provided,
+                 result is written in-place (for CUDA Graph capture).
+        """
         if x.ndim != 2:
             raise ValueError(f"input must be 2D [batch, in_features], got {x.ndim}D")
         if x.shape[1] != self.in_features:
@@ -555,7 +562,7 @@ class Linear:
         if self._weight_t is None:
             self._weight_t = transpose(self.weight)
 
-        y = matmul(x, self._weight_t)
+        y = matmul(x, self._weight_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)

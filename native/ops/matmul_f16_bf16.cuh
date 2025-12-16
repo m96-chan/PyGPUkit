@@ -14,6 +14,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include "../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {
@@ -62,9 +63,9 @@ __global__ void sgemm_bf16_simple_kernel(
 // Launch FP16 matmul
 inline cudaError_t launch_sgemm_f16(
     const __half* A, const __half* B, __half* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     sgemm_f16_simple_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
@@ -74,9 +75,9 @@ inline cudaError_t launch_sgemm_f16(
 // Launch BF16 matmul
 inline cudaError_t launch_sgemm_bf16(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
     sgemm_bf16_simple_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);

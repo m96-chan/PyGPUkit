@@ -157,7 +157,7 @@ def demo_paged_attention():
     num_blocks = 64
     max_context_len = 256
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  Sequences: {num_seqs}")
     print(f"  Heads: {num_heads} (Q), {num_kv_heads} (KV)")
     print(f"  Head dim: {head_dim}")
@@ -257,12 +257,12 @@ def demo_paged_attention():
 
     slot_mapping_decode = native.from_numpy(np.array(new_slots, dtype=np.int32))
     native.copy_to_paged_cache(k_new_gpu, v_new_gpu, k_cache, v_cache, slot_mapping_decode)
-    print(f"  Added 1 token to each sequence")
+    print("  Added 1 token to each sequence")
 
     # Memory efficiency calculation
     used_blocks = sum(blocks_per_seq)
     utilization = used_blocks / num_blocks * 100
-    print(f"\nMemory efficiency:")
+    print("\nMemory efficiency:")
     print(f"  Block utilization: {utilization:.1f}%")
     print(f"  Fragmentation: {100 - utilization:.1f}%")
 
@@ -293,7 +293,7 @@ def demo_continuous_batching():
     seq_lens = [64, 1, 32, 1]  # 2 prefill (64, 32), 2 decode (1, 1)
     total_tokens = sum(seq_lens)
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  Batch size: {batch_size}")
     print(f"  Sequence lengths: {seq_lens}")
     print(f"  Total tokens: {total_tokens}")
@@ -515,7 +515,7 @@ def main():
     try:
         import pygpukit as gk
 
-        print(f"\nPyGPUkit loaded successfully")
+        print("\nPyGPUkit loaded successfully")
         print(f"  CUDA available: {gk.is_cuda_available()}")
     except ImportError as e:
         print(f"\nError importing PyGPUkit: {e}")

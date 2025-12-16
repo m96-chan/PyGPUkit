@@ -107,6 +107,9 @@ GPUArray softmax(const GPUArray& input);
 // Simpler than LayerNorm (no mean subtraction, no beta)
 GPUArray rmsnorm(const GPUArray& input, const GPUArray& gamma, float eps = 1e-5f);
 
+// RMSNorm with output buffer (for CUDA Graph capture)
+void rmsnorm(const GPUArray& input, const GPUArray& gamma, GPUArray& out, float eps = 1e-5f);
+
 // SiLU (Swish) activation: y = x * sigmoid(x)
 GPUArray silu(const GPUArray& input);
 

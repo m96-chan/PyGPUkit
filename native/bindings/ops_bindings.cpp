@@ -146,11 +146,16 @@ void init_ops_bindings(py::module_& m) {
           "Applied row-wise: input [batch, features] -> output [batch, features]");
 
     // RMSNorm
-    m.def("rmsnorm", &ops::rmsnorm,
+    m.def("rmsnorm", py::overload_cast<const GPUArray&, const GPUArray&, float>(&ops::rmsnorm),
           py::arg("input"), py::arg("gamma"), py::arg("eps") = 1e-5f,
           "RMS normalization: x / sqrt(mean(x^2) + eps) * gamma\n"
           "Simpler than LayerNorm (no mean subtraction, no beta)\n"
           "input: [batch, features], gamma: [features]");
+
+    // RMSNorm with output buffer (for CUDA Graph capture)
+    m.def("rmsnorm_", py::overload_cast<const GPUArray&, const GPUArray&, GPUArray&, float>(&ops::rmsnorm),
+          py::arg("input"), py::arg("gamma"), py::arg("out"), py::arg("eps") = 1e-5f,
+          "RMS normalization with output buffer (for CUDA Graph capture)");
 
     // ========================================================================
     // Fused Operations (CUTLASS Epilogue Fusion)

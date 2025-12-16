@@ -5,6 +5,7 @@
 #include "../common/error.cuh"
 #include "../common/device.cuh"
 #include "../../core/memory.hpp"
+#include "../../core/cuda_graph.hpp"
 #include "../ops.cuh"  // For transpose()
 
 // Include existing optimized kernels
@@ -129,6 +130,9 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
         cudaError_t err = cudaSuccess;
         bool used_cutlass = false;
 
+        // Get current stream (capture stream if available, otherwise default)
+        cudaStream_t stream = internal::get_capture_stream();
+
         switch (a.dtype()) {
             case DataType::Float32:
                 if (cutlass_tf32_enabled) {
@@ -136,7 +140,7 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                         static_cast<const float*>(a.data()),
                         static_cast<const float*>(b.data()),
                         static_cast<float*>(c.data()),
-                        M, N, K, nullptr);
+                        M, N, K, stream);
                     used_cutlass = true;
                 }
                 break;
@@ -146,7 +150,7 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                         static_cast<const __half*>(a.data()),
                         static_cast<const __half*>(b.data()),
                         static_cast<__half*>(c.data()),
-                        M, N, K, nullptr);
+                        M, N, K, stream);
                     used_cutlass = true;
                 }
                 break;
@@ -156,7 +160,7 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                         static_cast<const __nv_bfloat16*>(a.data()),
                         static_cast<const __nv_bfloat16*>(b.data()),
                         static_cast<__nv_bfloat16*>(c.data()),
-                        M, N, K, nullptr);
+                        M, N, K, stream);
                     used_cutlass = true;
                 }
                 break;
@@ -516,6 +520,7 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
     if (use_cutlass) {
         // CUTLASS fused BiasGELU kernel path
         cudaError_t err = cudaSuccess;
+        cudaStream_t stream = internal::get_capture_stream();
 
         switch (input.dtype()) {
             case DataType::Float32:
@@ -524,7 +529,7 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
                     static_cast<const float*>(weight_T.data()),
                     static_cast<const float*>(bias.data()),
                     static_cast<float*>(output.data()),
-                    batch, out_features, in_features, nullptr);
+                    batch, out_features, in_features, stream);
                 break;
             case DataType::Float16:
                 err = cutlass_gemm_fp16_bias_gelu(
@@ -532,7 +537,7 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
                     static_cast<const __half*>(weight_T.data()),
                     static_cast<const __half*>(bias.data()),
                     static_cast<__half*>(output.data()),
-                    batch, out_features, in_features, nullptr);
+                    batch, out_features, in_features, stream);
                 break;
             case DataType::BFloat16:
                 err = cutlass_gemm_bf16_bias_gelu(
@@ -540,7 +545,7 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
                     static_cast<const __nv_bfloat16*>(weight_T.data()),
                     static_cast<const __nv_bfloat16*>(bias.data()),
                     static_cast<__nv_bfloat16*>(output.data()),
-                    batch, out_features, in_features, nullptr);
+                    batch, out_features, in_features, stream);
                 break;
             default:
                 throw std::runtime_error("linear_bias_gelu only supports float32, float16, and bfloat16");

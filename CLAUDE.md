@@ -465,6 +465,29 @@ Edit → Build → Validate → Benchmark → Commit
 
 **Always commit after validation and benchmark, regardless of results.**
 
+### Build Instructions (IMPORTANT)
+
+**CUDA 13.1でビルドする場合（推奨）：**
+
+```cmd
+:: Windows Command Prompt (cmd.exe) から実行
+:: Git Bashからは実行しないこと！環境変数が伝播しない
+cd D:\Projects\m96-chan\PyGPUkit
+scripts\build_cuda13.bat
+```
+
+**CUDA 12.xでビルドする場合：**
+
+```cmd
+cd D:\Projects\m96-chan\PyGPUkit
+scripts\build_cuda12.bat
+```
+
+**注意事項：**
+- 必ずWindowsのcmd.exeから実行すること（Git Bash不可）
+- VS Developer Command Promptからでも可
+- ビルドスクリプトがvcvars64.batを呼び出してVS環境をセットアップする
+
 ### Pre-Commit Checks (MANDATORY)
 
 **Before EVERY commit, run these checks:**
@@ -674,3 +697,42 @@ Leveraging vendor or OSS-optimized kernels is acceptable and encouraged.
 - Rust-side async memory transfer engine
 - Rust-side kernel dispatch controller
 - Python API wrappers for Rust scheduler/memory pool (thin wrappers only)
+
+---
+
+## Development Environment
+
+### Build Instructions
+
+**CUDA 13.1でビルドする場合（推奨）：**
+
+```cmd
+:: Windows Command Prompt (cmd.exe) から実行
+:: Git Bashからは実行しないこと！環境変数が伝播しない
+cd D:\Projects\m96-chan\PyGPUkit
+scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
+scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100)
+```
+
+### Tokenizer
+
+**PyGPUkit内蔵のTokenizerは使用しない。HuggingFace `tokenizers`ライブラリを使用する。**
+
+```python
+# 推奨: HuggingFace tokenizers
+from tokenizers import Tokenizer
+tokenizer = Tokenizer.from_file("/path/to/tokenizer.json")
+
+# 非推奨: 内蔵Tokenizer (互換性問題あり)
+# from pygpukit.llm import Tokenizer
+```
+
+### Test Models (Local)
+
+```
+# Qwen3-8B (テスト用)
+/c/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/
+
+# TinyLlama-1.1B
+/c/Users/y_har/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/*/
+```
