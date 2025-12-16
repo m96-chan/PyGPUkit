@@ -338,6 +338,7 @@ class Attention:
     - Multi-Head Attention (MHA): num_kv_heads == num_heads
     - Grouped Query Attention (GQA): num_kv_heads < num_heads
     - RoPE: enabled via config.use_rope
+    - QK Norm: optional normalization of Q and K (Qwen3 style)
     - Hybrid execution: CPU for seq_len=1, GPU for longer sequences
     """
 
@@ -352,11 +353,17 @@ class Attention:
         k_bias: GPUArray | None = None,
         v_bias: GPUArray | None = None,
         o_bias: GPUArray | None = None,
+        q_norm: Norm | None = None,
+        k_norm: Norm | None = None,
     ):
         self.q_proj = Linear(q_proj, q_bias)
         self.k_proj = Linear(k_proj, k_bias)
         self.v_proj = Linear(v_proj, v_bias)
         self.o_proj = Linear(o_proj, o_bias)
+
+        # QK Norm (Qwen3 style)
+        self.q_norm = q_norm
+        self.k_norm = k_norm
 
         self.config = config
         self.head_dim = config.head_dim
@@ -421,6 +428,19 @@ class Attention:
         k = reshape_copy(k, (seq_len, self.num_kv_heads, self.head_dim))
         v = reshape_copy(v, (seq_len, self.num_kv_heads, self.head_dim))
 
+        # QK Norm (Qwen3 style) - applied per head before RoPE
+        # Reshape to 2D for norm, then back to 3D
+        if self.q_norm is not None:
+            q_shape = (seq_len, self.num_heads, self.head_dim)
+            q_2d = reshape_copy(q, (seq_len * self.num_heads, self.head_dim))
+            q_2d = self.q_norm(q_2d)
+            q = reshape_copy(q_2d, q_shape)
+        if self.k_norm is not None:
+            k_shape = (seq_len, self.num_kv_heads, self.head_dim)
+            k_2d = reshape_copy(k, (seq_len * self.num_kv_heads, self.head_dim))
+            k_2d = self.k_norm(k_2d)
+            k = reshape_copy(k_2d, k_shape)
+
         # Apply RoPE on GPU
         if self.config.use_rope:
             cos = from_numpy(self._cos[position_ids].astype(np.float32))
@@ -479,6 +499,19 @@ class Attention:
         q = q.reshape(seq_len, self.num_heads, self.head_dim)
         k = k.reshape(seq_len, self.num_kv_heads, self.head_dim)
         v = v.reshape(seq_len, self.num_kv_heads, self.head_dim)
+
+        # QK Norm (Qwen3 style) - applied per head before RoPE
+        # Reshape to 2D for norm, then back to 3D
+        if self.q_norm is not None:
+            q_shape = q.shape
+            q_2d = q.reshape(seq_len * self.num_heads, self.head_dim)
+            q_2d = self.q_norm(from_numpy(q_2d.astype(np.float32))).to_numpy()
+            q = q_2d.reshape(q_shape)
+        if self.k_norm is not None:
+            k_shape = k.shape
+            k_2d = k.reshape(seq_len * self.num_kv_heads, self.head_dim)
+            k_2d = self.k_norm(from_numpy(k_2d.astype(np.float32))).to_numpy()
+            k = k_2d.reshape(k_shape)
 
         # Apply RoPE (CPU)
         if self.config.use_rope:
@@ -1147,6 +1180,180 @@ def load_llama_from_safetensors(
         lm_head = load_tensor("lm_head.weight")
 
     return LlamaModel(transformer_config, embed_tokens, blocks, final_norm, lm_head)
+
+
+# =============================================================================
+# Qwen3 Configuration and Loader
+# =============================================================================
+
+
+@dataclass
+class Qwen3Config:
+    """Configuration for Qwen3 model."""
+
+    vocab_size: int = 151936
+    hidden_size: int = 4096
+    intermediate_size: int = 12288
+    num_hidden_layers: int = 36
+    num_attention_heads: int = 32
+    num_key_value_heads: int = 8
+    head_dim: int = 128  # Qwen3 uses 128, not hidden_size // num_heads
+    max_position_embeddings: int = 40960
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 1000000.0
+
+    def to_transformer_config(self) -> TransformerConfig:
+        """Convert to unified TransformerConfig."""
+        return TransformerConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_hidden_layers,
+            num_heads=self.num_attention_heads,
+            num_kv_heads=self.num_key_value_heads,
+            intermediate_size=self.intermediate_size,
+            norm_type="rmsnorm",
+            activation="silu",
+            use_rope=True,
+            causal=True,
+            max_position_embeddings=self.max_position_embeddings,
+            norm_eps=self.rms_norm_eps,
+            rope_theta=self.rope_theta,
+        )
+
+
+def load_qwen3_from_safetensors(
+    model_path: str,
+    config: Qwen3Config | None = None,
+) -> CausalTransformerModel:
+    """Load Qwen3 model from safetensors file (single or sharded).
+
+    Args:
+        model_path: Path to model.safetensors or model.safetensors.index.json
+        config: Model configuration (auto-detected if None)
+
+    Returns:
+        CausalTransformerModel instance
+    """
+    from pygpukit.llm import load_safetensors
+
+    st = load_safetensors(model_path)
+
+    # Auto-detect config
+    if config is None:
+        embed_info = st.tensor_info("model.embed_tokens.weight")
+        vocab_size = embed_info.shape[0]
+        hidden_size = embed_info.shape[1]
+
+        num_layers = 0
+        while f"model.layers.{num_layers}.self_attn.q_proj.weight" in st.tensor_names:
+            num_layers += 1
+
+        q_info = st.tensor_info("model.layers.0.self_attn.q_proj.weight")
+        k_info = st.tensor_info("model.layers.0.self_attn.k_proj.weight")
+        gate_info = st.tensor_info("model.layers.0.mlp.gate_proj.weight")
+
+        # Qwen3 uses explicit head_dim from q_norm shape
+        q_norm_info = st.tensor_info("model.layers.0.self_attn.q_norm.weight")
+        head_dim = q_norm_info.shape[0]
+
+        num_heads = q_info.shape[0] // head_dim
+        num_kv_heads = k_info.shape[0] // head_dim
+
+        config = Qwen3Config(
+            vocab_size=vocab_size,
+            hidden_size=hidden_size,
+            intermediate_size=gate_info.shape[0],
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            num_key_value_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+
+    transformer_config = config.to_transformer_config()
+
+    def load_tensor(name: str) -> GPUArray:
+        data = st.tensor_bytes(name)
+        info = st.tensor_info(name)
+        if info.dtype == 2:  # BFloat16
+            arr = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
+            arr_f32 = np.empty(arr.shape, dtype=np.float32)
+            arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
+            return from_numpy(arr_f32)
+        else:
+            dtype_map = {0: np.float32, 1: np.float16, 3: np.float64}
+            np_dtype = dtype_map.get(info.dtype, np.float32)
+            arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape)
+            return from_numpy(arr.copy().astype(np.float32))
+
+    # Embeddings
+    embed_tokens = load_tensor("model.embed_tokens.weight")
+
+    # Blocks
+    blocks = []
+    for i in range(config.num_hidden_layers):
+        prefix = f"model.layers.{i}."
+
+        # Attention norm
+        attn_norm = Norm(
+            load_tensor(f"{prefix}input_layernorm.weight"),
+            None,
+            "rmsnorm",
+            config.rms_norm_eps,
+        )
+
+        # QK Norm (Qwen3 specific)
+        q_norm = Norm(
+            load_tensor(f"{prefix}self_attn.q_norm.weight"),
+            None,
+            "rmsnorm",
+            config.rms_norm_eps,
+        )
+        k_norm = Norm(
+            load_tensor(f"{prefix}self_attn.k_norm.weight"),
+            None,
+            "rmsnorm",
+            config.rms_norm_eps,
+        )
+
+        # Attention with QK Norm
+        attn = Attention(
+            load_tensor(f"{prefix}self_attn.q_proj.weight"),
+            load_tensor(f"{prefix}self_attn.k_proj.weight"),
+            load_tensor(f"{prefix}self_attn.v_proj.weight"),
+            load_tensor(f"{prefix}self_attn.o_proj.weight"),
+            transformer_config,
+            q_norm=q_norm,
+            k_norm=k_norm,
+        )
+
+        # MLP norm
+        mlp_norm = Norm(
+            load_tensor(f"{prefix}post_attention_layernorm.weight"),
+            None,
+            "rmsnorm",
+            config.rms_norm_eps,
+        )
+
+        # MLP
+        mlp = MLP(
+            transformer_config,
+            gate_proj=load_tensor(f"{prefix}mlp.gate_proj.weight"),
+            up_proj=load_tensor(f"{prefix}mlp.up_proj.weight"),
+            down_proj=load_tensor(f"{prefix}mlp.down_proj.weight"),
+        )
+
+        block = TransformerBlock(attn_norm, attn, mlp_norm, mlp)
+        blocks.append(block)
+
+    # Final norm
+    final_norm = Norm(load_tensor("model.norm.weight"), None, "rmsnorm", config.rms_norm_eps)
+
+    # LM head
+    lm_head = None
+    if "lm_head.weight" in st.tensor_names:
+        lm_head = load_tensor("lm_head.weight")
+
+    return CausalTransformerModel(transformer_config, embed_tokens, blocks, final_norm, lm_head)
 
 
 # =============================================================================
