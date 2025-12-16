@@ -365,12 +365,32 @@ def load_safetensors(path: str) -> SafeTensorsFile | ShardedSafeTensorsFile:
 class Tokenizer:
     """BPE Tokenizer for GPT-2 style models.
 
-    Loads tokenizer.json format and provides basic encode/decode functionality.
+    **⚠️ EXPERIMENTAL: This tokenizer is intended for demos and testing only.**
+
+    For production use, we recommend HuggingFace tokenizers:
+    - https://github.com/huggingface/tokenizers
+    - pip install tokenizers
+
+    PyGPUkit's core responsibility is GPU execution, not tokenization.
+    The model API expects token IDs as input - use your preferred tokenizer
+    to convert text to token IDs before passing to PyGPUkit models.
+
+    Limitations:
+    - Only supports a subset of HuggingFace tokenizer.json formats
+    - May not work with all models (e.g., Qwen3 uses unsupported format)
+    - No chat template support
+    - No special token handling beyond BOS/EOS/PAD
 
     Example:
+        >>> # For demos/testing only
         >>> tok = Tokenizer("tokenizer.json")
         >>> ids = tok.encode("Hello, world!")
         >>> text = tok.decode(ids)
+
+        >>> # For production, use HuggingFace tokenizers:
+        >>> from tokenizers import Tokenizer as HFTokenizer
+        >>> hf_tok = HFTokenizer.from_file("tokenizer.json")
+        >>> ids = hf_tok.encode("Hello, world!").ids
     """
 
     def __init__(self, path: str):

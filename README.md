@@ -84,25 +84,34 @@ Runtime SM detection with architecture-optimized kernel variants:
 PyGPUkit includes built-in support for loading and running LLM models.
 See the [LLM Guide](docs/llm.md) for detailed documentation.
 
+**Important:** PyGPUkit's core responsibility is **GPU execution**, not tokenization.
+- The model API expects **token IDs as input**, not raw text
+- For production tokenization, use [HuggingFace tokenizers](https://github.com/huggingface/tokenizers)
+- The built-in `Tokenizer` class is **experimental** and intended for demos only
+
 ```python
-from pygpukit.llm import SafeTensorsFile, Tokenizer
+from pygpukit.llm import SafeTensorsFile, load_model_from_safetensors, detect_model_spec
 
 # Load safetensors (memory-mapped, zero-copy)
 st = SafeTensorsFile("model.safetensors")
 print(f"Tensors: {st.num_tensors}, Size: {st.file_size / 1e9:.2f} GB")
 
-# Tokenizer (HuggingFace format)
-tok = Tokenizer("tokenizer.json")
-ids = tok.encode("Hello, world!")
-text = tok.decode(ids)
+# Load model with automatic architecture detection
+spec = detect_model_spec(st.tensor_names)
+model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
+
+# Generate with token IDs (use HuggingFace tokenizers for production)
+input_ids = [1, 2, 3, 4]  # Your tokenizer's output
+output_ids = model.generate(input_ids, max_new_tokens=32)
 ```
 
 | Component | Description |
 |-----------|-------------|
 | `SafeTensorsFile` | Memory-mapped .safetensors loading |
-| `Tokenizer` | BPE tokenizer (HuggingFace format) |
-| `GPT2Model` | GPT-2 model (MLP-only MVP) |
-| `Linear`, `LayerNorm`, `MLP` | Model building blocks |
+| `CausalTransformerModel` | Unified model for GPT-2, LLaMA, Qwen3 |
+| `load_model_from_safetensors` | Load model with auto-detection |
+| `detect_model_spec` | Auto-detect model architecture |
+| `Tokenizer` | **Experimental** BPE tokenizer (demos only) |
 
 ---
 
@@ -446,6 +455,7 @@ PyGPUkit/
 | **v0.2.6** | **CUTLASS backend** (31 TFLOPS TF32, 63 TFLOPS FP16/BF16), Multi-LLM concurrent execution |
 | **v0.2.7** | **Epilogue fusion** (linear+bias+gelu), Multi-SM kernels, API review |
 | **v0.2.8** | CUTLASS v4.3.3 update, auto-update workflow |
+| **v0.2.9** | **Unified LLM interface** (CausalTransformerModel), ModelSpec abstraction, GPT-2/LLaMA/Qwen3 support |
 
 ### Planned
 
@@ -473,7 +483,8 @@ All functions exported via `pygpukit.*` are part of the stable public API:
 | **Reductions** | `sum`, `mean`, `max` |
 | **Neural** | `layernorm`, `bias_add_inplace`, `linear_bias_gelu` |
 | **Types** | `GPUArray`, `DataType`, `float32`, `float64`, `float16`, `bfloat16` |
-| **LLM** | `llm.SafeTensorsFile`, `llm.Tokenizer`, `llm.GPT2Model`, `llm.Linear` |
+| **LLM** | `llm.SafeTensorsFile`, `llm.CausalTransformerModel`, `llm.load_model_from_safetensors` |
+| **LLM (Experimental)** | `llm.Tokenizer` (use HuggingFace tokenizers for production) |
 
 ### Deprecation Policy
 APIs to be removed will emit `DeprecationWarning` for at least one minor version before removal.

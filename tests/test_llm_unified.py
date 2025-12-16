@@ -19,12 +19,12 @@ def test_type_aliases():
 def test_component_aliases():
     """Test that component aliases point to unified classes."""
     from pygpukit.llm import (
+        MLP,
         Attention,
         CausalSelfAttention,
         LlamaAttention,
         LlamaBlock,
         LlamaMLP,
-        MLP,
         Norm,
         RMSNorm,
         TransformerBlock,

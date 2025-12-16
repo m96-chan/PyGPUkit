@@ -15,6 +15,13 @@ Usage:
 Supported models:
     - LLaMA 2/3 (any size in safetensors format)
     - GPT-2 (safetensors format)
+
+Note on Tokenizer:
+    The built-in pygpukit.llm.Tokenizer is EXPERIMENTAL and intended for demos only.
+    It may not work with all tokenizer.json formats (e.g., Qwen3).
+    For production use, we recommend HuggingFace tokenizers:
+        pip install tokenizers
+        from tokenizers import Tokenizer
 """
 
 from __future__ import annotations
