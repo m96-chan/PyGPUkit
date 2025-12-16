@@ -654,11 +654,9 @@ class Attention:
         if position_ids is None:
             position_ids = list(range(seq_len))
 
-        # Hybrid routing: CPU for seq_len=1, GPU for prefill
-        if seq_len > 1:
-            return self._forward_gpu(x, position_ids, past_kv, use_cache)
-        else:
-            return self._forward_cpu(x, position_ids, past_kv, use_cache)
+        # Full GPU path for all sequence lengths (decode + prefill)
+        # GPU KV Cache (#83) eliminates CPU-GPU transfer overhead
+        return self._forward_gpu(x, position_ids, past_kv, use_cache)
 
     def _forward_gpu(
         self,
@@ -761,108 +759,6 @@ class Attention:
         attn_output = reshape_copy(attn_output, (seq_len, self.num_heads * self.head_dim))
 
         return self.o_proj(attn_output), present_kv
-
-    def _forward_cpu(
-        self,
-        x: GPUArray,
-        position_ids: list[int],
-        past_kv: tuple | None,
-        use_cache: bool,
-    ) -> tuple[GPUArray, tuple | None]:
-        """CPU path for seq_len=1 (decode) - minimal kernel overhead."""
-        seq_len = x.shape[0]
-
-        # Project Q, K, V (GPU matmul, then transfer)
-        q = self.q_proj(x).to_numpy()
-        k = self.k_proj(x).to_numpy()
-        v = self.v_proj(x).to_numpy()
-
-        # Reshape for multi-head
-        q = q.reshape(seq_len, self.num_heads, self.head_dim)
-        k = k.reshape(seq_len, self.num_kv_heads, self.head_dim)
-        v = v.reshape(seq_len, self.num_kv_heads, self.head_dim)
-
-        # QK Norm (Qwen3 style) - applied per head before RoPE
-        # Reshape to 2D for norm, then back to 3D (preserve dtype)
-        if self.q_norm is not None:
-            q_shape = q.shape
-            q_dtype = q.dtype
-            q_2d = q.reshape(seq_len * self.num_heads, self.head_dim)
-            q_2d = self.q_norm(from_numpy(q_2d)).to_numpy()
-            q = q_2d.reshape(q_shape).astype(q_dtype)
-        if self.k_norm is not None:
-            k_shape = k.shape
-            k_dtype = k.dtype
-            k_2d = k.reshape(seq_len * self.num_kv_heads, self.head_dim)
-            k_2d = self.k_norm(from_numpy(k_2d)).to_numpy()
-            k = k_2d.reshape(k_shape).astype(k_dtype)
-
-        # Apply RoPE (CPU)
-        if self.config.use_rope:
-            assert self._cos is not None and self._sin is not None
-            cos = self._cos[position_ids]
-            sin = self._sin[position_ids]
-            q, k = apply_rotary_pos_emb_numpy(q, k, cos, sin)
-
-        # Concatenate with past KV
-        if past_kv is not None:
-            past_k, past_v = past_kv
-            # past_kv can be GPUArray (from _forward_gpu) or numpy (from _forward_cpu)
-            if isinstance(past_k, GPUArray):
-                past_k = past_k.to_numpy()
-                past_v = past_v.to_numpy()
-            k = np.concatenate([past_k, k], axis=0)
-            v = np.concatenate([past_v, v], axis=0)
-
-        # Store KV cache - convert to GPU for next iteration (unified format)
-        if use_cache:
-            present_kv = (from_numpy(k), from_numpy(v))
-        else:
-            present_kv = None
-
-        # Expand for GQA
-        if self.num_kv_groups > 1:
-            k_expanded = np.repeat(k, self.num_kv_groups, axis=1)
-            v_expanded = np.repeat(v, self.num_kv_groups, axis=1)
-        else:
-            k_expanded = k
-            v_expanded = v
-
-        # CPU attention
-        q = q.transpose(1, 0, 2)
-        k_expanded = k_expanded.transpose(1, 0, 2)
-        v_expanded = v_expanded.transpose(1, 0, 2)
-
-        q_len = q.shape[1]
-        kv_len = k_expanded.shape[1]
-        scale = 1.0 / np.sqrt(self.head_dim)
-
-        attn_scores = np.matmul(q, k_expanded.transpose(0, 2, 1)) * scale
-
-        # Causal mask
-        if self.config.causal:
-            causal_mask = np.zeros((q_len, kv_len), dtype=bool)
-            for i in range(q_len):
-                start_mask = kv_len - q_len + i + 1
-                if start_mask < kv_len:
-                    causal_mask[i, start_mask:] = True
-            attn_scores[:, causal_mask] = -1e9
-
-        # Softmax
-        attn_max = attn_scores.max(axis=-1, keepdims=True)
-        attn_exp = np.exp(attn_scores - attn_max)
-        attn_weights = attn_exp / attn_exp.sum(axis=-1, keepdims=True)
-
-        # Attention output
-        attn_output = np.matmul(attn_weights, v_expanded)
-        attn_output = attn_output.transpose(1, 0, 2)
-        attn_output = attn_output.reshape(seq_len, self.num_heads * self.head_dim)
-
-        # Output projection (GPU) - use same dtype as weights
-        weight_dtype = str(self.o_proj.weight.dtype)
-        out_dtype = np.float16 if weight_dtype == "float16" else np.float32
-        out = from_numpy(attn_output.astype(out_dtype))
-        return self.o_proj(out), present_kv
 
 
 # =============================================================================
