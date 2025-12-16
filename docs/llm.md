@@ -2,11 +2,67 @@
 
 PyGPUkit provides native support for loading and running LLM models with efficient GPU acceleration.
 
+## Quick Start
+
+```python
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
+
+# Auto-detect and load any supported model
+st = load_safetensors("model.safetensors")
+spec = detect_model_spec(st.tensor_names)
+model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
+
+# Generate text (use HuggingFace tokenizers for production)
+from tokenizers import Tokenizer
+tokenizer = Tokenizer.from_file("tokenizer.json")
+input_ids = tokenizer.encode("Hello, world!").ids
+
+output_ids = model.generate(
+    input_ids,
+    max_new_tokens=32,
+    temperature=0.7,
+    use_cache=True,
+)
+print(tokenizer.decode(output_ids))
+```
+
+---
+
+## Supported Models
+
+| Architecture | Models | Features |
+|--------------|--------|----------|
+| **GPT-2** | GPT-2 (all sizes) | LayerNorm, GELU, Position Embedding |
+| **LLaMA** | LLaMA 2/3, TinyLlama, Mistral | RMSNorm, SiLU, RoPE, GQA |
+| **Qwen3** | Qwen3 (all sizes) | RMSNorm, SiLU, RoPE, GQA, QK-Norm |
+
+---
+
+## Tokenizer Policy
+
+> **Important:** PyGPUkit's core responsibility is **GPU execution**, not tokenization.
+
+- The model API expects **token IDs as input**, not raw text
+- For production use, we recommend [HuggingFace tokenizers](https://github.com/huggingface/tokenizers)
+- The built-in `Tokenizer` class is **experimental** and intended for demos only
+
+```python
+# Recommended: HuggingFace tokenizers
+from tokenizers import Tokenizer
+tokenizer = Tokenizer.from_file("tokenizer.json")
+input_ids = tokenizer.encode("Hello").ids
+output_text = tokenizer.decode(output_ids)
+
+# Experimental: PyGPUkit built-in (demos only)
+from pygpukit.llm import Tokenizer
+tok = Tokenizer("tokenizer.json")  # May not work with all formats
+```
+
+---
+
 ## SafeTensors Loading
 
-SafeTensors is a safe, fast format for storing tensors. PyGPUkit uses memory-mapped loading for zero-copy access.
-
-### Basic Usage
+### Single File
 
 ```python
 from pygpukit.llm import SafeTensorsFile, load_safetensors
@@ -17,9 +73,22 @@ st = load_safetensors("model.safetensors")
 # File information
 print(f"Number of tensors: {st.num_tensors}")
 print(f"File size: {st.file_size / 1e9:.2f} GB")
-
-# List all tensor names
 print(f"Tensors: {st.tensor_names}")
+```
+
+### Sharded Models (Large Models)
+
+```python
+from pygpukit.llm import load_safetensors
+
+# Automatically handles sharded models
+st = load_safetensors("model.safetensors.index.json")
+print(f"Shards: {len(st._shard_files)}")
+print(f"Total tensors: {st.num_tensors}")
+
+# Access tensors transparently (lazy loading)
+info = st.tensor_info("model.embed_tokens.weight")
+data = st.tensor_bytes("model.embed_tokens.weight")
 ```
 
 ### Tensor Metadata
@@ -33,312 +102,243 @@ st = SafeTensorsFile("model.safetensors")
 info = st.tensor_info("model.embed_tokens.weight")
 print(f"Name: {info.name}")
 print(f"Shape: {info.shape}")
-print(f"Dtype: {info.dtype_name}")  # float16, bfloat16, float32, etc.
+print(f"Dtype: {info.dtype_name}")  # float16, bfloat16, float32
 print(f"Size: {info.size_bytes / 1e6:.1f} MB")
-print(f"Elements: {info.numel}")
-```
-
-### Loading Tensor Data
-
-```python
-from pygpukit.llm import SafeTensorsFile
-import pygpukit as gpk
-import numpy as np
-
-st = SafeTensorsFile("model.safetensors")
-
-# Get raw bytes
-data = st.tensor_bytes("model.embed_tokens.weight")
-
-# Load as float32 numpy array (if tensor is float32)
-np_array = st.tensor_as_f32("model.embed_tokens.weight")
-
-# Manual conversion for other dtypes
-info = st.tensor_info("model.layers.0.self_attn.q_proj.weight")
-data = st.tensor_bytes("model.layers.0.self_attn.q_proj.weight")
-
-if info.dtype_name == "float16":
-    np_arr = np.frombuffer(data, dtype=np.float16).reshape(info.shape)
-elif info.dtype_name == "bfloat16":
-    # BFloat16 needs special handling
-    raw = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
-    np_arr = raw.view(np.float32)  # Reinterpret as float32
-```
-
-### Iterating Over Tensors
-
-```python
-from pygpukit.llm import SafeTensorsFile
-
-st = SafeTensorsFile("model.safetensors")
-
-# Check if tensor exists
-if "model.embed_tokens.weight" in st:
-    print("Embedding found!")
-
-# Iterate over all tensors
-for name in st.tensor_names:
-    info = st.tensor_info(name)
-    print(f"{name}: {info.shape} ({info.dtype_name})")
 ```
 
 ---
 
-## Tokenizer
+## Model Loading
 
-PyGPUkit includes a BPE tokenizer compatible with HuggingFace's `tokenizer.json` format.
-
-### Loading a Tokenizer
+### Automatic Detection
 
 ```python
-from pygpukit.llm import Tokenizer
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
 
-# Load from file
-tok = Tokenizer("tokenizer.json")
+# Load safetensors and detect model type
+st = load_safetensors("model.safetensors")
+spec = detect_model_spec(st.tensor_names)
+print(f"Detected: {spec.name}")  # "gpt2", "llama", or "qwen3"
 
-# Or from JSON string
-import json
-with open("tokenizer.json") as f:
-    json_str = f.read()
-tok = Tokenizer.from_json(json_str)
+# Load model with detected spec
+model = load_model_from_safetensors(
+    "model.safetensors",
+    dtype="float16",  # or "float32"
+    spec=spec,
+)
 ```
 
-### Encoding and Decoding
+### Architecture-Specific Loaders
 
 ```python
-from pygpukit.llm import Tokenizer
+from pygpukit.llm import (
+    load_gpt2_from_safetensors,
+    load_llama_from_safetensors,
+    load_qwen3_from_safetensors,
+)
 
-tok = Tokenizer("tokenizer.json")
+# GPT-2
+model = load_gpt2_from_safetensors("gpt2.safetensors")
 
-# Encode text to token IDs
-text = "Hello, world! How are you?"
-token_ids = tok.encode(text)
-print(f"Token IDs: {token_ids}")
+# LLaMA / Mistral
+model = load_llama_from_safetensors("llama.safetensors", dtype="float16")
 
-# Decode back to text
-decoded = tok.decode(token_ids)
-print(f"Decoded: {decoded}")
-
-# Single token operations
-token_str = tok.id_to_token(123)  # Get token string for ID
-token_id = tok.token_to_id("hello")  # Get ID for token string
+# Qwen3
+model = load_qwen3_from_safetensors("qwen3.safetensors", dtype="float16")
 ```
 
-### Special Tokens
+### ModelSpec
 
 ```python
-from pygpukit.llm import Tokenizer
+from pygpukit.llm import GPT2_SPEC, LLAMA_SPEC, QWEN3_SPEC, MODEL_SPECS
 
-tok = Tokenizer("tokenizer.json")
+# Pre-defined specs
+print(GPT2_SPEC.name)        # "gpt2"
+print(GPT2_SPEC.norm_type)   # "layernorm"
+print(GPT2_SPEC.activation)  # "gelu"
+print(GPT2_SPEC.use_rope)    # False
 
-print(f"Vocabulary size: {tok.vocab_size}")
-print(f"BOS token ID: {tok.bos_token_id}")  # Beginning of sequence
-print(f"EOS token ID: {tok.eos_token_id}")  # End of sequence
-print(f"PAD token ID: {tok.pad_token_id}")  # Padding
+print(LLAMA_SPEC.name)       # "llama"
+print(LLAMA_SPEC.norm_type)  # "rmsnorm"
+print(LLAMA_SPEC.activation) # "silu"
+print(LLAMA_SPEC.use_rope)   # True
+
+print(QWEN3_SPEC.name)       # "qwen3"
+print(QWEN3_SPEC.use_qk_norm) # True (QK normalization)
+
+# Registry
+MODEL_SPECS["gpt2"]   # GPT2_SPEC
+MODEL_SPECS["llama"]  # LLAMA_SPEC
+MODEL_SPECS["qwen3"]  # QWEN3_SPEC
+MODEL_SPECS["qwen2"]  # LLAMA_SPEC (uses LLaMA structure)
 ```
+
+---
+
+## Text Generation
+
+### Basic Generation
+
+```python
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
+from tokenizers import Tokenizer
+
+# Load model
+st = load_safetensors("model.safetensors")
+spec = detect_model_spec(st.tensor_names)
+model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
+
+# Tokenize
+tokenizer = Tokenizer.from_file("tokenizer.json")
+input_ids = tokenizer.encode("The quick brown fox").ids
+
+# Generate with KV-cache
+output_ids = model.generate(
+    input_ids,
+    max_new_tokens=50,
+    temperature=0.7,
+    top_k=50,
+    top_p=0.9,
+    eos_token_id=tokenizer.token_to_id("</s>"),
+    use_cache=True,  # Enable KV-cache for faster generation
+)
+
+print(tokenizer.decode(output_ids))
+```
+
+### Generation Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `input_ids` | `list[int]` | required | Input token IDs |
+| `max_new_tokens` | `int` | 100 | Maximum tokens to generate |
+| `temperature` | `float` | 1.0 | Sampling temperature (0 = greedy) |
+| `top_k` | `int` | 50 | Top-k sampling |
+| `top_p` | `float` | 1.0 | Nucleus sampling threshold |
+| `eos_token_id` | `int` | None | Stop at this token |
+| `use_cache` | `bool` | True | Enable KV-cache |
+
+### Manual Forward Pass
+
+```python
+# Forward pass without generation
+hidden, kv_cache = model(input_ids, use_cache=True)
+
+# Get logits
+logits = model.get_logits(hidden)
+logits_np = logits.to_numpy()
+
+# Get next token (greedy)
+next_token = int(logits_np[-1].argmax())
+
+# Continue with KV-cache
+hidden, kv_cache = model([next_token], past_key_values=kv_cache, use_cache=True)
+```
+
+---
+
+## Hybrid Attention
+
+PyGPUkit uses hybrid CPU/GPU attention for optimal performance:
+
+| Phase | Backend | Reason |
+|-------|---------|--------|
+| **Prefill** (seq_len > 1) | GPU SDPA | Parallelizable, high throughput |
+| **Decode** (seq_len = 1) | CPU | Avoids kernel launch overhead |
+
+This is automatic and requires no configuration.
 
 ---
 
 ## Model Components
 
-PyGPUkit provides building blocks for constructing neural network models.
-
-### Linear Layer
+### TransformerConfig
 
 ```python
-from pygpukit.llm import Linear
-import pygpukit as gpk
-import numpy as np
+from pygpukit.llm import TransformerConfig
 
-# Create weights [out_features, in_features]
-weight = gpk.from_numpy(np.random.randn(3072, 768).astype(np.float32))
-bias = gpk.from_numpy(np.random.randn(3072).astype(np.float32))
+config = TransformerConfig(
+    vocab_size=32000,
+    hidden_size=4096,
+    num_layers=32,
+    num_heads=32,
+    num_kv_heads=8,      # GQA: fewer KV heads than Q heads
+    intermediate_size=14336,
+    norm_type="rmsnorm", # "rmsnorm" or "layernorm"
+    activation="silu",   # "silu" or "gelu"
+    use_rope=True,
+    max_position_embeddings=4096,
+    norm_eps=1e-5,
+    rope_theta=10000.0,
+)
 
-# Create linear layer
-linear = Linear(weight, bias)
-
-# Forward pass: y = xW^T + b
-x = gpk.from_numpy(np.random.randn(32, 768).astype(np.float32))
-y = linear(x)  # [32, 3072]
-
-# Properties
-print(f"In features: {linear.in_features}")
-print(f"Out features: {linear.out_features}")
+# Computed properties
+print(config.head_dim)      # hidden_size // num_heads
+print(config.num_kv_groups) # num_heads // num_kv_heads
 ```
 
-### LayerNorm
+### CausalTransformerModel
 
 ```python
-from pygpukit.llm import LayerNorm
-import pygpukit as gpk
+from pygpukit.llm import CausalTransformerModel
 
-features = 768
-weight = gpk.ones(features)  # gamma
-bias = gpk.zeros(features)   # beta
+# All model aliases point to CausalTransformerModel
+from pygpukit.llm import GPT2Model, LlamaModel
+assert GPT2Model is CausalTransformerModel
+assert LlamaModel is CausalTransformerModel
 
-ln = LayerNorm(weight, bias, eps=1e-5)
-
-x = gpk.from_numpy(np.random.randn(32, 768).astype(np.float32))
-y = ln(x)  # Normalized output [32, 768]
+# Model properties
+model.config        # TransformerConfig
+model.spec          # ModelSpec (GPT2_SPEC, LLAMA_SPEC, etc.)
+model.embed_tokens  # Embedding weights
+model.blocks        # List of TransformerBlock
+model.final_norm    # Final layer norm
+model.lm_head       # LM head weights (may be tied to embed_tokens)
 ```
 
-### MLP Block
+### Building Blocks
 
 ```python
-from pygpukit.llm import MLP
-import pygpukit as gpk
-import numpy as np
+from pygpukit.llm import (
+    Attention,      # Unified attention (hybrid CPU/GPU)
+    MLP,            # Feed-forward network
+    Norm,           # RMSNorm or LayerNorm
+    TransformerBlock,
+    Linear,
+)
 
-n_embd = 768
-n_inner = 3072  # 4 * n_embd
-
-# Create weights
-c_fc_w = gpk.from_numpy(np.random.randn(n_inner, n_embd).astype(np.float32))
-c_fc_b = gpk.from_numpy(np.random.randn(n_inner).astype(np.float32))
-c_proj_w = gpk.from_numpy(np.random.randn(n_embd, n_inner).astype(np.float32))
-c_proj_b = gpk.from_numpy(np.random.randn(n_embd).astype(np.float32))
-
-mlp = MLP(c_fc_w, c_fc_b, c_proj_w, c_proj_b)
-
-# Forward: fc1 -> gelu -> fc2
-x = gpk.from_numpy(np.random.randn(32, n_embd).astype(np.float32))
-y = mlp(x)  # [32, 768]
-```
-
-### TransformerBlock
-
-```python
-from pygpukit.llm import TransformerBlock, MLP, LayerNorm
-import pygpukit as gpk
-
-n_embd = 768
-
-# LayerNorm weights
-ln_w = gpk.ones(n_embd)
-ln_b = gpk.zeros(n_embd)
-
-# MLP weights (as above)
-mlp = MLP(c_fc_w, c_fc_b, c_proj_w, c_proj_b)
-
-# Create transformer block: ln -> mlp -> residual
-block = TransformerBlock(ln_w, ln_b, mlp, eps=1e-5)
-
-x = gpk.from_numpy(np.random.randn(32, n_embd).astype(np.float32))
-y = block(x)  # [32, 768] with residual connection
+# Aliases for compatibility
+from pygpukit.llm import (
+    RMSNorm,            # = Norm
+    LayerNorm,          # = Norm
+    CausalSelfAttention, # = Attention
+    LlamaAttention,     # = Attention
+    LlamaMLP,           # = MLP
+    LlamaBlock,         # = TransformerBlock
+)
 ```
 
 ---
 
-## GPT-2 Model
+## Performance
 
-PyGPUkit includes a GPT-2 model implementation (MLP-only for MVP).
+### Tested Results (RTX 3090 Ti)
 
-### Loading from SafeTensors
+| Model | Size | Dtype | Throughput |
+|-------|------|-------|------------|
+| GPT-2 | 124M | FP32 | 8.7 tok/s |
+| TinyLlama | 1.1B | FP16 | 1.8 tok/s |
+| Qwen3 | 8B | FP16 | 0.2 tok/s |
 
-```python
-from pygpukit.llm import GPT2Config, load_gpt2_from_safetensors
+> **Note:** Current implementation uses hybrid CPU/GPU attention. Full GPU attention will significantly improve decode performance.
 
-# Default GPT-2 Small config
-config = GPT2Config(
-    vocab_size=50257,
-    n_embd=768,
-    n_layer=12,
-    n_head=12,
-    n_positions=1024,
-)
+### Memory Usage
 
-# Load model
-model = load_gpt2_from_safetensors("gpt2.safetensors", config)
-```
-
-### Forward Pass
-
-```python
-from pygpukit.llm import load_gpt2_from_safetensors, Tokenizer
-
-model = load_gpt2_from_safetensors("gpt2.safetensors")
-tok = Tokenizer("tokenizer.json")
-
-# Tokenize input
-text = "The quick brown fox"
-input_ids = tok.encode(text)
-
-# Forward pass
-hidden = model(input_ids)  # [seq_len, n_embd]
-
-# Get logits
-logits = model.lm_head(hidden)  # [seq_len, vocab_size]
-
-# Get next token prediction
-import numpy as np
-next_token_logits = logits.to_numpy()[-1]
-next_token_id = int(np.argmax(next_token_logits))
-print(f"Next token: {tok.decode([next_token_id])}")
-```
-
-### Text Generation
-
-```python
-from pygpukit.llm import load_gpt2_from_safetensors, Tokenizer
-
-model = load_gpt2_from_safetensors("gpt2.safetensors")
-tok = Tokenizer("tokenizer.json")
-
-# Generate text
-prompt = "Once upon a time"
-input_ids = tok.encode(prompt)
-
-# Generate with greedy decoding
-output_ids = model.generate(
-    input_ids,
-    max_new_tokens=50,
-    temperature=1.0,  # 1.0 = greedy argmax
-)
-
-generated_text = tok.decode(output_ids)
-print(generated_text)
-```
-
-> **Note:** The current implementation is MLP-only (no attention mechanism).
-> It's meant as a demonstration of the loading/inference pipeline.
-> Full attention will be added in future versions.
-
----
-
-## Complete Example
-
-```python
-"""Load and inspect a model from HuggingFace."""
-from pygpukit.llm import SafeTensorsFile, Tokenizer
-import pygpukit as gpk
-
-# Download model files first:
-# huggingface-cli download gpt2 --local-dir ./gpt2
-
-# Load safetensors
-st = SafeTensorsFile("gpt2/model.safetensors")
-
-print("=" * 50)
-print(f"Model: GPT-2")
-print(f"Tensors: {st.num_tensors}")
-print(f"Size: {st.file_size / 1e6:.1f} MB")
-print("=" * 50)
-
-# Print all tensor shapes
-for name in sorted(st.tensor_names):
-    info = st.tensor_info(name)
-    print(f"  {name}: {info.shape} ({info.dtype_name})")
-
-# Load tokenizer
-tok = Tokenizer("gpt2/tokenizer.json")
-print(f"\nVocabulary: {tok.vocab_size} tokens")
-
-# Test tokenization
-text = "Hello, world!"
-ids = tok.encode(text)
-print(f"\n'{text}' -> {ids}")
-print(f"{ids} -> '{tok.decode(ids)}'")
-```
+| Model | FP32 | FP16 |
+|-------|------|------|
+| GPT-2 (124M) | ~500 MB | ~250 MB |
+| LLaMA 7B | ~28 GB | ~14 GB |
+| Qwen3 8B | ~32 GB | ~16 GB |
 
 ---
 
@@ -349,47 +349,87 @@ print(f"{ids} -> '{tok.decode(ids)}'")
 | Method/Property | Description |
 |-----------------|-------------|
 | `SafeTensorsFile(path)` | Open safetensors file |
+| `load_safetensors(path)` | Auto-detect single/sharded |
 | `.tensor_names` | List of tensor names |
 | `.num_tensors` | Number of tensors |
 | `.file_size` | File size in bytes |
-| `.tensor_info(name)` | Get TensorInfo for tensor |
+| `.tensor_info(name)` | Get TensorInfo |
 | `.tensor_bytes(name)` | Get raw bytes |
 | `.tensor_as_f32(name)` | Get as float32 numpy array |
 
-### TensorInfo
+### Model Loading
 
-| Property | Description |
+| Function | Description |
 |----------|-------------|
-| `.name` | Tensor name |
-| `.dtype` | Dtype as integer |
-| `.dtype_name` | Dtype as string |
-| `.shape` | Tensor shape |
-| `.offset` | Byte offset in file |
-| `.size_bytes` | Size in bytes |
-| `.numel` | Number of elements |
+| `load_model_from_safetensors(path, dtype, spec)` | Unified loader |
+| `detect_model_spec(tensor_names)` | Auto-detect architecture |
+| `load_gpt2_from_safetensors(path, dtype)` | Load GPT-2 |
+| `load_llama_from_safetensors(path, dtype)` | Load LLaMA |
+| `load_qwen3_from_safetensors(path, dtype)` | Load Qwen3 |
 
-### Tokenizer
+### CausalTransformerModel
+
+| Method | Description |
+|--------|-------------|
+| `__call__(input_ids, position_ids, past_key_values, use_cache)` | Forward pass |
+| `generate(input_ids, max_new_tokens, temperature, top_k, top_p, eos_token_id, use_cache)` | Text generation |
+| `get_logits(hidden)` | Compute logits from hidden states |
+
+### Tokenizer (Experimental)
 
 | Method/Property | Description |
 |-----------------|-------------|
 | `Tokenizer(path)` | Load from tokenizer.json |
-| `Tokenizer.from_json(str)` | Load from JSON string |
 | `.vocab_size` | Vocabulary size |
 | `.bos_token_id` | BOS token ID |
 | `.eos_token_id` | EOS token ID |
-| `.pad_token_id` | PAD token ID |
 | `.encode(text)` | Encode text to IDs |
 | `.decode(ids)` | Decode IDs to text |
-| `.id_to_token(id)` | Get token for ID |
-| `.token_to_id(token)` | Get ID for token |
 
-### GPT2Config
+---
 
-| Property | Default | Description |
-|----------|---------|-------------|
-| `vocab_size` | 50257 | Vocabulary size |
-| `n_embd` | 768 | Embedding dimension |
-| `n_layer` | 12 | Number of layers |
-| `n_head` | 12 | Number of attention heads |
-| `n_positions` | 1024 | Max sequence length |
-| `layer_norm_eps` | 1e-5 | LayerNorm epsilon |
+## Complete Example
+
+```python
+"""End-to-end LLM inference with PyGPUkit."""
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
+from tokenizers import Tokenizer
+import time
+
+# Paths (adjust for your model)
+MODEL_PATH = "model.safetensors"
+TOKENIZER_PATH = "tokenizer.json"
+
+# Load model
+print("Loading model...")
+st = load_safetensors(MODEL_PATH)
+spec = detect_model_spec(st.tensor_names)
+print(f"Detected architecture: {spec.name}")
+
+model = load_model_from_safetensors(MODEL_PATH, dtype="float16", spec=spec)
+print(f"Layers: {model.config.num_layers}, Hidden: {model.config.hidden_size}")
+
+# Load tokenizer (HuggingFace)
+tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
+
+# Generate
+prompt = "The quick brown fox"
+input_ids = tokenizer.encode(prompt).ids
+print(f"Prompt: {prompt}")
+print(f"Input tokens: {len(input_ids)}")
+
+start = time.perf_counter()
+output_ids = model.generate(
+    input_ids,
+    max_new_tokens=32,
+    temperature=0.7,
+    use_cache=True,
+)
+elapsed = time.perf_counter() - start
+
+output_text = tokenizer.decode(output_ids)
+new_tokens = len(output_ids) - len(input_ids)
+
+print(f"Output: {output_text}")
+print(f"Generated {new_tokens} tokens in {elapsed:.2f}s ({new_tokens/elapsed:.1f} tok/s)")
+```
