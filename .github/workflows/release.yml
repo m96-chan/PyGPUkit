@@ -62,9 +62,9 @@ jobs:
           toolchain: stable
 
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.29
         with:
-          cuda: "13.1.0"
+          cuda: "13.0.2"
           method: "network"
           linux-local-args: '["--toolkit"]'
 
@@ -107,7 +107,7 @@ jobs:
             --exclude libcudart.so.12 \
             --exclude libcuda.so.1 \
             --exclude libnvrtc.so.12 \
-            --exclude libnvrtc-builtins.so.13.1 \
+            --exclude libnvrtc-builtins.so.13.0 \
             --plat manylinux_2_35_x86_64
 
           # Replace original wheel with repaired one
