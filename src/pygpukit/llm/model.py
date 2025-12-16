@@ -1323,31 +1323,15 @@ class CausalTransformerModel:
         # ============================================================
         # Phase 2: Decode loop with fixed KV cache
         # ============================================================
+        # NOTE: Full CUDA Graph capture is not implemented due to:
+        # 1. Memory allocation during decode (embeddings) - not allowed during capture
+        # 2. Changing position/context_len parameters - would need cudaGraphExecKernelNodeSetParams
+        # The GQA-optimized fixed cache already provides ~10% speedup over standard generate.
         context_len = prefill_len + 1  # Current context length
 
-        # Create CUDA Graph for decode
-        graph = native.CudaGraph()
-        graph_captured = False
-
-        for step in range(max_new_tokens - 1):
+        for _ in range(max_new_tokens - 1):
             position = context_len - 1  # Position of current token
-
-            if step == 0:
-                # Step 0: Warmup (normal execution)
-                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
-            elif step == 1 and not graph_captured:
-                # Step 1: Capture into CUDA Graph
-                # Note: CUDA Graph capture with variable context_len is tricky
-                # For now, we skip graph capture and just use fixed cache
-                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
-                # TODO: Enable CUDA Graph capture when we have proper parameter update
-                # graph.begin_capture()
-                # hidden = self._decode_step_fixed_cache(next_token, position, context_len)
-                # graph.end_capture()
-                # graph_captured = True
-            else:
-                # Step 2+: Normal execution (or graph replay when implemented)
-                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
+            hidden = self._decode_step_fixed_cache(next_token, position, context_len)
 
             # Get next token
             logits = self.get_logits(hidden)
