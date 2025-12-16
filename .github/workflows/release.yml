@@ -193,10 +193,14 @@ jobs:
         run: |
           @REM Set up VS environment for cl.exe
           call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          @REM Use CUDA 13.1 for CUTLASS 4.x (SM100/SM120 Blackwell support)
+          @REM CUTLASS 4.3.3 requires CUDA 12.8+ due to constexpr dim3 usage
+          set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1"
+          set "PATH=%CUDA_PATH%\bin;%PATH%"
           python -m build --wheel
         env:
           # PyGPUkit requires SM >= 80 (Ampere and newer)
-          # Self-hosted runner should have CUDA 13.1 for SM100/120 (Blackwell) support
+          # CUDA 13.1+ required for CUTLASS 4.x (constexpr dim3 support)
           CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
 
       - name: Verify wheel contents
