@@ -1219,11 +1219,79 @@ __global__ void transpose_021_f32_kernel(
     }
 }
 
+// Transpose 3D FP16: [d0, d1, d2] -> [d1, d0, d2]
+__global__ void transpose_021_f16_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * dim2;
+
+    if (idx < total) {
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1 = remaining % dim1;
+        size_t d0 = remaining / dim1;
+
+        size_t dst_idx = d1 * dim0 * dim2 + d0 * dim2 + d2;
+        dst[dst_idx] = src[idx];
+    }
+}
+
+// Transpose 3D BF16: [d0, d1, d2] -> [d1, d0, d2]
+__global__ void transpose_021_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * dim2;
+
+    if (idx < total) {
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1 = remaining % dim1;
+        size_t d0 = remaining / dim1;
+
+        size_t dst_idx = d1 * dim0 * dim2 + d0 * dim2 + d2;
+        dst[dst_idx] = src[idx];
+    }
+}
+
 // Reshape with copy (ensures contiguous output)
 // Simply copies data - reshape is handled by changing shape metadata
 __global__ void copy_f32_kernel(
     const float* __restrict__ src,
     float* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = src[idx];
+    }
+}
+
+// FP16 copy kernel
+__global__ void copy_f16_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = src[idx];
+    }
+}
+
+// BF16 copy kernel
+__global__ void copy_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
     size_t n
 ) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;

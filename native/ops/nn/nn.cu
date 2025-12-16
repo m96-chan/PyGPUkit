@@ -745,8 +745,9 @@ GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats) {
 
 // Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]
 GPUArray transpose_3d_021(const GPUArray& input) {
-    if (input.dtype() != DataType::Float32) {
-        throw std::runtime_error("transpose_3d_021: only float32 supported");
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("transpose_3d_021: only float32/float16/bfloat16 supported");
     }
     if (input.ndim() != 3) {
         throw std::runtime_error("transpose_3d_021: expects 3D tensor");
@@ -764,10 +765,28 @@ GPUArray transpose_3d_021(const GPUArray& input) {
     const int block_size = 256;
     const int grid_size = (total + block_size - 1) / block_size;
 
-    nn::transpose_021_f32_kernel<<<grid_size, block_size>>>(
-        static_cast<const float*>(input.data()),
-        static_cast<float*>(result.data()),
-        dim0, dim1, dim2);
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::transpose_021_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        case DataType::Float16:
+            nn::transpose_021_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        case DataType::BFloat16:
+            nn::transpose_021_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        default:
+            break;
+    }
 
     sync_and_check("transpose_3d_021 kernel failed");
     return result;
@@ -775,8 +794,9 @@ GPUArray transpose_3d_021(const GPUArray& input) {
 
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape) {
-    if (input.dtype() != DataType::Float32) {
-        throw std::runtime_error("reshape_copy: only float32 supported");
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("reshape_copy: only float32/float16/bfloat16 supported");
     }
 
     // Verify total size matches
@@ -795,10 +815,28 @@ GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shap
     const int block_size = 256;
     const int grid_size = (input_size + block_size - 1) / block_size;
 
-    nn::copy_f32_kernel<<<grid_size, block_size>>>(
-        static_cast<const float*>(input.data()),
-        static_cast<float*>(result.data()),
-        input_size);
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::copy_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                input_size);
+            break;
+        case DataType::Float16:
+            nn::copy_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                input_size);
+            break;
+        case DataType::BFloat16:
+            nn::copy_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                input_size);
+            break;
+        default:
+            break;
+    }
 
     sync_and_check("reshape_copy kernel failed");
     return result;

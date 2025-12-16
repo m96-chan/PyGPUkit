@@ -1377,9 +1377,10 @@ def transpose_3d_021(input: GPUArray) -> GPUArray:
 
     backend = get_backend()
 
-    # Native transpose_3d_021 only supports float32, fall back to CPU for other dtypes
+    # Native transpose_3d_021 supports float32/float16/bfloat16
     if isinstance(backend, NativeBackend) and backend.is_available():
-        if str(input.dtype) == "float32":
+        dtype_str = str(input.dtype)
+        if dtype_str in ("float32", "float16", "bfloat16"):
             return _transpose_3d_021_native(input)
         else:
             return _transpose_3d_021_cpu(input)
@@ -1433,9 +1434,10 @@ def reshape_copy(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
 
     backend = get_backend()
 
-    # Native reshape_copy only supports float32, fall back to CPU for other dtypes
+    # Native reshape_copy supports float32/float16/bfloat16
     if isinstance(backend, NativeBackend) and backend.is_available():
-        if str(input.dtype) == "float32":
+        dtype_str = str(input.dtype)
+        if dtype_str in ("float32", "float16", "bfloat16"):
             return _reshape_copy_native(input, new_shape)
         else:
             return _reshape_copy_cpu(input, new_shape)
