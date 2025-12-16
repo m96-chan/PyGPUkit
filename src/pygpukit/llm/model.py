@@ -26,6 +26,8 @@ from pygpukit.ops.basic import (
     bias_add_inplace,
     concat_axis0,
     gelu,
+    kv_cache_prefill,
+    kv_cache_update,
     layernorm,
     matmul,
     mul,
@@ -34,6 +36,7 @@ from pygpukit.ops.basic import (
     rmsnorm,
     rope_inplace,
     sdpa_causal,
+    sdpa_causal_fixed_cache,
     silu,
     transpose,
     transpose_3d_021,
@@ -687,6 +690,25 @@ class Attention:
         else:
             self._cos, self._sin = None, None
 
+        # Fixed-length KV cache for CUDA Graph (initialized on first use)
+        self._k_cache: GPUArray | None = None
+        self._v_cache: GPUArray | None = None
+        self._max_cache_len: int = 0
+
+    def init_fixed_cache(self, max_seq_len: int, dtype: str = "float16") -> None:
+        """Initialize fixed-length KV cache for CUDA Graph capture.
+
+        Args:
+            max_seq_len: Maximum sequence length to support.
+            dtype: Data type for cache (float16/bfloat16).
+        """
+        # Cache shape: [max_seq_len, num_kv_heads, head_dim]
+        cache_shape = (max_seq_len, self.num_kv_heads, self.head_dim)
+        np_dtype = np.float16 if dtype == "float16" else np.float32
+        self._k_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
+        self._v_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
+        self._max_cache_len = max_seq_len
+
     def __call__(
         self,
         x: GPUArray,
@@ -815,6 +837,103 @@ class Attention:
         attn_output = reshape_copy(attn_output, (seq_len, self.num_heads * self.head_dim))
 
         return self.o_proj(attn_output), present_kv
+
+    def forward_fixed_cache(
+        self,
+        x: GPUArray,
+        position: int,
+        context_len: int,
+        *,
+        out: GPUArray | None = None,
+    ) -> GPUArray:
+        """Forward pass using fixed-length KV cache (for CUDA Graph decode).
+
+        Args:
+            x: Input tensor [1, hidden_size] - single token
+            position: Current position in sequence (for RoPE and cache update)
+            context_len: Total context length (prefill + decoded so far)
+            out: Optional pre-allocated output buffer
+
+        Returns:
+            Output tensor [1, hidden_size]
+        """
+        assert self._k_cache is not None, "Call init_fixed_cache first"
+        assert x.shape[0] == 1, "forward_fixed_cache expects single token"
+
+        # Project Q, K, V
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # Reshape for multi-head: [1, num_heads, head_dim]
+        q = reshape_copy(q, (1, self.num_heads, self.head_dim))
+        k = reshape_copy(k, (1, self.num_kv_heads, self.head_dim))
+        v = reshape_copy(v, (1, self.num_kv_heads, self.head_dim))
+
+        # QK Norm (Qwen3 style)
+        if self.q_norm is not None:
+            q_2d = reshape_copy(q, (self.num_heads, self.head_dim))
+            q_2d = self.q_norm(q_2d)
+            q = reshape_copy(q_2d, (1, self.num_heads, self.head_dim))
+        if self.k_norm is not None:
+            k_2d = reshape_copy(k, (self.num_kv_heads, self.head_dim))
+            k_2d = self.k_norm(k_2d)
+            k = reshape_copy(k_2d, (1, self.num_kv_heads, self.head_dim))
+
+        # Apply RoPE
+        if self.config.use_rope and self._cos is not None and self._sin is not None:
+            q_dtype_name = q.dtype.name
+            if q_dtype_name == "float16":
+                cos = from_numpy(self._cos[position : position + 1].astype(np.float16))
+                sin = from_numpy(self._sin[position : position + 1].astype(np.float16))
+            else:
+                cos = from_numpy(self._cos[position : position + 1].astype(np.float32))
+                sin = from_numpy(self._sin[position : position + 1].astype(np.float32))
+            rope_inplace(q, k, cos, sin)
+
+        # Update fixed KV cache at current position
+        kv_cache_update(k, self._k_cache, position)
+        kv_cache_update(v, self._v_cache, position)
+
+        # Prepare for SDPA - need [num_heads, max_seq_len, head_dim] for K/V cache
+        # Transpose Q: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
+        q_t = transpose_3d_021(q)
+
+        # For GQA: expand K/V cache from num_kv_heads to num_heads
+        if self.num_kv_groups > 1:
+            # Transpose cache: [max_seq_len, num_kv_heads, head_dim] -> [num_kv_heads, max_seq_len, head_dim]
+            k_cache_t = transpose_3d_021(self._k_cache)
+            v_cache_t = transpose_3d_021(self._v_cache)
+            # Expand: [num_kv_heads, max_seq_len, head_dim] -> [num_heads, max_seq_len, head_dim]
+            k_expanded = repeat_interleave_axis1(
+                reshape_copy(k_cache_t, (1, self.num_kv_heads, self._max_cache_len * self.head_dim)),
+                self.num_kv_groups,
+            )
+            v_expanded = repeat_interleave_axis1(
+                reshape_copy(v_cache_t, (1, self.num_kv_heads, self._max_cache_len * self.head_dim)),
+                self.num_kv_groups,
+            )
+            k_t = reshape_copy(k_expanded, (self.num_heads, self._max_cache_len, self.head_dim))
+            v_t = reshape_copy(v_expanded, (self.num_heads, self._max_cache_len, self.head_dim))
+        else:
+            # No GQA - just transpose
+            k_t = transpose_3d_021(self._k_cache)
+            v_t = transpose_3d_021(self._v_cache)
+
+        # Allocate output buffer if needed
+        if out is None:
+            attn_out = from_numpy(np.zeros((self.num_heads, 1, self.head_dim), dtype=np.float16))
+        else:
+            attn_out = out
+
+        # SDPA with fixed cache - only attend to context_len tokens
+        sdpa_causal_fixed_cache(q_t, k_t, v_t, attn_out, context_len)
+
+        # Reshape output: [num_heads, 1, head_dim] -> [1, hidden_size]
+        attn_output = transpose_3d_021(attn_out)
+        attn_output = reshape_copy(attn_output, (1, self.num_heads * self.head_dim))
+
+        return self.o_proj(attn_output)
 
 
 # =============================================================================
@@ -1140,6 +1259,164 @@ class CausalTransformerModel:
 
             if eos_token_id is not None and next_token == eos_token_id:
                 return
+
+    def generate_cuda_graph(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int = 20,
+        max_seq_len: int = 512,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        eos_token_id: int | None = None,
+    ) -> list[int]:
+        """Generate tokens using fixed-length KV cache with optional CUDA Graph.
+
+        This method uses fixed-length KV cache to eliminate memory allocation
+        overhead from concat operations during decode.
+
+        Flow:
+            1. Prefill: Normal execution (no graph)
+            2. Decode step 0: Normal execution (warmup)
+            3. Decode step 1: CUDA Graph capture
+            4. Decode step 2+: CUDA Graph replay
+
+        Args:
+            input_ids: Initial token IDs
+            max_new_tokens: Maximum new tokens to generate
+            max_seq_len: Maximum sequence length (prefill + decode)
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            eos_token_id: Stop at this token
+
+        Returns:
+            List of all token IDs (input + generated)
+        """
+        import pygpukit as pk
+
+        native = pk._pygpukit_native
+
+        prefill_len = len(input_ids)
+        tokens = list(input_ids)
+
+        # Ensure max_seq_len can hold prefill + max_new_tokens
+        total_max = prefill_len + max_new_tokens
+        if max_seq_len < total_max:
+            max_seq_len = total_max
+
+        # Get dtype from embed tokens
+        dtype = str(self.embed_tokens.dtype)
+
+        # Initialize fixed-length KV cache for all layers
+        for block in self.blocks:
+            block.attn.init_fixed_cache(max_seq_len, dtype=dtype)
+
+        # ============================================================
+        # Phase 1: Prefill (normal execution)
+        # ============================================================
+        hidden, past_key_values = self(input_ids, use_cache=True)
+
+        # Copy prefill KV to fixed cache
+        for i, block in enumerate(self.blocks):
+            past_k, past_v = past_key_values[i]
+            # past_k/v shape: [prefill_len, num_kv_heads, head_dim]
+            kv_cache_prefill(past_k, block.attn._k_cache, start_pos=0)
+            kv_cache_prefill(past_v, block.attn._v_cache, start_pos=0)
+
+        # Get first token
+        logits = self.get_logits(hidden)
+        last_logits = logits.to_numpy()[-1]
+        next_token = sample_token(last_logits, temperature, top_k, top_p)
+        tokens.append(next_token)
+
+        if eos_token_id is not None and next_token == eos_token_id:
+            return tokens
+
+        # ============================================================
+        # Phase 2: Decode loop with fixed KV cache
+        # ============================================================
+        context_len = prefill_len + 1  # Current context length
+
+        # Create CUDA Graph for decode
+        graph = native.CudaGraph()
+        graph_captured = False
+
+        for step in range(max_new_tokens - 1):
+            position = context_len - 1  # Position of current token
+
+            if step == 0:
+                # Step 0: Warmup (normal execution)
+                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
+            elif step == 1 and not graph_captured:
+                # Step 1: Capture into CUDA Graph
+                # Note: CUDA Graph capture with variable context_len is tricky
+                # For now, we skip graph capture and just use fixed cache
+                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
+                # TODO: Enable CUDA Graph capture when we have proper parameter update
+                # graph.begin_capture()
+                # hidden = self._decode_step_fixed_cache(next_token, position, context_len)
+                # graph.end_capture()
+                # graph_captured = True
+            else:
+                # Step 2+: Normal execution (or graph replay when implemented)
+                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
+
+            # Get next token
+            logits = self.get_logits(hidden)
+            last_logits = logits.to_numpy()[-1]
+            next_token = sample_token(last_logits, temperature, top_k, top_p)
+            tokens.append(next_token)
+
+            context_len += 1
+
+            if eos_token_id is not None and next_token == eos_token_id:
+                break
+
+        return tokens
+
+    def _decode_step_fixed_cache(
+        self,
+        token_id: int,
+        position: int,
+        context_len: int,
+    ) -> GPUArray:
+        """Single decode step using fixed-length KV cache.
+
+        Args:
+            token_id: Current token ID
+            position: Position in sequence
+            context_len: Total context length
+
+        Returns:
+            Hidden states [1, hidden_size]
+        """
+        # Get token embedding
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[token_id : token_id + 1]
+        hidden = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
+
+        # Transformer blocks with fixed cache
+        for block in self.blocks:
+            # Pre-norm
+            residual = hidden
+            hidden = block.attn_norm(hidden)
+
+            # Attention with fixed cache
+            hidden = block.attn.forward_fixed_cache(hidden, position, context_len)
+            hidden = add(residual, hidden)
+
+            # MLP
+            residual = hidden
+            hidden = block.mlp_norm(hidden)
+            hidden = block.mlp(hidden)
+            hidden = add(residual, hidden)
+
+        # Final norm
+        hidden = self.final_norm(hidden)
+
+        return hidden
 
 
 # =============================================================================
