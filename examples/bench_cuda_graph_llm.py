@@ -80,7 +80,7 @@ def main():
     print(f"  Speed: {tps_standard:.2f} tok/s ({ms_per_token_standard:.0f} ms/tok)")
 
     text_standard = tokenizer.decode(output_standard[len(input_ids):])
-    print(f"  Output: {repr(text_standard[:100])}...")
+    print(f"  Output: {text_standard[:80].encode('ascii', 'replace').decode()}...")
 
     # Benchmark: generate_cuda_graph (fixed cache)
     print("\n" + "-" * 50)
@@ -105,7 +105,7 @@ def main():
     print(f"  Speed: {tps_graph:.2f} tok/s ({ms_per_token_graph:.0f} ms/tok)")
 
     text_graph = tokenizer.decode(output_graph[len(input_ids):])
-    print(f"  Output: {repr(text_graph[:100])}...")
+    print(f"  Output: {text_graph[:80].encode('ascii', 'replace').decode()}...")
 
     # Summary
     print("\n" + "=" * 70)

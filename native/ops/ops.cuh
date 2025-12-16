@@ -182,6 +182,11 @@ void kv_cache_update(const GPUArray& new_kv, GPUArray& cache, int position);
 // start_pos: where to start writing in cache
 void kv_cache_prefill(const GPUArray& new_kv, GPUArray& cache, int start_pos);
 
+// GQA-expanded KV cache operations (for CUDA Graph optimization)
+// These write to transposed, GQA-expanded cache: [num_heads, max_seq_len, head_dim]
+void kv_cache_update_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads, int position);
+void kv_cache_prefill_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads, int start_pos);
+
 // ============================================================================
 // Quantization Operations (#85)
 // ============================================================================

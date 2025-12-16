@@ -257,6 +257,23 @@ void init_ops_bindings(py::module_& m) {
           "cache: [max_seq_len, num_kv_heads, head_dim]\n"
           "start_pos: where to start writing in cache");
 
+    // GQA-expanded KV cache operations (CUDA Graph optimization)
+    m.def("kv_cache_update_gqa", &ops::kv_cache_update_gqa,
+          py::arg("new_kv"), py::arg("cache"), py::arg("num_heads"), py::arg("position"),
+          "Update GQA-expanded KV cache at single position.\n"
+          "new_kv: [1, num_kv_heads, head_dim]\n"
+          "cache: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)\n"
+          "num_heads: total number of attention heads\n"
+          "position: where to write in cache");
+
+    m.def("kv_cache_prefill_gqa", &ops::kv_cache_prefill_gqa,
+          py::arg("new_kv"), py::arg("cache"), py::arg("num_heads"), py::arg("start_pos"),
+          "Prefill GQA-expanded KV cache from sequence.\n"
+          "new_kv: [seq_len, num_kv_heads, head_dim]\n"
+          "cache: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)\n"
+          "num_heads: total number of attention heads\n"
+          "start_pos: where to start writing in cache");
+
     // ========================================================================
     // Quantization Operations (#85)
     // ========================================================================

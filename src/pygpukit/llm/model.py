@@ -27,7 +27,9 @@ from pygpukit.ops.basic import (
     concat_axis0,
     gelu,
     kv_cache_prefill,
+    kv_cache_prefill_gqa,
     kv_cache_update,
+    kv_cache_update_gqa,
     layernorm,
     matmul,
     mul,
@@ -702,8 +704,9 @@ class Attention:
             max_seq_len: Maximum sequence length to support.
             dtype: Data type for cache (float16/bfloat16).
         """
-        # Cache shape: [max_seq_len, num_kv_heads, head_dim]
-        cache_shape = (max_seq_len, self.num_kv_heads, self.head_dim)
+        # Cache shape: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)
+        # This eliminates per-step transpose and GQA expansion
+        cache_shape = (self.num_heads, max_seq_len, self.head_dim)
         np_dtype = np.float16 if dtype == "float16" else np.float32
         self._k_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
         self._v_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
@@ -891,34 +894,17 @@ class Attention:
                 sin = from_numpy(self._sin[position : position + 1].astype(np.float32))
             rope_inplace(q, k, cos, sin)
 
-        # Update fixed KV cache at current position
-        kv_cache_update(k, self._k_cache, position)
-        kv_cache_update(v, self._v_cache, position)
+        # Update fixed KV cache at current position (GQA-expanded, transposed)
+        # k, v: [1, num_kv_heads, head_dim] -> cache: [num_heads, max_seq_len, head_dim]
+        kv_cache_update_gqa(k, self._k_cache, self.num_heads, position)
+        kv_cache_update_gqa(v, self._v_cache, self.num_heads, position)
 
-        # Prepare for SDPA - need [num_heads, max_seq_len, head_dim] for K/V cache
+        # Prepare for SDPA
         # Transpose Q: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
         q_t = transpose_3d_021(q)
 
-        # For GQA: expand K/V cache from num_kv_heads to num_heads
-        if self.num_kv_groups > 1:
-            # Transpose cache: [max_seq_len, num_kv_heads, head_dim] -> [num_kv_heads, max_seq_len, head_dim]
-            k_cache_t = transpose_3d_021(self._k_cache)
-            v_cache_t = transpose_3d_021(self._v_cache)
-            # Expand: [num_kv_heads, max_seq_len, head_dim] -> [num_heads, max_seq_len, head_dim]
-            k_expanded = repeat_interleave_axis1(
-                reshape_copy(k_cache_t, (1, self.num_kv_heads, self._max_cache_len * self.head_dim)),
-                self.num_kv_groups,
-            )
-            v_expanded = repeat_interleave_axis1(
-                reshape_copy(v_cache_t, (1, self.num_kv_heads, self._max_cache_len * self.head_dim)),
-                self.num_kv_groups,
-            )
-            k_t = reshape_copy(k_expanded, (self.num_heads, self._max_cache_len, self.head_dim))
-            v_t = reshape_copy(v_expanded, (self.num_heads, self._max_cache_len, self.head_dim))
-        else:
-            # No GQA - just transpose
-            k_t = transpose_3d_021(self._k_cache)
-            v_t = transpose_3d_021(self._v_cache)
+        # Cache is already in SDPA-ready format: [num_heads, max_seq_len, head_dim]
+        # No transpose or GQA expansion needed!
 
         # Allocate output buffer if needed
         if out is None:
@@ -927,7 +913,7 @@ class Attention:
             attn_out = out
 
         # SDPA with fixed cache - only attend to context_len tokens
-        sdpa_causal_fixed_cache(q_t, k_t, v_t, attn_out, context_len)
+        sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
 
         # Reshape output: [num_heads, 1, head_dim] -> [1, hidden_size]
         attn_output = transpose_3d_021(attn_out)
@@ -1317,12 +1303,13 @@ class CausalTransformerModel:
         # ============================================================
         hidden, past_key_values = self(input_ids, use_cache=True)
 
-        # Copy prefill KV to fixed cache
+        # Copy prefill KV to fixed cache (GQA-expanded, transposed)
         for i, block in enumerate(self.blocks):
             past_k, past_v = past_key_values[i]
             # past_k/v shape: [prefill_len, num_kv_heads, head_dim]
-            kv_cache_prefill(past_k, block.attn._k_cache, start_pos=0)
-            kv_cache_prefill(past_v, block.attn._v_cache, start_pos=0)
+            # cache shape: [num_heads, max_seq_len, head_dim]
+            kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
+            kv_cache_prefill_gqa(past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0)
 
         # Get first token
         logits = self.get_logits(hidden)

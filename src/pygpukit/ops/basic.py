@@ -1651,3 +1651,47 @@ def kv_cache_prefill(new_kv: GPUArray, cache: GPUArray, start_pos: int = 0) -> N
     new_kv_native = new_kv._get_native()
     cache_native = cache._get_native()
     native.kv_cache_prefill(new_kv_native, cache_native, start_pos)
+
+
+def kv_cache_update_gqa(
+    new_kv: GPUArray, cache: GPUArray, num_heads: int, position: int
+) -> None:
+    """Update GQA-expanded KV cache at a single position (decode step).
+
+    For CUDA Graph optimization: writes to transposed, GQA-expanded cache.
+    Eliminates per-step transpose and GQA expansion overhead.
+
+    Args:
+        new_kv: K or V tensor of shape [1, num_kv_heads, head_dim].
+        cache: Pre-allocated cache of shape [num_heads, max_seq_len, head_dim].
+        num_heads: Total number of attention heads.
+        position: Position in cache to update.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_update_gqa(new_kv_native, cache_native, num_heads, position)
+
+
+def kv_cache_prefill_gqa(
+    new_kv: GPUArray, cache: GPUArray, num_heads: int, start_pos: int = 0
+) -> None:
+    """Prefill GQA-expanded KV cache from sequence.
+
+    For CUDA Graph optimization: writes to transposed, GQA-expanded cache.
+    Eliminates per-step transpose and GQA expansion overhead.
+
+    Args:
+        new_kv: K or V tensor of shape [seq_len, num_kv_heads, head_dim].
+        cache: Pre-allocated cache of shape [num_heads, max_seq_len, head_dim].
+        num_heads: Total number of attention heads.
+        start_pos: Starting position in cache (default 0).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_prefill_gqa(new_kv_native, cache_native, num_heads, start_pos)

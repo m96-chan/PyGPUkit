@@ -1220,5 +1220,119 @@ void kv_cache_prefill(
     sync_and_check("kv_cache_prefill kernel failed");
 }
 
+// GQA-expanded KV cache update
+// new_kv: [1, num_kv_heads, head_dim]
+// cache: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)
+void kv_cache_update_gqa(
+    const GPUArray& new_kv,
+    GPUArray& cache,
+    int num_heads,
+    int position
+) {
+    if (new_kv.ndim() != 3 || cache.ndim() != 3) {
+        throw std::runtime_error("kv_cache_update_gqa: expected 3D tensors");
+    }
+    if (new_kv.shape()[0] != 1) {
+        throw std::runtime_error("kv_cache_update_gqa: new_kv should have seq_len=1");
+    }
+    if (new_kv.dtype() != cache.dtype()) {
+        throw std::runtime_error("kv_cache_update_gqa: dtype mismatch");
+    }
+    if (static_cast<int>(cache.shape()[0]) != num_heads) {
+        throw std::runtime_error("kv_cache_update_gqa: cache shape[0] should equal num_heads");
+    }
+
+    int num_kv_heads = static_cast<int>(new_kv.shape()[1]);
+    int head_dim = static_cast<int>(new_kv.shape()[2]);
+    int max_seq_len = static_cast<int>(cache.shape()[1]);
+    int total_elements = num_heads * head_dim;
+
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (new_kv.dtype()) {
+        case DataType::Float16:
+            nn::kv_cache_update_gqa_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(new_kv.data()),
+                static_cast<__half*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len, position);
+            break;
+        case DataType::BFloat16:
+            nn::kv_cache_update_gqa_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(new_kv.data()),
+                static_cast<__nv_bfloat16*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len, position);
+            break;
+        case DataType::Float32:
+            nn::kv_cache_update_gqa_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(new_kv.data()),
+                static_cast<float*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len, position);
+            break;
+        default:
+            throw std::runtime_error("kv_cache_update_gqa: unsupported dtype");
+    }
+
+    sync_and_check("kv_cache_update_gqa kernel failed");
+}
+
+// GQA-expanded KV cache prefill
+// new_kv: [seq_len, num_kv_heads, head_dim]
+// cache: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)
+void kv_cache_prefill_gqa(
+    const GPUArray& new_kv,
+    GPUArray& cache,
+    int num_heads,
+    int start_pos
+) {
+    if (new_kv.ndim() != 3 || cache.ndim() != 3) {
+        throw std::runtime_error("kv_cache_prefill_gqa: expected 3D tensors");
+    }
+    if (new_kv.dtype() != cache.dtype()) {
+        throw std::runtime_error("kv_cache_prefill_gqa: dtype mismatch");
+    }
+    if (static_cast<int>(cache.shape()[0]) != num_heads) {
+        throw std::runtime_error("kv_cache_prefill_gqa: cache shape[0] should equal num_heads");
+    }
+
+    int seq_len = static_cast<int>(new_kv.shape()[0]);
+    int num_kv_heads = static_cast<int>(new_kv.shape()[1]);
+    int head_dim = static_cast<int>(new_kv.shape()[2]);
+    int max_seq_len = static_cast<int>(cache.shape()[1]);
+    int total_elements = seq_len * num_heads * head_dim;
+
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (new_kv.dtype()) {
+        case DataType::Float16:
+            nn::kv_cache_prefill_gqa_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(new_kv.data()),
+                static_cast<__half*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len, start_pos, seq_len);
+            break;
+        case DataType::BFloat16:
+            nn::kv_cache_prefill_gqa_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(new_kv.data()),
+                static_cast<__nv_bfloat16*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len, start_pos, seq_len);
+            break;
+        case DataType::Float32:
+            nn::kv_cache_prefill_gqa_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(new_kv.data()),
+                static_cast<float*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len, start_pos, seq_len);
+            break;
+        default:
+            throw std::runtime_error("kv_cache_prefill_gqa: unsupported dtype");
+    }
+
+    sync_and_check("kv_cache_prefill_gqa kernel failed");
+}
+
 } // namespace ops
 } // namespace pygpukit
