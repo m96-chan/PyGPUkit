@@ -253,7 +253,7 @@ def test_flash_attention_prefill():
 
     # Apply causal mask
     for i in range(seq_len):
-        scores[:, i, i+1:] = -np.inf
+        scores[:, i, i + 1 :] = -np.inf
 
     scores_max = scores.max(axis=-1, keepdims=True)
     exp_scores = np.exp(scores - scores_max)

@@ -113,6 +113,9 @@ void rmsnorm(const GPUArray& input, const GPUArray& gamma, GPUArray& out, float 
 // SiLU (Swish) activation: y = x * sigmoid(x)
 GPUArray silu(const GPUArray& input);
 
+// SiLU with output buffer (for CUDA Graph capture)
+void silu(const GPUArray& input, GPUArray& out);
+
 // RoPE (Rotary Position Embedding) - In-place
 // q: [seq_len, n_heads_q, head_dim]
 // k: [seq_len, n_heads_k, head_dim]
@@ -126,6 +129,14 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
 // Output: [n_heads, q_len, head_dim]
 // scale: 1/sqrt(head_dim), computed automatically if <= 0
 GPUArray sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, float scale = 0.0f);
+
+// SDPA with output buffer (for CUDA Graph capture)
+void sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, GPUArray& out, float scale = 0.0f);
+
+// SDPA with fixed-length KV cache support (for CUDA Graph with dynamic context)
+// K/V are pre-allocated to max_seq_len, context_len specifies actual valid tokens
+void sdpa_causal_fixed_cache(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                              GPUArray& out, int context_len, float scale = 0.0f);
 
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
@@ -154,6 +165,22 @@ GPUArray transpose_3d_021(const GPUArray& input);
 
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);
+
+// ============================================================================
+// Fixed-Length KV Cache Operations (CUDA Graph Support)
+// ============================================================================
+
+// Update KV cache at a single position (decode step)
+// new_kv: [1, num_kv_heads, head_dim] - single token K or V
+// cache: [max_seq_len, num_kv_heads, head_dim] - pre-allocated cache
+// position: where to write in cache (0-indexed)
+void kv_cache_update(const GPUArray& new_kv, GPUArray& cache, int position);
+
+// Prefill KV cache from sequence (prefill step)
+// new_kv: [seq_len, num_kv_heads, head_dim]
+// cache: [max_seq_len, num_kv_heads, head_dim]
+// start_pos: where to start writing in cache
+void kv_cache_prefill(const GPUArray& new_kv, GPUArray& cache, int start_pos);
 
 // ============================================================================
 // Quantization Operations (#85)

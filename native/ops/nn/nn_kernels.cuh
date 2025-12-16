@@ -1965,6 +1965,150 @@ __global__ void sdpa_causal_bf16_kernel(
     }
 }
 
+// ============================================================================
+// KV Cache Update Kernel (Fixed-Length KV Cache for CUDA Graph)
+// ============================================================================
+
+// Copy new K/V values to position in fixed-length cache
+// new_kv: [1, num_kv_heads, head_dim] - single token K or V
+// cache: [max_seq_len, num_kv_heads, head_dim] - pre-allocated cache
+// position: where to write in cache (0-indexed)
+template <typename T>
+__global__ void kv_cache_update_kernel(
+    const T* __restrict__ new_kv,
+    T* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    // Total elements per position: num_kv_heads * head_dim
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        // new_kv is [1, num_kv_heads, head_dim], so offset is just idx
+        // cache is [max_seq_len, num_kv_heads, head_dim]
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// FP16 version
+__global__ void kv_cache_update_f16_kernel(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// BF16 version
+__global__ void kv_cache_update_bf16_kernel(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// FP32 version
+__global__ void kv_cache_update_f32_kernel(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// Prefill version: Copy multiple tokens from prefill K/V to cache
+// new_kv: [seq_len, num_kv_heads, head_dim]
+// cache: [max_seq_len, num_kv_heads, head_dim]
+// start_pos: where to start writing in cache
+// seq_len: number of tokens to copy
+__global__ void kv_cache_prefill_f16_kernel(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos,
+    int seq_len
+) {
+    int elements_per_pos = num_kv_heads * head_dim;
+    int total_elements = seq_len * elements_per_pos;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int seq_pos = idx / elements_per_pos;
+        int elem_idx = idx % elements_per_pos;
+        int cache_offset = (start_pos + seq_pos) * elements_per_pos + elem_idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+__global__ void kv_cache_prefill_bf16_kernel(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos,
+    int seq_len
+) {
+    int elements_per_pos = num_kv_heads * head_dim;
+    int total_elements = seq_len * elements_per_pos;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int seq_pos = idx / elements_per_pos;
+        int elem_idx = idx % elements_per_pos;
+        int cache_offset = (start_pos + seq_pos) * elements_per_pos + elem_idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+__global__ void kv_cache_prefill_f32_kernel(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos,
+    int seq_len
+) {
+    int elements_per_pos = num_kv_heads * head_dim;
+    int total_elements = seq_len * elements_per_pos;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int seq_pos = idx / elements_per_pos;
+        int elem_idx = idx % elements_per_pos;
+        int cache_offset = (start_pos + seq_pos) * elements_per_pos + elem_idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
 } // namespace nn
 } // namespace ops
 } // namespace pygpukit

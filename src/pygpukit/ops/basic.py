@@ -385,13 +385,9 @@ def matmul(
     if out is not None:
         expected_shape = (a.shape[0], b.shape[1])
         if out.shape != expected_shape:
-            raise ValueError(
-                f"out shape {out.shape} does not match expected {expected_shape}"
-            )
+            raise ValueError(f"out shape {out.shape} does not match expected {expected_shape}")
         if out.dtype != a.dtype:
-            raise ValueError(
-                f"out dtype {out.dtype} does not match input dtype {a.dtype}"
-            )
+            raise ValueError(f"out dtype {out.dtype} does not match input dtype {a.dtype}")
 
     # Check TF32 dtype requirement early (before backend dispatch)
     if use_tf32 is True:
@@ -1081,16 +1077,18 @@ def _linear_bias_gelu_native(
 # ============================================================================
 
 
-def silu(a: GPUArray) -> GPUArray:
+def silu(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """SiLU (Swish) activation: y = x * sigmoid(x).
 
     Used in Llama and other modern LLMs as the activation in MLP layers.
 
     Args:
         a: Input array.
+        out: Optional pre-allocated output array. If provided, the result
+            is written to this array (for CUDA Graph capture support).
 
     Returns:
-        A new GPUArray containing the SiLU-activated values.
+        A new GPUArray containing the SiLU-activated values, or the out array if provided.
 
     Raises:
         ValueError: If dtype is not a float type.
@@ -1100,7 +1098,7 @@ def silu(a: GPUArray) -> GPUArray:
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _silu_native(a)
+        return _silu_native(a, out=out)
     else:
         return _silu_cpu(a)
 
@@ -1113,14 +1111,20 @@ def _silu_cpu(a: GPUArray) -> GPUArray:
     return from_numpy(result)
 
 
-def _silu_native(a: GPUArray) -> GPUArray:
+def _silu_native(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """Native C++ CUDA implementation of SiLU (zero-copy)."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
     a_native = a._get_native()
-    c_native = native.silu(a_native)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.silu_(a_native, out_native)
+        return out
+    else:
+        c_native = native.silu(a_native)
+        return GPUArray._wrap_native(c_native)
 
 
 def sdpa_causal(
@@ -1128,6 +1132,8 @@ def sdpa_causal(
     K: GPUArray,
     V: GPUArray,
     scale: float = 0.0,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """Scaled Dot-Product Attention with causal mask.
 
@@ -1147,6 +1153,8 @@ def sdpa_causal(
         V: Value tensor of shape [n_heads, kv_len, head_dim].
         scale: Scaling factor (typically 1/sqrt(head_dim)).
                If <= 0, computed automatically from head_dim.
+        out: Optional output buffer [n_heads, q_len, head_dim].
+             If provided, result is written in-place (for CUDA Graph capture).
 
     Returns:
         Output tensor of shape [n_heads, q_len, head_dim].
@@ -1175,12 +1183,21 @@ def sdpa_causal(
     if K.shape[1] != V.shape[1]:
         raise ValueError("sdpa_causal: K and V seq_len mismatch")
 
+    # Validate out array if provided
+    if out is not None:
+        if out.shape != (n_heads, q_len, head_dim):
+            raise ValueError(
+                f"out shape {out.shape} does not match expected {(n_heads, q_len, head_dim)}"
+            )
+        if out.dtype != Q.dtype:
+            raise ValueError(f"out dtype {out.dtype} does not match Q dtype {Q.dtype}")
+
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _sdpa_causal_native(Q, K, V, scale)
+        return _sdpa_causal_native(Q, K, V, scale, out=out)
     else:
-        return _sdpa_causal_cpu(Q, K, V, scale)
+        return _sdpa_causal_cpu(Q, K, V, scale, out=out)
 
 
 def _sdpa_causal_cpu(
@@ -1188,6 +1205,8 @@ def _sdpa_causal_cpu(
     K: GPUArray,
     V: GPUArray,
     scale: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """CPU implementation of SDPA with causal mask."""
     q = Q.to_numpy()
@@ -1218,6 +1237,11 @@ def _sdpa_causal_cpu(
     # output: [n_heads, q_len, head_dim]
     output = np.matmul(weights, v)
 
+    if out is not None:
+        out_np = out.to_numpy()
+        np.copyto(out_np, output.astype(q.dtype))
+        out._data = from_numpy(out_np)._data
+        return out
     return from_numpy(output.astype(q.dtype))
 
 
@@ -1226,6 +1250,8 @@ def _sdpa_causal_native(
     K: GPUArray,
     V: GPUArray,
     scale: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """Native C++ CUDA implementation of SDPA with causal mask."""
     from pygpukit.core.backend import get_native_module
@@ -1234,8 +1260,50 @@ def _sdpa_causal_native(
     q_native = Q._get_native()
     k_native = K._get_native()
     v_native = V._get_native()
-    c_native = native.sdpa_causal(q_native, k_native, v_native, scale)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.sdpa_causal_(q_native, k_native, v_native, out_native, scale)
+        return out
+    else:
+        c_native = native.sdpa_causal(q_native, k_native, v_native, scale)
+        return GPUArray._wrap_native(c_native)
+
+
+def sdpa_causal_fixed_cache(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    out: GPUArray,
+    context_len: int,
+    scale: float = 0.0,
+) -> None:
+    """SDPA with fixed-length KV cache for CUDA Graph capture.
+
+    This variant is designed for use with pre-allocated KV caches where
+    the buffer size (max_seq_len) is larger than the actual context length.
+
+    Args:
+        Q: Query tensor of shape [n_heads, q_len, head_dim].
+        K: Key cache of shape [n_heads, max_seq_len, head_dim].
+        V: Value cache of shape [n_heads, max_seq_len, head_dim].
+        out: Pre-allocated output buffer [n_heads, q_len, head_dim].
+        context_len: Actual number of valid tokens in KV cache.
+        scale: Scaling factor (typically 1/sqrt(head_dim)).
+               If <= 0, computed automatically from head_dim.
+
+    Raises:
+        ValueError: If shapes or dtypes don't match, or context_len is invalid.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    q_native = Q._get_native()
+    k_native = K._get_native()
+    v_native = V._get_native()
+    out_native = out._get_native()
+
+    native.sdpa_causal_fixed_cache(q_native, k_native, v_native, out_native, context_len, scale)
 
 
 def rope_inplace(
@@ -1534,3 +1602,52 @@ def _reshape_copy_native(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArra
     input_native = input._get_native()
     c_native = native.reshape_copy(input_native, list(new_shape))
     return GPUArray._wrap_native(c_native)
+
+
+# ============================================================================
+# Fixed-Length KV Cache Operations (CUDA Graph Support)
+# ============================================================================
+
+
+def kv_cache_update(new_kv: GPUArray, cache: GPUArray, position: int) -> None:
+    """Update KV cache at a single position (decode step).
+
+    Used for fixed-length KV cache with CUDA Graph support.
+    Copies new K or V values to a specific position in the pre-allocated cache.
+
+    Args:
+        new_kv: New K or V tensor of shape [1, num_kv_heads, head_dim].
+        cache: Pre-allocated cache tensor of shape [max_seq_len, num_kv_heads, head_dim].
+        position: Position index in cache where to write (0-indexed).
+
+    Raises:
+        ValueError: If shapes are incompatible.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_update(new_kv_native, cache_native, position)
+
+
+def kv_cache_prefill(new_kv: GPUArray, cache: GPUArray, start_pos: int = 0) -> None:
+    """Prefill KV cache from sequence (prefill step).
+
+    Used for fixed-length KV cache with CUDA Graph support.
+    Copies K or V values from prefill to the pre-allocated cache.
+
+    Args:
+        new_kv: K or V tensor from prefill of shape [seq_len, num_kv_heads, head_dim].
+        cache: Pre-allocated cache tensor of shape [max_seq_len, num_kv_heads, head_dim].
+        start_pos: Starting position in cache (default 0).
+
+    Raises:
+        ValueError: If shapes are incompatible.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_prefill(new_kv_native, cache_native, start_pos)

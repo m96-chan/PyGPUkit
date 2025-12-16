@@ -96,9 +96,7 @@ def demo_int8_quantization():
     # Calculate error (filter near-zero values)
     mask = np.abs(weight_np) > 0.01
     if mask.sum() > 0:
-        rel_error = np.abs(weight_dequant_np[mask] - weight_np[mask]) / np.abs(
-            weight_np[mask]
-        )
+        rel_error = np.abs(weight_dequant_np[mask] - weight_np[mask]) / np.abs(weight_np[mask])
         print(f"  Mean relative error: {rel_error.mean():.6f}")
         print(f"  Max relative error: {rel_error.max():.6f}")
     else:
@@ -174,9 +172,7 @@ def demo_paged_attention():
     print(f"  Total cache size: {format_bytes(cache_size)}")
 
     # Traditional KV cache for comparison
-    traditional_size = (
-        num_seqs * max_context_len * num_kv_heads * head_dim * 2 * 2
-    )  # FP16
+    traditional_size = num_seqs * max_context_len * num_kv_heads * head_dim * 2 * 2  # FP16
     print(f"  Traditional cache (fixed {max_context_len} tokens): {format_bytes(traditional_size)}")
 
     # Create block tables
@@ -226,9 +222,7 @@ def demo_paged_attention():
     q_gpu = native.from_numpy(q_np)
 
     start = time.perf_counter()
-    output = native.paged_attention_v1(
-        q_gpu, k_cache, v_cache, block_tables, context_lens_gpu, 0.0
-    )
+    output = native.paged_attention_v1(q_gpu, k_cache, v_cache, block_tables, context_lens_gpu, 0.0)
     attn_time = (time.perf_counter() - start) * 1000
 
     print(f"  Output shape: {list(output.shape)}")
@@ -300,9 +294,7 @@ def demo_continuous_batching():
 
     # Prepare batch inputs
     print("\nPreparing batch inputs...")
-    token_lists = [
-        list(np.random.randint(0, vocab_size, size=sl)) for sl in seq_lens
-    ]
+    token_lists = [list(np.random.randint(0, vocab_size, size=sl)) for sl in seq_lens]
 
     start = time.perf_counter()
     token_ids, actual_total = native.prepare_batch_inputs(token_lists)

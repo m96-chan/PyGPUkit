@@ -173,9 +173,14 @@ void init_ops_bindings(py::module_& m) {
     // ========================================================================
 
     // SiLU (Swish) activation
-    m.def("silu", &ops::silu,
+    m.def("silu", py::overload_cast<const GPUArray&>(&ops::silu),
           py::arg("input"),
           "SiLU (Swish) activation: y = x * sigmoid(x)");
+
+    // SiLU with output buffer (for CUDA Graph capture)
+    m.def("silu_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::silu),
+          py::arg("input"), py::arg("out"),
+          "SiLU with output buffer (for CUDA Graph capture)");
 
     // RoPE (Rotary Position Embedding) - In-place
     m.def("rope_inplace", &ops::rope_inplace,
@@ -186,7 +191,7 @@ void init_ops_bindings(py::module_& m) {
           "cos, sin: [seq_len, head_dim]");
 
     // Scaled Dot-Product Attention with Causal Mask
-    m.def("sdpa_causal", &ops::sdpa_causal,
+    m.def("sdpa_causal", py::overload_cast<const GPUArray&, const GPUArray&, const GPUArray&, float>(&ops::sdpa_causal),
           py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("scale") = 0.0f,
           "Scaled Dot-Product Attention with causal mask.\n"
           "Q: [n_heads, q_len, head_dim]\n"
@@ -194,6 +199,18 @@ void init_ops_bindings(py::module_& m) {
           "V: [n_heads, kv_len, head_dim]\n"
           "Output: [n_heads, q_len, head_dim]\n"
           "scale: 1/sqrt(head_dim), auto-computed if <= 0");
+
+    // SDPA with output buffer (for CUDA Graph capture)
+    m.def("sdpa_causal_", py::overload_cast<const GPUArray&, const GPUArray&, const GPUArray&, GPUArray&, float>(&ops::sdpa_causal),
+          py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("out"), py::arg("scale") = 0.0f,
+          "SDPA with output buffer (for CUDA Graph capture)");
+
+    // SDPA with fixed-length KV cache support
+    m.def("sdpa_causal_fixed_cache", &ops::sdpa_causal_fixed_cache,
+          py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("out"),
+          py::arg("context_len"), py::arg("scale") = 0.0f,
+          "SDPA with fixed-length KV cache support.\n"
+          "K/V are pre-allocated to max_seq_len, context_len specifies actual valid tokens.");
 
     // ========================================================================
     // Tensor Manipulation Operations
@@ -221,6 +238,24 @@ void init_ops_bindings(py::module_& m) {
     m.def("reshape_copy", &ops::reshape_copy,
           py::arg("input"), py::arg("new_shape"),
           "Reshape tensor with copy (ensures contiguous output).");
+
+    // ========================================================================
+    // Fixed-Length KV Cache Operations (CUDA Graph Support)
+    // ========================================================================
+
+    m.def("kv_cache_update", &ops::kv_cache_update,
+          py::arg("new_kv"), py::arg("cache"), py::arg("position"),
+          "Update KV cache at a single position (decode step).\n"
+          "new_kv: [1, num_kv_heads, head_dim]\n"
+          "cache: [max_seq_len, num_kv_heads, head_dim]\n"
+          "position: where to write in cache (0-indexed)");
+
+    m.def("kv_cache_prefill", &ops::kv_cache_prefill,
+          py::arg("new_kv"), py::arg("cache"), py::arg("start_pos"),
+          "Prefill KV cache from sequence.\n"
+          "new_kv: [seq_len, num_kv_heads, head_dim]\n"
+          "cache: [max_seq_len, num_kv_heads, head_dim]\n"
+          "start_pos: where to start writing in cache");
 
     // ========================================================================
     // Quantization Operations (#85)
