@@ -152,5 +152,29 @@ GPUArray transpose_3d_021(const GPUArray& input);
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);
 
+// ============================================================================
+// Quantization Operations (#85)
+// ============================================================================
+
+// Dequantize INT8 to FP16/FP32: output = input_int8 * scale
+// input: [rows, cols] INT8, scale: [cols] FP16/FP32, output: [rows, cols] FP16/FP32
+GPUArray dequantize_int8(const GPUArray& input, const GPUArray& scale, DataType output_dtype);
+
+// Quantized Linear: output = activation @ (weight_int8 * scale).T
+// activation: [M, K] FP16, weight_int8: [N, K] INT8, scale: [N] FP16
+// output: [M, N] FP16
+// Dequantization happens on-the-fly (no intermediate buffer)
+GPUArray linear_int8(
+    const GPUArray& activation,
+    const GPUArray& weight_int8,
+    const GPUArray& scale,
+    const GPUArray* bias = nullptr
+);
+
+// Quantize FP16/FP32 to INT8 with per-column scaling
+// Returns (weight_int8, scale) pair
+// weight_int8: [rows, cols] INT8, scale: [cols] FP16/FP32
+std::pair<GPUArray, GPUArray> quantize_to_int8(const GPUArray& input);
+
 } // namespace ops
 } // namespace pygpukit

@@ -216,4 +216,34 @@ void init_ops_bindings(py::module_& m) {
     m.def("reshape_copy", &ops::reshape_copy,
           py::arg("input"), py::arg("new_shape"),
           "Reshape tensor with copy (ensures contiguous output).");
+
+    // ========================================================================
+    // Quantization Operations (#85)
+    // ========================================================================
+
+    // Dequantize INT8 to FP16/FP32
+    m.def("dequantize_int8", &ops::dequantize_int8,
+          py::arg("input"), py::arg("scale"), py::arg("output_dtype"),
+          "Dequantize INT8 tensor to FP16/FP32.\n"
+          "output = input_int8 * scale\n"
+          "input: [rows, cols] INT8, scale: [cols], output_dtype: Float16 or Float32");
+
+    // Quantized Linear (INT8 weight x FP16 activation)
+    m.def("linear_int8", [](const GPUArray& activation, const GPUArray& weight_int8,
+                            const GPUArray& scale, const GPUArray* bias) {
+              return ops::linear_int8(activation, weight_int8, scale, bias);
+          },
+          py::arg("activation"), py::arg("weight_int8"), py::arg("scale"),
+          py::arg("bias") = nullptr,
+          "Quantized Linear layer with INT8 weights.\n"
+          "output = activation @ (weight_int8 * scale).T\n"
+          "activation: [M, K] FP16, weight_int8: [N, K] INT8, scale: [N] FP16\n"
+          "Dequantization happens on-the-fly (memory efficient).");
+
+    // Quantize to INT8
+    m.def("quantize_to_int8", &ops::quantize_to_int8,
+          py::arg("input"),
+          "Quantize FP16/FP32 tensor to INT8 with per-column scaling.\n"
+          "Returns (weight_int8, scale) tuple.\n"
+          "weight_int8: [rows, cols] INT8, scale: [cols] same dtype as input");
 }

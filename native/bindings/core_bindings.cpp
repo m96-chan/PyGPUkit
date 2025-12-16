@@ -18,6 +18,9 @@ void init_core_bindings(py::module_& m) {
         .value("BFloat16", DataType::BFloat16)
         .value("Int32", DataType::Int32)
         .value("Int64", DataType::Int64)
+        .value("Int8", DataType::Int8)
+        .value("UInt8", DataType::UInt8)
+        .value("Int4", DataType::Int4)
         .export_values();
 
     // StreamPriority enum
@@ -100,6 +103,16 @@ void init_core_bindings(py::module_& m) {
                     break;
                 case DataType::Int64:
                     result = py::array_t<int64_t>(py_shape);
+                    break;
+                case DataType::Int8:
+                    result = py::array_t<int8_t>(py_shape);
+                    break;
+                case DataType::UInt8:
+                    result = py::array_t<uint8_t>(py_shape);
+                    break;
+                case DataType::Int4:
+                    // Int4 packs 2 values per byte, use uint8 for storage
+                    result = py::array_t<uint8_t>(py_shape);
                     break;
             }
 

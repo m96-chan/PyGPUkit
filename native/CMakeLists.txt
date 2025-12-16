@@ -82,6 +82,7 @@ pybind11_add_module(_pygpukit_native
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
     ops/nn/nn.cu
+    ops/quantize/quantize.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp
