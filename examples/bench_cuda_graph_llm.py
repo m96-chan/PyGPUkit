@@ -6,9 +6,6 @@ Compares standard generation with fixed-length KV cache generation.
 """
 
 import time
-from pathlib import Path
-
-import numpy as np
 
 
 def main():
@@ -22,16 +19,17 @@ def main():
     # Load tokenizer
     print("\nLoading tokenizer...")
     from tokenizers import Tokenizer
+
     tokenizer = Tokenizer.from_file(tokenizer_path)
 
     # Load model
     print("Loading model...")
     from pygpukit.llm import (
+        ChatMessage,
         detect_model_spec,
+        format_chat_messages,
         load_model_from_safetensors,
         load_safetensors,
-        format_chat_messages,
-        ChatMessage,
     )
 
     st = load_safetensors(model_path)
@@ -79,7 +77,7 @@ def main():
     print(f"  Time: {elapsed_standard:.0f} ms")
     print(f"  Speed: {tps_standard:.2f} tok/s ({ms_per_token_standard:.0f} ms/tok)")
 
-    text_standard = tokenizer.decode(output_standard[len(input_ids):])
+    text_standard = tokenizer.decode(output_standard[len(input_ids) :])
     print(f"  Output: {text_standard[:80].encode('ascii', 'replace').decode()}...")
 
     # Benchmark: generate_cuda_graph (fixed cache)
@@ -104,7 +102,7 @@ def main():
     print(f"  Time: {elapsed_graph:.0f} ms")
     print(f"  Speed: {tps_graph:.2f} tok/s ({ms_per_token_graph:.0f} ms/tok)")
 
-    text_graph = tokenizer.decode(output_graph[len(input_ids):])
+    text_graph = tokenizer.decode(output_graph[len(input_ids) :])
     print(f"  Output: {text_graph[:80].encode('ascii', 'replace').decode()}...")
 
     # Summary

@@ -162,9 +162,13 @@ GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats);
 
 // Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]
 GPUArray transpose_3d_021(const GPUArray& input);
+// Transpose 3D tensor with output buffer (for CUDA Graph capture)
+void transpose_3d_021(const GPUArray& input, GPUArray& out);
 
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);
+// Reshape with copy into output buffer (for CUDA Graph capture)
+void reshape_copy(const GPUArray& input, GPUArray& out);
 
 // ============================================================================
 // Fixed-Length KV Cache Operations (CUDA Graph Support)

@@ -1492,7 +1492,9 @@ class CausalTransformerModel:
         # Transformer blocks with fixed cache
         for block in self.blocks:
             # Pre-norm: hidden -> norm_out
-            rmsnorm(buffers.hidden, block.attn_norm.weight, block.attn_norm.eps, out=buffers.norm_out)
+            rmsnorm(
+                buffers.hidden, block.attn_norm.weight, block.attn_norm.eps, out=buffers.norm_out
+            )
 
             # Save residual
             copy_to(buffers.hidden, buffers.residual)

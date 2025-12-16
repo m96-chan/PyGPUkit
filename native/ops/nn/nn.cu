@@ -1009,6 +1009,43 @@ GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats) {
     return result;
 }
 
+// Internal helper for transpose_3d_021 kernel dispatch
+static void transpose_3d_021_dispatch(
+    const GPUArray& input,
+    GPUArray& result,
+    size_t dim0, size_t dim1, size_t dim2
+) {
+    size_t total = input.size();
+    const int block_size = 256;
+    const int grid_size = (total + block_size - 1) / block_size;
+
+    // Use capture stream if available
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::transpose_021_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        case DataType::Float16:
+            nn::transpose_021_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        case DataType::BFloat16:
+            nn::transpose_021_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                dim0, dim1, dim2);
+            break;
+        default:
+            throw std::runtime_error("transpose_3d_021: unsupported dtype");
+    }
+}
+
 // Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]
 GPUArray transpose_3d_021(const GPUArray& input) {
     if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
@@ -1027,35 +1064,75 @@ GPUArray transpose_3d_021(const GPUArray& input) {
     std::vector<size_t> out_shape = {dim1, dim0, dim2};
     GPUArray result(out_shape, input.dtype());
 
-    size_t total = input.size();
+    transpose_3d_021_dispatch(input, result, dim0, dim1, dim2);
+    sync_and_check("transpose_3d_021 kernel failed");
+    return result;
+}
+
+// Transpose 3D tensor with output buffer (for CUDA Graph capture)
+void transpose_3d_021(const GPUArray& input, GPUArray& out) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("transpose_3d_021: only float32/float16/bfloat16 supported");
+    }
+    if (input.ndim() != 3) {
+        throw std::runtime_error("transpose_3d_021: expects 3D tensor");
+    }
+    if (out.ndim() != 3) {
+        throw std::runtime_error("transpose_3d_021: output expects 3D tensor");
+    }
+    if (input.dtype() != out.dtype()) {
+        throw std::runtime_error("transpose_3d_021: dtype mismatch");
+    }
+
+    size_t dim0 = input.shape()[0];
+    size_t dim1 = input.shape()[1];
+    size_t dim2 = input.shape()[2];
+
+    // Verify output shape: [dim1, dim0, dim2]
+    if (out.shape()[0] != dim1 || out.shape()[1] != dim0 || out.shape()[2] != dim2) {
+        throw std::runtime_error("transpose_3d_021: output shape mismatch, expected [" +
+            std::to_string(dim1) + ", " + std::to_string(dim0) + ", " + std::to_string(dim2) + "]");
+    }
+
+    transpose_3d_021_dispatch(input, out, dim0, dim1, dim2);
+    sync_and_check("transpose_3d_021 kernel failed");
+}
+
+// Internal helper for reshape_copy kernel dispatch
+static void reshape_copy_dispatch(
+    const GPUArray& input,
+    GPUArray& result,
+    size_t total_size
+) {
     const int block_size = 256;
-    const int grid_size = (total + block_size - 1) / block_size;
+    const int grid_size = (total_size + block_size - 1) / block_size;
+
+    // Use capture stream if available
+    cudaStream_t stream = internal::get_capture_stream();
 
     switch (input.dtype()) {
         case DataType::Float32:
-            nn::transpose_021_f32_kernel<<<grid_size, block_size>>>(
+            nn::copy_f32_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<const float*>(input.data()),
                 static_cast<float*>(result.data()),
-                dim0, dim1, dim2);
+                total_size);
             break;
         case DataType::Float16:
-            nn::transpose_021_f16_kernel<<<grid_size, block_size>>>(
+            nn::copy_f16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<const __half*>(input.data()),
                 static_cast<__half*>(result.data()),
-                dim0, dim1, dim2);
+                total_size);
             break;
         case DataType::BFloat16:
-            nn::transpose_021_bf16_kernel<<<grid_size, block_size>>>(
+            nn::copy_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(input.data()),
                 static_cast<__nv_bfloat16*>(result.data()),
-                dim0, dim1, dim2);
+                total_size);
             break;
         default:
-            break;
+            throw std::runtime_error("reshape_copy: unsupported dtype");
     }
-
-    sync_and_check("transpose_3d_021 kernel failed");
-    return result;
 }
 
 // Reshape with copy (creates contiguous tensor with new shape)
@@ -1078,34 +1155,32 @@ GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shap
 
     GPUArray result(new_shape, input.dtype());
 
-    const int block_size = 256;
-    const int grid_size = (input_size + block_size - 1) / block_size;
-
-    switch (input.dtype()) {
-        case DataType::Float32:
-            nn::copy_f32_kernel<<<grid_size, block_size>>>(
-                static_cast<const float*>(input.data()),
-                static_cast<float*>(result.data()),
-                input_size);
-            break;
-        case DataType::Float16:
-            nn::copy_f16_kernel<<<grid_size, block_size>>>(
-                static_cast<const __half*>(input.data()),
-                static_cast<__half*>(result.data()),
-                input_size);
-            break;
-        case DataType::BFloat16:
-            nn::copy_bf16_kernel<<<grid_size, block_size>>>(
-                static_cast<const __nv_bfloat16*>(input.data()),
-                static_cast<__nv_bfloat16*>(result.data()),
-                input_size);
-            break;
-        default:
-            break;
-    }
-
+    reshape_copy_dispatch(input, result, input_size);
     sync_and_check("reshape_copy kernel failed");
     return result;
+}
+
+// Reshape with copy into output buffer (for CUDA Graph capture)
+void reshape_copy(const GPUArray& input, GPUArray& out) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("reshape_copy: only float32/float16/bfloat16 supported");
+    }
+    if (input.dtype() != out.dtype()) {
+        throw std::runtime_error("reshape_copy: dtype mismatch");
+    }
+
+    // Verify total size matches
+    size_t input_size = input.size();
+    size_t output_size = out.size();
+
+    if (input_size != output_size) {
+        throw std::runtime_error("reshape_copy: total size mismatch (" +
+            std::to_string(input_size) + " vs " + std::to_string(output_size) + ")");
+    }
+
+    reshape_copy_dispatch(input, out, input_size);
+    sync_and_check("reshape_copy kernel failed");
 }
 
 // ============================================================================

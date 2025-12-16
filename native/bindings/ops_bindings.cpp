@@ -230,14 +230,24 @@ void init_ops_bindings(py::module_& m) {
           "input: [dim0, dim1, dim2] -> output: [dim0, dim1 * repeats, dim2]");
 
     // Transpose 3D: [d0, d1, d2] -> [d1, d0, d2]
-    m.def("transpose_3d_021", &ops::transpose_3d_021,
+    m.def("transpose_3d_021", py::overload_cast<const GPUArray&>(&ops::transpose_3d_021),
           py::arg("input"),
           "Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2]");
 
+    // Transpose 3D with output buffer (for CUDA Graph capture)
+    m.def("transpose_3d_021_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::transpose_3d_021),
+          py::arg("input"), py::arg("out"),
+          "Transpose 3D tensor with output buffer (for CUDA Graph capture)");
+
     // Reshape with copy
-    m.def("reshape_copy", &ops::reshape_copy,
+    m.def("reshape_copy", py::overload_cast<const GPUArray&, const std::vector<size_t>&>(&ops::reshape_copy),
           py::arg("input"), py::arg("new_shape"),
           "Reshape tensor with copy (ensures contiguous output).");
+
+    // Reshape with copy into output buffer (for CUDA Graph capture)
+    m.def("reshape_copy_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::reshape_copy),
+          py::arg("input"), py::arg("out"),
+          "Reshape with copy into output buffer (for CUDA Graph capture).");
 
     // ========================================================================
     // Fixed-Length KV Cache Operations (CUDA Graph Support)

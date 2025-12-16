@@ -39,7 +39,6 @@ def demo_basic_cuda_graph():
     print("=" * 70)
 
     import pygpukit as pk
-    from pygpukit.ops.basic import matmul
 
     native = pk._pygpukit_native
 
@@ -115,7 +114,7 @@ def demo_fixed_kv_cache():
     max_seq_len = 512
     prefill_len = 10
 
-    print(f"\nKV Cache Config:")
+    print("\nKV Cache Config:")
     print(f"  num_kv_heads: {num_kv_heads}")
     print(f"  head_dim: {head_dim}")
     print(f"  max_seq_len: {max_seq_len}")
@@ -184,7 +183,7 @@ def demo_sdpa_fixed_cache():
     context_len = 50  # Actual valid tokens
     q_len = 1  # Single query (decode)
 
-    print(f"\nSDPA Config:")
+    print("\nSDPA Config:")
     print(f"  n_heads: {n_heads}")
     print(f"  max_seq_len: {max_seq_len}")
     print(f"  context_len: {context_len}")
@@ -228,7 +227,6 @@ def demo_cuda_graph_with_kv_cache():
     print("=" * 70)
 
     import pygpukit as pk
-    from pygpukit.ops.basic import kv_cache_update
 
     native = pk._pygpukit_native
 
@@ -237,7 +235,7 @@ def demo_cuda_graph_with_kv_cache():
     head_dim = 128
     max_seq_len = 512
 
-    print(f"\nCapturing KV cache update into CUDA Graph...")
+    print("\nCapturing KV cache update into CUDA Graph...")
 
     # Allocate buffers
     k_cache = native.from_numpy(np.zeros((max_seq_len, num_kv_heads, head_dim), dtype=np.float16))
@@ -288,6 +286,7 @@ def main():
     except Exception as e:
         print(f"  [FAIL] Basic CUDA Graph: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Basic CUDA Graph", False))
 
@@ -297,6 +296,7 @@ def main():
     except Exception as e:
         print(f"  [FAIL] Fixed KV Cache: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("Fixed KV Cache", False))
 
@@ -306,6 +306,7 @@ def main():
     except Exception as e:
         print(f"  [FAIL] SDPA Fixed Cache: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("SDPA Fixed Cache", False))
 
@@ -315,6 +316,7 @@ def main():
     except Exception as e:
         print(f"  [FAIL] CUDA Graph + KV Cache: {e}")
         import traceback
+
         traceback.print_exc()
         results.append(("CUDA Graph + KV Cache", False))
 
