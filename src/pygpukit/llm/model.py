@@ -553,13 +553,15 @@ class DecodeBuffers:
 
     Buffer shapes (for Qwen3-8B example):
     - hidden: [1, 4096] - layer input/output
-    - q_proj_out: [1, 4096] - Q projection output (2D)
-    - k_proj_out, v_proj_out: [1, 1024] - K/V projection outputs (2D)
+    - qkv_proj_out: [1, 6144] - Fused QKV projection output (q_dim + k_dim + v_dim)
+    - q_proj_out: [1, 4096] - Q projection output (2D) - DEPRECATED, kept for compat
+    - k_proj_out, v_proj_out: [1, 1024] - K/V projection outputs (2D) - DEPRECATED
     - o_proj_out: [1, 4096] - O projection output (2D)
     - q: [1, 32, 128] - query after reshape (3D)
     - k, v: [1, 8, 128] - key/value after reshape (3D)
     - attn_out: [32, 1, 128] - SDPA output (transposed format)
-    - mlp_gate, mlp_up: [1, 12288] - MLP intermediates
+    - gate_up_out: [1, 24576] - Fused gate_up projection output (2 * intermediate_size)
+    - mlp_gate, mlp_up: [1, 12288] - MLP intermediates (views into gate_up_out)
     - cos, sin: [1, 128] - RoPE tables
     - embed_out: [1, 4096] - embedding lookup output
     """
@@ -602,6 +604,15 @@ class DecodeBuffers:
 
     # GPU position buffer for CUDA Graph replay (int32)
     position_buf: GPUArray | None = None  # [1] int32
+
+    # Fused projection buffers (for reduced matmul count)
+    # NOTE: These buffers are allocated but NOT YET USED in the decode path.
+    # Using them requires a slice/narrow operation to extract Q, K, V from
+    # qkv_proj_out (and gate, up from gate_up_out). PyGPUkit currently lacks
+    # a zero-allocation slice kernel. The fused weights (Attention.qkv_proj,
+    # MLP.gate_up_proj) are created and ready for when slice support is added.
+    qkv_proj_out: GPUArray | None = None  # [1, q_dim + k_dim + v_dim]
+    gate_up_out: GPUArray | None = None  # [1, 2 * intermediate_size]
 
     @classmethod
     def allocate(
@@ -659,6 +670,13 @@ class DecodeBuffers:
         # GPU position buffer for CUDA Graph replay
         position_buf = zeros((1,), dtype="int32")
 
+        # Fused projection buffers
+        q_dim = config.num_heads * config.head_dim
+        k_dim = config.num_kv_heads * config.head_dim
+        v_dim = config.num_kv_heads * config.head_dim
+        qkv_proj_out = zeros((1, q_dim + k_dim + v_dim), dtype=dtype)
+        gate_up_out = zeros((1, 2 * config.intermediate_size), dtype=dtype)
+
         return cls(
             hidden=hidden,
             q=q,
@@ -683,6 +701,8 @@ class DecodeBuffers:
             q_flat=q_flat,
             k_flat=k_flat,
             position_buf=position_buf,
+            qkv_proj_out=qkv_proj_out,
+            gate_up_out=gate_up_out,
         )
 
 
@@ -995,6 +1015,20 @@ class Attention:
         self.num_kv_heads: int = config.num_kv_heads
         self.num_kv_groups = config.num_kv_groups
 
+        # Store dimensions for QKV split
+        self.q_dim = self.num_heads * self.head_dim
+        self.k_dim = self.num_kv_heads * self.head_dim
+        self.v_dim = self.num_kv_heads * self.head_dim
+
+        # Create fused QKV projection (reduces 3 matmuls to 1)
+        # qkv_weight: [q_dim + k_dim + v_dim, hidden_size]
+        # NOTE: This fused weight is created but NOT YET USED in forward passes.
+        # Using it requires a slice operation to split qkv_proj(x) into Q, K, V.
+        # PyGPUkit lacks a zero-allocation slice kernel. Forward paths still use
+        # separate q_proj, k_proj, v_proj until slice support is added.
+        qkv_weight = concat_axis0(concat_axis0(q_proj, k_proj), v_proj)
+        self.qkv_proj = Linear(qkv_weight, None)  # No bias for fused (bias handled separately)
+
         # Precompute RoPE if enabled
         self._cos: np.ndarray | None
         self._sin: np.ndarray | None
@@ -1248,6 +1282,9 @@ class MLP:
 
     SwiGLU (LLaMA style):
         gate_proj -> SiLU -> * up_proj -> down_proj
+
+    With fusion optimization (SwiGLU):
+        gate_up_proj (fused) -> split -> SiLU(gate) * up -> down_proj
     """
 
     def __init__(
@@ -1277,6 +1314,18 @@ class MLP:
             self.gate_proj = Linear(gate_proj)
             self.up_proj = Linear(up_proj)
             self.down_proj = Linear(down_proj)
+
+            # Store intermediate size for split
+            self.intermediate_size = gate_proj.shape[0]
+
+            # Create fused gate_up projection (reduces 2 matmuls to 1)
+            # gate_up_weight: [2 * intermediate_size, hidden_size]
+            # NOTE: This fused weight is created but NOT YET USED in forward passes.
+            # Using it requires a slice operation to split gate_up_proj(x) into gate, up.
+            # PyGPUkit lacks a zero-allocation slice kernel. Forward paths still use
+            # separate gate_proj, up_proj until slice support is added.
+            gate_up_weight = concat_axis0(gate_proj, up_proj)
+            self.gate_up_proj = Linear(gate_up_weight, None)
 
     def __call__(self, x: GPUArray) -> GPUArray:
         if self.activation == "gelu":
