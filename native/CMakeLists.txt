@@ -86,6 +86,7 @@ pybind11_add_module(_pygpukit_native
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu
     ops/batch/continuous_batching.cu
+    ops/sampling/sampling.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp

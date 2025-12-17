@@ -39,6 +39,7 @@ from pygpukit.ops.basic import (
     reshape_copy,
     rmsnorm,
     rope_inplace,
+    sample_token_gpu,
     sdpa_causal,
     sdpa_causal_fixed_cache,
     silu,
@@ -1278,6 +1279,7 @@ class CausalTransformerModel:
         top_p: float = 0.9,
         eos_token_id: int | None = None,
         use_cache: bool = True,
+        gpu_sampling: bool = False,
     ) -> list[int]:
         """Generate tokens autoregressively.
 
@@ -1289,6 +1291,7 @@ class CausalTransformerModel:
             top_p: Nucleus sampling threshold
             eos_token_id: Stop at this token
             use_cache: Use KV cache
+            gpu_sampling: Use GPU-based sampling (avoids full logits D2H transfer)
 
         Returns:
             List of all token IDs (input + generated)
@@ -1300,8 +1303,13 @@ class CausalTransformerModel:
             # Prefill
             hidden, past_key_values = self(tokens, use_cache=True)
             logits = self.get_logits(hidden)
-            last_logits = logits.to_numpy()[-1]
-            next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+            if gpu_sampling:
+                # GPU sampling: only transfer 1 int instead of full vocab logits
+                next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+            else:
+                last_logits = logits.to_numpy()[-1]
+                next_token = sample_token(last_logits, temperature, top_k, top_p)
             tokens.append(next_token)
 
             if eos_token_id is not None and next_token == eos_token_id:
@@ -1313,8 +1321,12 @@ class CausalTransformerModel:
                     [next_token], past_key_values=past_key_values, use_cache=True
                 )
                 logits = self.get_logits(hidden)
-                last_logits = logits.to_numpy()[-1]
-                next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+                if gpu_sampling:
+                    next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+                else:
+                    last_logits = logits.to_numpy()[-1]
+                    next_token = sample_token(last_logits, temperature, top_k, top_p)
                 tokens.append(next_token)
 
                 if eos_token_id is not None and next_token == eos_token_id:
@@ -1323,8 +1335,12 @@ class CausalTransformerModel:
             for _ in range(max_new_tokens):
                 hidden, _ = self(tokens, use_cache=False)
                 logits = self.get_logits(hidden)
-                last_logits = logits.to_numpy()[-1]
-                next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+                if gpu_sampling:
+                    next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+                else:
+                    last_logits = logits.to_numpy()[-1]
+                    next_token = sample_token(last_logits, temperature, top_k, top_p)
                 tokens.append(next_token)
 
                 if eos_token_id is not None and next_token == eos_token_id:
@@ -1340,6 +1356,7 @@ class CausalTransformerModel:
         top_k: int = 50,
         top_p: float = 0.9,
         eos_token_id: int | None = None,
+        gpu_sampling: bool = False,
     ) -> Generator[int, None, None]:
         """Generate tokens autoregressively with streaming.
 
@@ -1353,6 +1370,7 @@ class CausalTransformerModel:
             top_k: Top-k filtering
             top_p: Nucleus sampling threshold
             eos_token_id: Stop at this token
+            gpu_sampling: Use GPU-based sampling (avoids full logits D2H transfer)
 
         Yields:
             Generated token IDs one at a time
@@ -1367,8 +1385,12 @@ class CausalTransformerModel:
         # Prefill
         hidden, past_key_values = self(input_ids, use_cache=True)
         logits = self.get_logits(hidden)
-        last_logits = logits.to_numpy()[-1]
-        next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+        if gpu_sampling:
+            next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+        else:
+            last_logits = logits.to_numpy()[-1]
+            next_token = sample_token(last_logits, temperature, top_k, top_p)
 
         yield next_token
 
@@ -1381,8 +1403,12 @@ class CausalTransformerModel:
                 [next_token], past_key_values=past_key_values, use_cache=True
             )
             logits = self.get_logits(hidden)
-            last_logits = logits.to_numpy()[-1]
-            next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+            if gpu_sampling:
+                next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+            else:
+                last_logits = logits.to_numpy()[-1]
+                next_token = sample_token(last_logits, temperature, top_k, top_p)
 
             yield next_token
 
@@ -1399,6 +1425,7 @@ class CausalTransformerModel:
         top_p: float = 0.9,
         eos_token_id: int | None = None,
         use_graph: bool = False,
+        gpu_sampling: bool = False,
     ) -> list[int]:
         """Generate tokens using fixed-length KV cache with optional CUDA Graph.
 
@@ -1419,6 +1446,7 @@ class CausalTransformerModel:
             top_p: Nucleus sampling threshold
             eos_token_id: Stop at this token
             use_graph: Enable CUDA Graph capture/replay (experimental)
+            gpu_sampling: Use GPU-based sampling (avoids full logits D2H transfer)
 
         Returns:
             List of all token IDs (input + generated)
@@ -1469,8 +1497,12 @@ class CausalTransformerModel:
 
         # Get first token
         logits = self.get_logits(hidden)
-        last_logits = logits.to_numpy()[-1]
-        next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+        if gpu_sampling:
+            next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+        else:
+            last_logits = logits.to_numpy()[-1]
+            next_token = sample_token(last_logits, temperature, top_k, top_p)
         tokens.append(next_token)
 
         if eos_token_id is not None and next_token == eos_token_id:
@@ -1483,13 +1515,16 @@ class CausalTransformerModel:
 
         # Import CudaGraph for graph capture
         if use_graph:
-            from pygpukit._pygpukit_native import CudaGraph
             import gc
+
+            from pygpukit._pygpukit_native import CudaGraph
 
             # Warm-up: Run _decode_step_zero_alloc a few times to initialize
             # all lazy state (method dispatch, CUDA kernel caching, etc.)
             for _ in range(3):
-                _ = self._decode_step_zero_alloc(next_token, context_len - 1, context_len, _decode_buffers)
+                _ = self._decode_step_zero_alloc(
+                    next_token, context_len - 1, context_len, _decode_buffers
+                )
 
             # Create inline decode function for graph capture
             # NOTE: Inline functions capture more reliably than method calls
@@ -1502,20 +1537,32 @@ class CausalTransformerModel:
                 embedding_lookup(model_self.embed_tokens, buffers.embed_out, tok_id)
                 copy_to(buffers.embed_out, buffers.hidden)
                 for block in model_self.blocks:
-                    rmsnorm(buffers.hidden, block.attn_norm.weight, block.attn_norm.eps,
-                            out=buffers.norm_out)
+                    rmsnorm(
+                        buffers.hidden,
+                        block.attn_norm.weight,
+                        block.attn_norm.eps,
+                        out=buffers.norm_out,
+                    )
                     copy_to(buffers.hidden, buffers.residual)
                     model_self._attention_forward_zero_alloc(
                         block.attn, buffers.norm_out, pos, ctx_len, buffers
                     )
                     add_inplace(buffers.hidden, buffers.residual)
                     copy_to(buffers.hidden, buffers.residual)
-                    rmsnorm(buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps,
-                            out=buffers.norm_out)
+                    rmsnorm(
+                        buffers.hidden,
+                        block.mlp_norm.weight,
+                        block.mlp_norm.eps,
+                        out=buffers.norm_out,
+                    )
                     model_self._mlp_forward_zero_alloc(block.mlp, buffers.norm_out, buffers)
                     add_inplace(buffers.hidden, buffers.residual)
-                rmsnorm(buffers.hidden, model_self.final_norm.weight, model_self.final_norm.eps,
-                        out=buffers.norm_out)
+                rmsnorm(
+                    buffers.hidden,
+                    model_self.final_norm.weight,
+                    model_self.final_norm.eps,
+                    out=buffers.norm_out,
+                )
                 copy_to(buffers.norm_out, buffers.hidden)
 
             graph = CudaGraph()
@@ -1552,8 +1599,12 @@ class CausalTransformerModel:
 
             # Get next token
             logits = self.get_logits(hidden)
-            last_logits = logits.to_numpy()[-1]
-            next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+            if gpu_sampling:
+                next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+            else:
+                last_logits = logits.to_numpy()[-1]
+                next_token = sample_token(last_logits, temperature, top_k, top_p)
             tokens.append(next_token)
 
             context_len += 1
@@ -1679,7 +1730,9 @@ class CausalTransformerModel:
         transpose_3d_021(q, out=buffers.q_t)
 
         # SDPA with fixed cache
-        sdpa_causal_fixed_cache(buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len)
+        sdpa_causal_fixed_cache(
+            buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len
+        )
 
         # Transpose output: [num_heads, 1, head_dim] -> [1, num_heads, head_dim]
         transpose_3d_021(buffers.attn_out, out=buffers.q)  # Reuse q buffer for transposed output

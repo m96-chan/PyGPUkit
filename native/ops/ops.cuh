@@ -331,5 +331,46 @@ std::pair<GPUArray, int> prepare_batch_inputs(
     const std::vector<std::vector<int>>& token_lists
 );
 
+// ============================================================================
+// GPU Sampling Operations (#v0.2.10)
+// ============================================================================
+
+// Greedy sampling (argmax)
+// logits: [vocab_size] or [1, vocab_size]
+// Returns: sampled token ID
+int sample_greedy(const GPUArray& logits);
+
+// Multinomial sampling with temperature
+// logits: [vocab_size] or [1, vocab_size]
+// temperature: > 0 (lower = more deterministic)
+// Returns: sampled token ID
+int sample_multinomial(const GPUArray& logits, float temperature);
+
+// Top-K sampling
+// Samples from top-k highest probability tokens
+// top_k: number of tokens to consider (> 0)
+int sample_topk(const GPUArray& logits, int top_k, float temperature);
+
+// Top-P (Nucleus) sampling
+// Samples from smallest set of tokens whose cumulative probability >= top_p
+// top_p: cumulative probability threshold (0 < p <= 1)
+int sample_topp(const GPUArray& logits, float top_p, float temperature);
+
+// Unified sampling API
+// Automatically selects sampling method based on parameters:
+// - temperature=0: greedy (argmax)
+// - top_k > 0: top-k sampling
+// - top_p < 1: top-p sampling
+// - otherwise: multinomial with temperature
+int sample_token_gpu(
+    const GPUArray& logits,
+    float temperature = 1.0f,
+    int top_k = 0,
+    float top_p = 1.0f
+);
+
+// Set random seed for reproducible sampling
+void set_sampling_seed(unsigned int seed);
+
 } // namespace ops
 } // namespace pygpukit
