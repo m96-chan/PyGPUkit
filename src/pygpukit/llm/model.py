@@ -333,7 +333,8 @@ def sample_token(
         mask = np.zeros_like(probs, dtype=bool)
         mask[top_k_indices] = True
         probs = np.where(mask, probs, 0.0)
-        probs = probs / probs.sum()
+        probs_sum = probs.sum()
+        probs = probs / probs_sum
 
     # Top-p (nucleus) filtering
     if top_p < 1.0:
@@ -345,7 +346,8 @@ def sample_token(
         mask = np.zeros_like(probs, dtype=bool)
         mask[sorted_indices[:cutoff_idx]] = True
         probs = np.where(mask, probs, 0.0)
-        probs = probs / probs.sum()
+        probs_sum = probs.sum()
+        probs = probs / probs_sum
 
     # Sample
     if temperature == 0:
@@ -672,6 +674,164 @@ class DecodeBuffers:
             k_2d=k_2d,
             q_flat=q_flat,
             k_flat=k_flat,
+        )
+
+
+@dataclass
+class PrefillBuffers:
+    """Pre-allocated buffers for allocation-free prefill phase.
+
+    Unlike DecodeBuffers (seq_len=1), PrefillBuffers handles variable-length
+    sequences up to max_seq_len. Buffers are allocated once and reused.
+
+    Buffer shapes (for Qwen3-8B with max_seq_len=512):
+    - hidden: [max_seq_len, hidden_size] - layer input/output
+    - q_proj_out: [max_seq_len, num_heads * head_dim] - Q projection (2D)
+    - k_proj_out: [max_seq_len, num_kv_heads * head_dim] - K projection (2D)
+    - v_proj_out: [max_seq_len, num_kv_heads * head_dim] - V projection (2D)
+    - o_proj_out: [max_seq_len, hidden_size] - O projection (2D)
+    - q: [max_seq_len, num_heads, head_dim] - Q after reshape (3D)
+    - k: [max_seq_len, num_kv_heads, head_dim] - K after reshape (3D)
+    - v: [max_seq_len, num_kv_heads, head_dim] - V after reshape (3D)
+    - q_t: [num_heads, max_seq_len, head_dim] - Q transposed for SDPA
+    - k_t: [num_heads, max_seq_len, head_dim] - K transposed (GQA-expanded)
+    - v_t: [num_heads, max_seq_len, head_dim] - V transposed (GQA-expanded)
+    - attn_out: [num_heads, max_seq_len, head_dim] - SDPA output
+    - attn_out_t: [max_seq_len, num_heads, head_dim] - attention transposed back
+    - mlp_gate: [max_seq_len, intermediate_size] - MLP gate output
+    - mlp_up: [max_seq_len, intermediate_size] - MLP up output
+    - mlp_down: [max_seq_len, hidden_size] - MLP down output
+    - residual: [max_seq_len, hidden_size] - residual connection
+    - norm_out: [max_seq_len, hidden_size] - normalization output
+    """
+
+    max_seq_len: int
+
+    # Main computation buffers
+    hidden: GPUArray  # [max_seq_len, hidden_size]
+    q: GPUArray  # [max_seq_len, num_heads, head_dim]
+    k: GPUArray  # [max_seq_len, num_kv_heads, head_dim]
+    v: GPUArray  # [max_seq_len, num_kv_heads, head_dim]
+
+    # Projection outputs (2D for matmul)
+    q_proj_out: GPUArray  # [max_seq_len, num_heads * head_dim]
+    k_proj_out: GPUArray  # [max_seq_len, num_kv_heads * head_dim]
+    v_proj_out: GPUArray  # [max_seq_len, num_kv_heads * head_dim]
+    o_proj_out: GPUArray  # [max_seq_len, hidden_size]
+
+    # Transposed buffers for SDPA (GQA-expanded for K, V)
+    q_t: GPUArray  # [num_heads, max_seq_len, head_dim]
+    k_t: GPUArray  # [num_heads, max_seq_len, head_dim]
+    v_t: GPUArray  # [num_heads, max_seq_len, head_dim]
+
+    # Attention output
+    attn_out: GPUArray  # [num_heads, max_seq_len, head_dim]
+    attn_out_t: GPUArray  # [max_seq_len, num_heads, head_dim]
+    attn_out_2d: GPUArray  # [max_seq_len, num_heads * head_dim]
+
+    # MLP buffers
+    mlp_gate: GPUArray  # [max_seq_len, intermediate_size]
+    mlp_up: GPUArray  # [max_seq_len, intermediate_size]
+    mlp_down: GPUArray  # [max_seq_len, hidden_size]
+
+    # RoPE buffers
+    cos: GPUArray  # [max_seq_len, head_dim]
+    sin: GPUArray  # [max_seq_len, head_dim]
+
+    # Temporary buffers
+    residual: GPUArray  # [max_seq_len, hidden_size]
+    norm_out: GPUArray  # [max_seq_len, hidden_size]
+
+    # QK Norm buffers (optional, for Qwen3)
+    q_2d: GPUArray | None = None  # [max_seq_len * num_heads, head_dim]
+    k_2d: GPUArray | None = None  # [max_seq_len * num_kv_heads, head_dim]
+
+    @classmethod
+    def allocate(
+        cls,
+        config: TransformerConfig,
+        max_seq_len: int,
+        dtype: str = "float16",
+        use_qk_norm: bool = False,
+    ) -> PrefillBuffers:
+        """Allocate all prefill buffers.
+
+        Args:
+            config: Model configuration
+            max_seq_len: Maximum sequence length for prefill
+            dtype: Data type for buffers
+            use_qk_norm: Whether to allocate QK norm buffers (Qwen3)
+        """
+        assert config.num_kv_heads is not None
+        assert config.intermediate_size is not None
+
+        # Main buffers
+        hidden = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+        q = zeros((max_seq_len, config.num_heads, config.head_dim), dtype=dtype)
+        k = zeros((max_seq_len, config.num_kv_heads, config.head_dim), dtype=dtype)
+        v = zeros((max_seq_len, config.num_kv_heads, config.head_dim), dtype=dtype)
+
+        # Projection outputs (2D)
+        q_proj_out = zeros((max_seq_len, config.num_heads * config.head_dim), dtype=dtype)
+        k_proj_out = zeros((max_seq_len, config.num_kv_heads * config.head_dim), dtype=dtype)
+        v_proj_out = zeros((max_seq_len, config.num_kv_heads * config.head_dim), dtype=dtype)
+        o_proj_out = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+
+        # Transposed buffers (GQA-expanded for K, V)
+        q_t = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+        k_t = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+        v_t = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+
+        # Attention output buffers
+        attn_out = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+        attn_out_t = zeros((max_seq_len, config.num_heads, config.head_dim), dtype=dtype)
+        attn_out_2d = zeros((max_seq_len, config.num_heads * config.head_dim), dtype=dtype)
+
+        # MLP buffers
+        mlp_gate = zeros((max_seq_len, config.intermediate_size), dtype=dtype)
+        mlp_up = zeros((max_seq_len, config.intermediate_size), dtype=dtype)
+        mlp_down = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+
+        # RoPE buffers
+        cos = zeros((max_seq_len, config.head_dim), dtype=dtype)
+        sin = zeros((max_seq_len, config.head_dim), dtype=dtype)
+
+        # Temporary buffers
+        residual = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+        norm_out = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+
+        # QK Norm buffers (Qwen3)
+        q_2d = None
+        k_2d = None
+        if use_qk_norm:
+            q_2d = zeros((max_seq_len * config.num_heads, config.head_dim), dtype=dtype)
+            k_2d = zeros((max_seq_len * config.num_kv_heads, config.head_dim), dtype=dtype)
+
+        return cls(
+            max_seq_len=max_seq_len,
+            hidden=hidden,
+            q=q,
+            k=k,
+            v=v,
+            q_proj_out=q_proj_out,
+            k_proj_out=k_proj_out,
+            v_proj_out=v_proj_out,
+            o_proj_out=o_proj_out,
+            q_t=q_t,
+            k_t=k_t,
+            v_t=v_t,
+            attn_out=attn_out,
+            attn_out_t=attn_out_t,
+            attn_out_2d=attn_out_2d,
+            mlp_gate=mlp_gate,
+            mlp_up=mlp_up,
+            mlp_down=mlp_down,
+            cos=cos,
+            sin=sin,
+            residual=residual,
+            norm_out=norm_out,
+            q_2d=q_2d,
+            k_2d=k_2d,
         )
 
 
@@ -1468,10 +1628,16 @@ class CausalTransformerModel:
 
         # ============================================================
         # Allocate decode buffers (zero allocations during decode)
-        # NOTE: decode_buffers not used yet - zero-alloc path needs debugging
         # ============================================================
         use_qk_norm = self.spec is not None and self.spec.use_qk_norm
-        _decode_buffers = DecodeBuffers.allocate(self.config, dtype=dtype, use_qk_norm=use_qk_norm)  # noqa: F841
+        _decode_buffers = DecodeBuffers.allocate(self.config, dtype=dtype, use_qk_norm=use_qk_norm)
+
+        # Allocate prefill buffers (for reduced allocations during prefill)
+        # NOTE: Full zero-allocation prefill requires kernel-level changes
+        # to support variable seq_len within fixed buffers
+        _prefill_buffers = PrefillBuffers.allocate(
+            self.config, max_seq_len=prefill_len, dtype=dtype, use_qk_norm=use_qk_norm
+        )
 
         # Pre-compute RoPE tables on GPU (full sequence)
         if self.config.use_rope:
@@ -1483,9 +1649,11 @@ class CausalTransformerModel:
             self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
 
         # ============================================================
-        # Phase 1: Prefill (normal execution)
+        # Phase 1: Prefill (with reduced allocations)
         # ============================================================
-        hidden, past_key_values = self(input_ids, use_cache=True)
+        hidden, past_key_values = self._prefill_with_buffers(
+            input_ids, _prefill_buffers, use_cache=True
+        )
 
         # Copy prefill KV to fixed cache (GQA-expanded, transposed)
         for i, block in enumerate(self.blocks):
@@ -1568,7 +1736,7 @@ class CausalTransformerModel:
             graph = CudaGraph()
             graph_ready = False
 
-        for step in range(max_new_tokens - 1):
+        for _step in range(max_new_tokens - 1):
             position = context_len - 1  # Position of current token
 
             if use_graph and not graph_ready:
@@ -1773,6 +1941,243 @@ class CausalTransformerModel:
             copy_to(buffers.mlp_down, buffers.hidden)
         else:
             # GELU path (GPT-2) - still has allocations, rarely used
+            fc1_out = mlp.fc1(x)
+            gelu_out = gelu(fc1_out)
+            fc2_out = mlp.fc2(gelu_out)
+            copy_to(fc2_out, buffers.hidden)
+
+    def _prefill_with_buffers(
+        self,
+        input_ids: list[int],
+        buffers: PrefillBuffers,
+        use_cache: bool = True,
+    ) -> tuple[GPUArray, list[tuple | None] | None]:
+        """Prefill forward pass with reduced allocations using pre-allocated buffers.
+
+        Uses PrefillBuffers for projection outputs, attention intermediates, and MLP
+        to reduce memory allocations during prefill. Full zero-allocation requires
+        kernel-level support for partial buffer operations.
+
+        Args:
+            input_ids: Token IDs [seq_len]
+            buffers: Pre-allocated prefill buffers
+            use_cache: Whether to return KV cache
+
+        Returns:
+            Tuple of (hidden_states, present_key_values)
+        """
+        seq_len = len(input_ids)
+        assert seq_len <= buffers.max_seq_len, f"seq_len {seq_len} > max_seq_len {buffers.max_seq_len}"
+
+        position_ids = list(range(seq_len))
+
+        # Token embeddings - copy to pre-allocated buffer
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[input_ids]
+
+        # Add position embeddings (GPT-2 style)
+        if self.position_embed is not None:
+            if not hasattr(self, "_pos_embed_np_cache"):
+                self._pos_embed_np_cache = self.position_embed.to_numpy()
+            hidden_np = hidden_np + self._pos_embed_np_cache[position_ids]
+
+        # Copy to pre-allocated hidden buffer
+        hidden = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
+        copy_to(hidden, buffers.hidden)
+
+        # Transformer blocks with buffer reuse
+        present_key_values = []
+        for block in self.blocks:
+            # Process using buffers where possible
+            hidden, present_kv = self._prefill_block_with_buffers(
+                block, buffers.hidden, position_ids, buffers, use_cache
+            )
+            present_key_values.append(present_kv)
+
+        # Final norm - reuse norm_out buffer
+        rmsnorm(buffers.hidden, self.final_norm.weight, self.final_norm.eps, out=buffers.norm_out)
+        copy_to(buffers.norm_out, buffers.hidden)
+
+        if use_cache:
+            return buffers.hidden, present_key_values
+        return buffers.hidden, None
+
+    def _prefill_block_with_buffers(
+        self,
+        block: TransformerBlock,
+        hidden: GPUArray,
+        position_ids: list[int],
+        buffers: PrefillBuffers,
+        use_cache: bool,
+    ) -> tuple[GPUArray, tuple | None]:
+        """Single transformer block forward with buffer reuse.
+
+        Args:
+            block: TransformerBlock to process
+            hidden: Input hidden states [seq_len, hidden_size]
+            position_ids: Position IDs for RoPE
+            buffers: Pre-allocated prefill buffers
+            use_cache: Whether to return KV cache
+
+        Returns:
+            Tuple of (output_hidden, present_kv)
+        """
+        # Attention block
+        # Pre-norm -> norm_out
+        rmsnorm(hidden, block.attn_norm.weight, block.attn_norm.eps, out=buffers.norm_out)
+
+        # Save residual
+        copy_to(hidden, buffers.residual)
+
+        # Attention forward with buffers
+        attn_out, present_kv = self._prefill_attention_with_buffers(
+            block.attn, buffers.norm_out, position_ids, buffers, use_cache
+        )
+
+        # Residual connection: hidden = residual + attn_out
+        add_inplace(attn_out, buffers.residual)
+        copy_to(attn_out, buffers.hidden)
+
+        # MLP block
+        # Pre-norm
+        copy_to(buffers.hidden, buffers.residual)
+        rmsnorm(buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=buffers.norm_out)
+
+        # MLP forward with buffers
+        self._prefill_mlp_with_buffers(block.mlp, buffers.norm_out, buffers)
+
+        # Residual connection
+        add_inplace(buffers.hidden, buffers.residual)
+
+        return buffers.hidden, present_kv
+
+    def _prefill_attention_with_buffers(
+        self,
+        attn: Attention,
+        x: GPUArray,
+        position_ids: list[int],
+        buffers: PrefillBuffers,
+        use_cache: bool,
+    ) -> tuple[GPUArray, tuple | None]:
+        """Attention forward pass with buffer reuse during prefill.
+
+        Args:
+            attn: Attention layer
+            x: Input [seq_len, hidden_size]
+            position_ids: Position IDs for RoPE
+            buffers: Pre-allocated prefill buffers
+            use_cache: Whether to return KV cache
+
+        Returns:
+            Tuple of (output, present_kv)
+        """
+        seq_len = x.shape[0]
+
+        # Project Q, K, V using pre-allocated buffers
+        attn.q_proj(x, out=buffers.q_proj_out)
+        attn.k_proj(x, out=buffers.k_proj_out)
+        attn.v_proj(x, out=buffers.v_proj_out)
+
+        # Reshape to 3D
+        reshape_copy(buffers.q_proj_out, out=buffers.q)
+        reshape_copy(buffers.k_proj_out, out=buffers.k)
+        reshape_copy(buffers.v_proj_out, out=buffers.v)
+        q, k, v = buffers.q, buffers.k, buffers.v
+
+        # QK Norm (Qwen3 style)
+        if attn.q_norm is not None and buffers.q_2d is not None:
+            q_2d = reshape_copy(q, (seq_len * attn.num_heads, attn.head_dim))
+            q_2d = attn.q_norm(q_2d)
+            q = reshape_copy(q_2d, (seq_len, attn.num_heads, attn.head_dim))
+        if attn.k_norm is not None and buffers.k_2d is not None:
+            k_2d = reshape_copy(k, (seq_len * attn.num_kv_heads, attn.head_dim))
+            k_2d = attn.k_norm(k_2d)
+            k = reshape_copy(k_2d, (seq_len, attn.num_kv_heads, attn.head_dim))
+
+        # Apply RoPE
+        if self.config.use_rope and attn._cos is not None and attn._sin is not None:
+            # Use Attention's precomputed cos/sin tables
+            q_dtype = q.dtype
+            if q_dtype == "float16":
+                cos = from_numpy(attn._cos[position_ids].astype(np.float16))
+                sin = from_numpy(attn._sin[position_ids].astype(np.float16))
+            elif q_dtype == "bfloat16":
+                # Fall back to float32 computation for bfloat16
+                cos = from_numpy(attn._cos[position_ids].astype(np.float32))
+                sin = from_numpy(attn._sin[position_ids].astype(np.float32))
+            else:
+                # FP32 path
+                cos = from_numpy(attn._cos[position_ids].astype(np.float32))
+                sin = from_numpy(attn._sin[position_ids].astype(np.float32))
+            # Apply RoPE in-place (FP32 and FP16 have native kernel support)
+            if q_dtype in ("float32", "float16"):
+                rope_inplace(q, k, cos, sin)
+
+        # Store for KV cache - MUST copy since buffers.k/v are reused across layers
+        if use_cache:
+            # Create copies of K, V to avoid aliasing (shared buffers get overwritten by later layers)
+            k_copy = reshape_copy(k, k.shape)
+            v_copy = reshape_copy(v, v.shape)
+            present_kv = (k_copy, v_copy)
+        else:
+            present_kv = None
+
+        # Expand for GQA
+        if attn.num_kv_groups > 1:
+            k_expanded = repeat_interleave_axis1(k, attn.num_kv_groups)
+            v_expanded = repeat_interleave_axis1(v, attn.num_kv_groups)
+        else:
+            k_expanded = k
+            v_expanded = v
+
+        # Transpose for SDPA: [seq, heads, dim] -> [heads, seq, dim]
+        transpose_3d_021(q, out=buffers.q_t)
+        k_t = transpose_3d_021(k_expanded)  # Can't use buffer due to GQA expansion
+        v_t = transpose_3d_021(v_expanded)
+
+        # SDPA with causal mask
+        sdpa_causal(buffers.q_t, k_t, v_t, out=buffers.attn_out)
+
+        # Transpose back and reshape
+        transpose_3d_021(buffers.attn_out, out=buffers.attn_out_t)
+        reshape_copy(buffers.attn_out_t, out=buffers.attn_out_2d)
+
+        # Output projection
+        attn.o_proj(buffers.attn_out_2d, out=buffers.o_proj_out)
+
+        return buffers.o_proj_out, present_kv
+
+    def _prefill_mlp_with_buffers(
+        self,
+        mlp: MLP,
+        x: GPUArray,
+        buffers: PrefillBuffers,
+    ) -> None:
+        """MLP forward pass with buffer reuse during prefill.
+
+        Result is written to buffers.hidden.
+
+        Args:
+            mlp: MLP layer
+            x: Input [seq_len, hidden_size]
+            buffers: Pre-allocated prefill buffers
+        """
+        if mlp.activation == "silu":
+            # SwiGLU: gate_proj -> SiLU -> * up_proj -> down_proj
+            mlp.gate_proj(x, out=buffers.mlp_gate)
+            silu(buffers.mlp_gate, out=buffers.mlp_gate)
+
+            mlp.up_proj(x, out=buffers.mlp_up)
+
+            # Element-wise multiply in-place
+            mul_inplace(buffers.mlp_gate, buffers.mlp_up)
+
+            # Down projection
+            mlp.down_proj(buffers.mlp_gate, out=buffers.mlp_down)
+            copy_to(buffers.mlp_down, buffers.hidden)
+        else:
+            # GELU path (GPT-2)
             fc1_out = mlp.fc1(x)
             gelu_out = gelu(fc1_out)
             fc2_out = mlp.fc2(gelu_out)
