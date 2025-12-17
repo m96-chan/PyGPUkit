@@ -1663,14 +1663,10 @@ class CausalTransformerModel:
             kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
             kv_cache_prefill_gqa(past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0)
 
-        # Get first token
+        # Get first token (prefill - use CPU sampling since it's one-time)
         logits = self.get_logits(hidden)
-
-        if gpu_sampling:
-            next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
-        else:
-            last_logits = logits.to_numpy()[-1]
-            next_token = sample_token(last_logits, temperature, top_k, top_p)
+        last_logits = logits.to_numpy()[-1]
+        next_token = sample_token(last_logits, temperature, top_k, top_p)
         tokens.append(next_token)
 
         if eos_token_id is not None and next_token == eos_token_id:
@@ -1766,12 +1762,13 @@ class CausalTransformerModel:
                 hidden = self._decode_step_fixed_cache(next_token, position, context_len)
 
             # Get next token
-            logits = self.get_logits(hidden)
+            logits = self.get_logits(hidden)  # [1, vocab_size]
 
             if gpu_sampling:
-                next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+                # logits shape is [1, vocab_size], sample_token_gpu handles this
+                next_token = sample_token_gpu(logits, temperature, top_k, top_p)
             else:
-                last_logits = logits.to_numpy()[-1]
+                last_logits = logits.to_numpy()[0]  # [vocab_size]
                 next_token = sample_token(last_logits, temperature, top_k, top_p)
             tokens.append(next_token)
 
