@@ -34,6 +34,7 @@ from pygpukit.ops.basic import (
     layernorm,
     matmul,
     mul,
+    mul_inplace,
     repeat_interleave_axis1,
     reshape_copy,
     rmsnorm,
@@ -547,8 +548,11 @@ class DecodeBuffers:
 
     Buffer shapes (for Qwen3-8B example):
     - hidden: [1, 4096] - layer input/output
-    - q: [1, 32, 128] - query projection output
-    - k, v: [1, 8, 128] - key/value projection outputs
+    - q_proj_out: [1, 4096] - Q projection output (2D)
+    - k_proj_out, v_proj_out: [1, 1024] - K/V projection outputs (2D)
+    - o_proj_out: [1, 4096] - O projection output (2D)
+    - q: [1, 32, 128] - query after reshape (3D)
+    - k, v: [1, 8, 128] - key/value after reshape (3D)
     - attn_out: [32, 1, 128] - SDPA output (transposed format)
     - mlp_gate, mlp_up: [1, 12288] - MLP intermediates
     - cos, sin: [1, 128] - RoPE tables
@@ -565,6 +569,15 @@ class DecodeBuffers:
     mlp_up: GPUArray  # [1, intermediate_size]
     mlp_down: GPUArray  # [1, hidden_size] - down projection output
 
+    # Projection output buffers (2D, for matmul out=)
+    q_proj_out: GPUArray  # [1, num_heads * head_dim]
+    k_proj_out: GPUArray  # [1, num_kv_heads * head_dim]
+    v_proj_out: GPUArray  # [1, num_kv_heads * head_dim]
+    o_proj_out: GPUArray  # [1, hidden_size]
+
+    # Transposed Q buffer for SDPA
+    q_t: GPUArray  # [num_heads, 1, head_dim]
+
     # RoPE buffers
     cos: GPUArray  # [1, head_dim]
     sin: GPUArray  # [1, head_dim]
@@ -577,8 +590,10 @@ class DecodeBuffers:
     norm_out: GPUArray  # [1, hidden_size]
 
     # For QK norm (Qwen3)
-    q_2d: GPUArray | None = None  # [num_heads, head_dim]
-    k_2d: GPUArray | None = None  # [num_kv_heads, head_dim]
+    q_2d: GPUArray | None = None  # [num_heads, head_dim] - rmsnorm output
+    k_2d: GPUArray | None = None  # [num_kv_heads, head_dim] - rmsnorm output
+    q_flat: GPUArray | None = None  # [num_heads, head_dim] - rmsnorm input
+    k_flat: GPUArray | None = None  # [num_kv_heads, head_dim] - rmsnorm input
 
     @classmethod
     def allocate(
@@ -606,6 +621,15 @@ class DecodeBuffers:
         mlp_up = zeros((1, config.intermediate_size), dtype=dtype)
         mlp_down = zeros((1, config.hidden_size), dtype=dtype)
 
+        # Projection output buffers (2D for matmul out=)
+        q_proj_out = zeros((1, config.num_heads * config.head_dim), dtype=dtype)
+        k_proj_out = zeros((1, config.num_kv_heads * config.head_dim), dtype=dtype)
+        v_proj_out = zeros((1, config.num_kv_heads * config.head_dim), dtype=dtype)
+        o_proj_out = zeros((1, config.hidden_size), dtype=dtype)
+
+        # Transposed Q buffer for SDPA
+        q_t = zeros((config.num_heads, 1, config.head_dim), dtype=dtype)
+
         cos = zeros((1, config.head_dim), dtype=dtype)
         sin = zeros((1, config.head_dim), dtype=dtype)
 
@@ -616,9 +640,13 @@ class DecodeBuffers:
         # QK norm buffers
         q_2d = None
         k_2d = None
+        q_flat = None
+        k_flat = None
         if use_qk_norm:
             q_2d = zeros((config.num_heads, config.head_dim), dtype=dtype)
             k_2d = zeros((config.num_kv_heads, config.head_dim), dtype=dtype)
+            q_flat = zeros((config.num_heads, config.head_dim), dtype=dtype)
+            k_flat = zeros((config.num_kv_heads, config.head_dim), dtype=dtype)
 
         return cls(
             hidden=hidden,
@@ -629,6 +657,11 @@ class DecodeBuffers:
             mlp_gate=mlp_gate,
             mlp_up=mlp_up,
             mlp_down=mlp_down,
+            q_proj_out=q_proj_out,
+            k_proj_out=k_proj_out,
+            v_proj_out=v_proj_out,
+            o_proj_out=o_proj_out,
+            q_t=q_t,
             cos=cos,
             sin=sin,
             embed_out=embed_out,
@@ -636,6 +669,8 @@ class DecodeBuffers:
             norm_out=norm_out,
             q_2d=q_2d,
             k_2d=k_2d,
+            q_flat=q_flat,
+            k_flat=k_flat,
         )
 
 
@@ -1363,6 +1398,7 @@ class CausalTransformerModel:
         top_k: int = 50,
         top_p: float = 0.9,
         eos_token_id: int | None = None,
+        use_graph: bool = False,
     ) -> list[int]:
         """Generate tokens using fixed-length KV cache with optional CUDA Graph.
 
@@ -1372,6 +1408,7 @@ class CausalTransformerModel:
         Flow:
             1. Prefill: Normal execution (no graph)
             2. Decode: Allocation-free execution with pre-allocated buffers
+            3. (Optional) CUDA Graph: Capture first decode, replay for subsequent
 
         Args:
             input_ids: Initial token IDs
@@ -1381,6 +1418,7 @@ class CausalTransformerModel:
             top_k: Top-k filtering
             top_p: Nucleus sampling threshold
             eos_token_id: Stop at this token
+            use_graph: Enable CUDA Graph capture/replay (experimental)
 
         Returns:
             List of all token IDs (input + generated)
@@ -1443,11 +1481,74 @@ class CausalTransformerModel:
         # ============================================================
         context_len = prefill_len + 1  # Current context length
 
-        for _ in range(max_new_tokens - 1):
+        # Import CudaGraph for graph capture
+        if use_graph:
+            from pygpukit._pygpukit_native import CudaGraph
+            import gc
+
+            # Warm-up: Run _decode_step_zero_alloc a few times to initialize
+            # all lazy state (method dispatch, CUDA kernel caching, etc.)
+            for _ in range(3):
+                _ = self._decode_step_zero_alloc(next_token, context_len - 1, context_len, _decode_buffers)
+
+            # Create inline decode function for graph capture
+            # NOTE: Inline functions capture more reliably than method calls
+            # due to apparent CUDA stream capture quirks
+            buffers = _decode_buffers  # Closure capture
+            model_self = self  # Closure capture
+
+            def _inline_decode_step(tok_id: int, pos: int, ctx_len: int) -> None:
+                """Inline decode step for reliable graph capture."""
+                embedding_lookup(model_self.embed_tokens, buffers.embed_out, tok_id)
+                copy_to(buffers.embed_out, buffers.hidden)
+                for block in model_self.blocks:
+                    rmsnorm(buffers.hidden, block.attn_norm.weight, block.attn_norm.eps,
+                            out=buffers.norm_out)
+                    copy_to(buffers.hidden, buffers.residual)
+                    model_self._attention_forward_zero_alloc(
+                        block.attn, buffers.norm_out, pos, ctx_len, buffers
+                    )
+                    add_inplace(buffers.hidden, buffers.residual)
+                    copy_to(buffers.hidden, buffers.residual)
+                    rmsnorm(buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps,
+                            out=buffers.norm_out)
+                    model_self._mlp_forward_zero_alloc(block.mlp, buffers.norm_out, buffers)
+                    add_inplace(buffers.hidden, buffers.residual)
+                rmsnorm(buffers.hidden, model_self.final_norm.weight, model_self.final_norm.eps,
+                        out=buffers.norm_out)
+                copy_to(buffers.norm_out, buffers.hidden)
+
+            graph = CudaGraph()
+            graph_ready = False
+
+        for step in range(max_new_tokens - 1):
             position = context_len - 1  # Position of current token
-            # Use legacy decode step until zero-alloc is debugged
-            hidden = self._decode_step_fixed_cache(next_token, position, context_len)
-            # hidden = self._decode_step_zero_alloc(next_token, position, context_len, decode_buffers)
+
+            if use_graph and not graph_ready:
+                # First decode step: capture the graph using inline function
+                # NOTE: This captures with current token_id/position/context_len
+                # Graph replay will use these exact values (not ideal, but tests capture)
+                # Disable GC during capture to prevent allocations
+                gc.disable()
+                try:
+                    graph.begin_capture()
+                    _inline_decode_step(next_token, position, context_len)
+                    graph.end_capture()
+                finally:
+                    gc.enable()
+                graph_ready = True
+                hidden = _decode_buffers.hidden
+                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes")
+            elif use_graph and graph_ready:
+                # Subsequent steps: replay the captured graph
+                # WARNING: This replays with the SAME parameters as capture
+                # (token_id, position, context_len are baked in)
+                # This produces incorrect output but tests graph overhead
+                graph.replay()
+                hidden = _decode_buffers.hidden
+            else:
+                # No graph: use legacy decode step with allocations
+                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
 
             # Get next token
             logits = self.get_logits(hidden)
@@ -1537,24 +1638,29 @@ class CausalTransformerModel:
         """
         # Project Q, K, V using pre-allocated buffers
         # x: [1, hidden_size]
-        q_2d = attn.q_proj(x)  # [1, num_heads * head_dim]
-        k_2d = attn.k_proj(x)  # [1, num_kv_heads * head_dim]
-        v_2d = attn.v_proj(x)  # [1, num_kv_heads * head_dim]
+        attn.q_proj(x, out=buffers.q_proj_out)  # [1, num_heads * head_dim]
+        attn.k_proj(x, out=buffers.k_proj_out)  # [1, num_kv_heads * head_dim]
+        attn.v_proj(x, out=buffers.v_proj_out)  # [1, num_kv_heads * head_dim]
 
-        # Reshape to 3D (this is a view, no allocation)
-        q = reshape_copy(q_2d, (1, attn.num_heads, attn.head_dim))
-        k = reshape_copy(k_2d, (1, attn.num_kv_heads, attn.head_dim))
-        v = reshape_copy(v_2d, (1, attn.num_kv_heads, attn.head_dim))
+        # Reshape to 3D using pre-allocated buffers
+        reshape_copy(buffers.q_proj_out, (1, attn.num_heads, attn.head_dim), out=buffers.q)
+        reshape_copy(buffers.k_proj_out, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
+        reshape_copy(buffers.v_proj_out, (1, attn.num_kv_heads, attn.head_dim), out=buffers.v)
+        q, k, v = buffers.q, buffers.k, buffers.v
 
-        # QK Norm (Qwen3)
-        if attn.q_norm is not None and buffers.q_2d is not None:
-            q_flat = reshape_copy(q, (attn.num_heads, attn.head_dim))
-            rmsnorm(q_flat, attn.q_norm.weight, attn.q_norm.eps, out=buffers.q_2d)
-            q = reshape_copy(buffers.q_2d, (1, attn.num_heads, attn.head_dim))
-        if attn.k_norm is not None and buffers.k_2d is not None:
-            k_flat = reshape_copy(k, (attn.num_kv_heads, attn.head_dim))
-            rmsnorm(k_flat, attn.k_norm.weight, attn.k_norm.eps, out=buffers.k_2d)
-            k = reshape_copy(buffers.k_2d, (1, attn.num_kv_heads, attn.head_dim))
+        # QK Norm (Qwen3) - zero allocation using pre-allocated buffers
+        if attn.q_norm is not None and buffers.q_2d is not None and buffers.q_flat is not None:
+            # Reshape q [1,H,D] -> q_flat [H,D], apply norm, reshape back to q [1,H,D]
+            reshape_copy(q, (attn.num_heads, attn.head_dim), out=buffers.q_flat)
+            rmsnorm(buffers.q_flat, attn.q_norm.weight, attn.q_norm.eps, out=buffers.q_2d)
+            reshape_copy(buffers.q_2d, (1, attn.num_heads, attn.head_dim), out=buffers.q)
+            q = buffers.q
+        if attn.k_norm is not None and buffers.k_2d is not None and buffers.k_flat is not None:
+            # Reshape k [1,H,D] -> k_flat [H,D], apply norm, reshape back to k [1,H,D]
+            reshape_copy(k, (attn.num_kv_heads, attn.head_dim), out=buffers.k_flat)
+            rmsnorm(buffers.k_flat, attn.k_norm.weight, attn.k_norm.eps, out=buffers.k_2d)
+            reshape_copy(buffers.k_2d, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
+            k = buffers.k
 
         # Apply RoPE using pre-computed GPU tables (zero allocation)
         if self.config.use_rope and hasattr(self, "_rope_cos_gpu"):
@@ -1562,30 +1668,28 @@ class CausalTransformerModel:
             # Reuse embedding_lookup which copies a row from 2D matrix
             embedding_lookup(self._rope_cos_gpu, buffers.cos, position)
             embedding_lookup(self._rope_sin_gpu, buffers.sin, position)
-            # Reshape cos/sin to [1, head_dim] for rope_inplace
-            cos_1d = reshape_copy(buffers.cos, (1, self.config.head_dim))
-            sin_1d = reshape_copy(buffers.sin, (1, self.config.head_dim))
-            rope_inplace(q, k, cos_1d, sin_1d)
+            # buffers.cos/sin are already [1, head_dim] - use directly
+            rope_inplace(q, k, buffers.cos, buffers.sin)
 
         # Update KV cache at position (GQA-expanded, transposed)
         kv_cache_update_gqa(k, attn._k_cache, attn.num_heads, position)
         kv_cache_update_gqa(v, attn._v_cache, attn.num_heads, position)
 
         # Transpose Q for SDPA: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
-        q_t = transpose_3d_021(q)
+        transpose_3d_021(q, out=buffers.q_t)
 
         # SDPA with fixed cache
-        sdpa_causal_fixed_cache(q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len)
+        sdpa_causal_fixed_cache(buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len)
 
         # Transpose output: [num_heads, 1, head_dim] -> [1, num_heads, head_dim]
-        attn_out_t = transpose_3d_021(buffers.attn_out)
+        transpose_3d_021(buffers.attn_out, out=buffers.q)  # Reuse q buffer for transposed output
 
-        # Reshape to 2D: [1, hidden_size]
-        attn_out_2d = reshape_copy(attn_out_t, (1, attn.num_heads * attn.head_dim))
+        # Reshape to 2D: [1, hidden_size] - reuse q_proj_out buffer
+        reshape_copy(buffers.q, (1, attn.num_heads * attn.head_dim), out=buffers.q_proj_out)
 
-        # Output projection -> buffers.hidden
-        o_out = attn.o_proj(attn_out_2d)
-        copy_to(o_out, buffers.hidden)
+        # Output projection -> o_proj_out, then copy to hidden
+        attn.o_proj(buffers.q_proj_out, out=buffers.o_proj_out)
+        copy_to(buffers.o_proj_out, buffers.hidden)
 
     def _mlp_forward_zero_alloc(
         self,
@@ -1599,20 +1703,23 @@ class CausalTransformerModel:
         """
         if mlp.activation == "silu":
             # SwiGLU: gate_proj -> SiLU -> * up_proj -> down_proj
-            gate_out = mlp.gate_proj(x)  # [1, intermediate_size]
-            silu(gate_out, out=buffers.mlp_gate)  # SiLU with output buffer
+            # Use out= for all projections to avoid allocations
+            mlp.gate_proj(x, out=buffers.mlp_gate)  # [1, intermediate_size]
+            silu(buffers.mlp_gate, out=buffers.mlp_gate)  # SiLU in-place
 
-            up_out = mlp.up_proj(x)  # [1, intermediate_size]
-            copy_to(up_out, buffers.mlp_up)
+            mlp.up_proj(x, out=buffers.mlp_up)  # [1, intermediate_size]
 
             # Element-wise multiply: gate * up
-            mlp_mul = mul(buffers.mlp_gate, buffers.mlp_up)
+            # mul doesn't support out=, so we use mul_inplace after copying
+            # Actually mul_inplace(a, b) does a *= b, so we do:
+            # mlp_gate = mlp_gate * mlp_up (in-place)
+            mul_inplace(buffers.mlp_gate, buffers.mlp_up)
 
-            # Down projection
-            down_out = mlp.down_proj(mlp_mul)
-            copy_to(down_out, buffers.hidden)
+            # Down projection -> mlp_down, then copy to hidden
+            mlp.down_proj(buffers.mlp_gate, out=buffers.mlp_down)
+            copy_to(buffers.mlp_down, buffers.hidden)
         else:
-            # GELU path (GPT-2)
+            # GELU path (GPT-2) - still has allocations, rarely used
             fc1_out = mlp.fc1(x)
             gelu_out = gelu(fc1_out)
             fc2_out = mlp.fc2(gelu_out)

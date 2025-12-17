@@ -702,7 +702,10 @@ static void sdpa_causal_dispatch(
     int n_heads = Q.shape()[0];
     int q_len = Q.shape()[1];
     int head_dim = Q.shape()[2];
-    int kv_len = (context_len > 0) ? context_len : static_cast<int>(K.shape()[1]);
+    // kv_stride: actual K/V tensor size (for pointer calculations)
+    int kv_stride = static_cast<int>(K.shape()[1]);
+    // kv_len: number of KV positions to attend to (for masking)
+    int kv_len = (context_len > 0) ? context_len : kv_stride;
 
     // Compute scale if not provided
     if (scale <= 0.0f) {
@@ -733,7 +736,7 @@ static void sdpa_causal_dispatch(
                     static_cast<const float*>(K.data()),
                     static_cast<const float*>(V.data()),
                     static_cast<float*>(result.data()),
-                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                    n_heads, q_len, kv_len, kv_stride, head_dim, scale, causal_offset);
                 break;
             case DataType::Float16:
                 nn::flash_attention_f16_kernel<<<grid, block_size, shared_mem_size, stream>>>(
@@ -741,7 +744,7 @@ static void sdpa_causal_dispatch(
                     static_cast<const __half*>(K.data()),
                     static_cast<const __half*>(V.data()),
                     static_cast<__half*>(result.data()),
-                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                    n_heads, q_len, kv_len, kv_stride, head_dim, scale, causal_offset);
                 break;
             case DataType::BFloat16:
                 nn::flash_attention_bf16_kernel<<<grid, block_size, shared_mem_size, stream>>>(
@@ -749,7 +752,7 @@ static void sdpa_causal_dispatch(
                     static_cast<const __nv_bfloat16*>(K.data()),
                     static_cast<const __nv_bfloat16*>(V.data()),
                     static_cast<__nv_bfloat16*>(result.data()),
-                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                    n_heads, q_len, kv_len, kv_stride, head_dim, scale, causal_offset);
                 break;
             default:
                 throw std::runtime_error("sdpa only supports Float32, Float16, BFloat16");
@@ -765,7 +768,7 @@ static void sdpa_causal_dispatch(
                     static_cast<const float*>(K.data()),
                     static_cast<const float*>(V.data()),
                     static_cast<float*>(result.data()),
-                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                    n_heads, q_len, kv_len, kv_stride, head_dim, scale, causal_offset);
                 break;
             case DataType::Float16:
                 nn::sdpa_causal_f16_kernel<<<grid, block_size, shared_mem_size, stream>>>(
@@ -773,7 +776,7 @@ static void sdpa_causal_dispatch(
                     static_cast<const __half*>(K.data()),
                     static_cast<const __half*>(V.data()),
                     static_cast<__half*>(result.data()),
-                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                    n_heads, q_len, kv_len, kv_stride, head_dim, scale, causal_offset);
                 break;
             case DataType::BFloat16:
                 nn::sdpa_causal_bf16_kernel<<<grid, block_size, shared_mem_size, stream>>>(
@@ -781,7 +784,7 @@ static void sdpa_causal_dispatch(
                     static_cast<const __nv_bfloat16*>(K.data()),
                     static_cast<const __nv_bfloat16*>(V.data()),
                     static_cast<__nv_bfloat16*>(result.data()),
-                    n_heads, q_len, kv_len, head_dim, scale, causal_offset);
+                    n_heads, q_len, kv_len, kv_stride, head_dim, scale, causal_offset);
                 break;
             default:
                 throw std::runtime_error("sdpa only supports Float32, Float16, BFloat16");
@@ -1498,6 +1501,49 @@ void add_inplace(GPUArray& a, const GPUArray& b) {
     }
 
     sync_and_check("add_inplace kernel failed");
+}
+
+// In-place multiplication: a *= b
+void mul_inplace(GPUArray& a, const GPUArray& b) {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("mul_inplace: dtype mismatch");
+    }
+    size_t n = a.size();
+    if (n != b.size()) {
+        throw std::runtime_error("mul_inplace: size mismatch");
+    }
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (a.dtype()) {
+        case DataType::Float16:
+            nn::mul_inplace_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<__half*>(a.data()),
+                static_cast<const __half*>(b.data()), n);
+            break;
+        case DataType::BFloat16:
+            nn::mul_inplace_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<__nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()), n);
+            break;
+        case DataType::Float32:
+            nn::mul_inplace_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<float*>(a.data()),
+                static_cast<const float*>(b.data()), n);
+            break;
+        case DataType::Float64:
+            nn::mul_inplace_f64_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<double*>(a.data()),
+                static_cast<const double*>(b.data()), n);
+            break;
+        default:
+            throw std::runtime_error("mul_inplace: unsupported dtype");
+    }
+
+    sync_and_check("mul_inplace kernel failed");
 }
 
 // GPU-to-GPU copy

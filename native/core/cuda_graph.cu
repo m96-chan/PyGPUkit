@@ -105,6 +105,12 @@ void CudaGraph::begin_capture() {
     // Reset any existing graph
     impl_->reset();
 
+    // Synchronize device before capture to ensure all previous operations complete
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    if (sync_err != cudaSuccess) {
+        throw CudaError(std::string("Failed to synchronize before capture: ") + cudaGetErrorString(sync_err));
+    }
+
     // Begin stream capture
     cudaError_t err = cudaStreamBeginCapture(impl_->capture_stream, cudaStreamCaptureModeThreadLocal);
     if (err != cudaSuccess) {

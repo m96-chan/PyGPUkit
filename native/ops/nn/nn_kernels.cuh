@@ -1638,12 +1638,13 @@ __global__ void silu_bf16_kernel(const __nv_bfloat16* __restrict__ input,
 
 __global__ void sdpa_causal_f32_kernel(
     const float* __restrict__ Q,      // [n_heads, q_len, head_dim]
-    const float* __restrict__ K,      // [n_heads, kv_len, head_dim]
-    const float* __restrict__ V,      // [n_heads, kv_len, head_dim]
+    const float* __restrict__ K,      // [n_heads, kv_stride, head_dim]
+    const float* __restrict__ V,      // [n_heads, kv_stride, head_dim]
     float* __restrict__ output,       // [n_heads, q_len, head_dim]
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to (for masking)
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,                      // 1/sqrt(head_dim)
     int causal_offset                 // kv_len - q_len (for proper causal masking)
@@ -1654,10 +1655,10 @@ __global__ void sdpa_causal_f32_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
-    // Pointers for this head
+    // Pointers for this head - use kv_stride for pointer calculations
     const float* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const float* K_head = K + head_idx * kv_len * head_dim;
-    const float* V_head = V + head_idx * kv_len * head_dim;
+    const float* K_head = K + head_idx * kv_stride * head_dim;
+    const float* V_head = V + head_idx * kv_stride * head_dim;
     float* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     // Causal mask: query at position q_pos can attend to positions 0..(causal_offset + q_pos)
@@ -1761,7 +1762,8 @@ __global__ void sdpa_causal_f16_kernel(
     __half* __restrict__ output,
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to (for masking)
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,
     int causal_offset
@@ -1771,9 +1773,10 @@ __global__ void sdpa_causal_f16_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
+    // Use kv_stride for pointer calculations
     const __half* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const __half* K_head = K + head_idx * kv_len * head_dim;
-    const __half* V_head = V + head_idx * kv_len * head_dim;
+    const __half* K_head = K + head_idx * kv_stride * head_dim;
+    const __half* V_head = V + head_idx * kv_stride * head_dim;
     __half* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     int max_attend = causal_offset + q_pos + 1;
@@ -1867,7 +1870,8 @@ __global__ void sdpa_causal_bf16_kernel(
     __nv_bfloat16* __restrict__ output,
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to (for masking)
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,
     int causal_offset
@@ -1877,9 +1881,10 @@ __global__ void sdpa_causal_bf16_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
+    // Use kv_stride for pointer calculations
     const __nv_bfloat16* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const __nv_bfloat16* K_head = K + head_idx * kv_len * head_dim;
-    const __nv_bfloat16* V_head = V + head_idx * kv_len * head_dim;
+    const __nv_bfloat16* K_head = K + head_idx * kv_stride * head_dim;
+    const __nv_bfloat16* V_head = V + head_idx * kv_stride * head_dim;
     __nv_bfloat16* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     int max_attend = causal_offset + q_pos + 1;
@@ -2379,6 +2384,54 @@ __global__ void add_inplace_f64_kernel(
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         a[idx] = a[idx] + b[idx];
+    }
+}
+
+// ============================================================================
+// In-place multiply kernels: a *= b
+// ============================================================================
+
+__global__ void mul_inplace_f16_kernel(
+    __half* __restrict__ a,
+    const __half* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+__global__ void mul_inplace_bf16_kernel(
+    __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+__global__ void mul_inplace_f32_kernel(
+    float* __restrict__ a,
+    const float* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] * b[idx];
+    }
+}
+
+__global__ void mul_inplace_f64_kernel(
+    double* __restrict__ a,
+    const double* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] * b[idx];
     }
 }
 

@@ -1781,6 +1781,23 @@ def add_inplace(a: GPUArray, b: GPUArray) -> None:
     native.add_inplace(a_native, b_native)
 
 
+def mul_inplace(a: GPUArray, b: GPUArray) -> None:
+    """In-place multiplication: a *= b.
+
+    For CUDA Graph: no allocation.
+
+    Args:
+        a: Tensor to multiply (modified in-place).
+        b: Tensor to multiply by.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    native.mul_inplace(a_native, b_native)
+
+
 def copy_to(src: GPUArray, dst: GPUArray) -> None:
     """GPU-to-GPU copy.
 

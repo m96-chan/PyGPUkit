@@ -198,6 +198,9 @@ void embedding_lookup(const GPUArray& embed_matrix, GPUArray& out, int token_id)
 // In-place addition: a += b
 void add_inplace(GPUArray& a, const GPUArray& b);
 
+// In-place multiplication: a *= b
+void mul_inplace(GPUArray& a, const GPUArray& b);
+
 // GPU-to-GPU copy
 void copy_to(const GPUArray& src, GPUArray& dst);
 

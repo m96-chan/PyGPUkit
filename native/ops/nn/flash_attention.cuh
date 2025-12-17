@@ -38,12 +38,13 @@ constexpr int FLASH_TILE_KV = 32;
  */
 __global__ void flash_attention_f32_kernel(
     const float* __restrict__ Q,      // [n_heads, q_len, head_dim]
-    const float* __restrict__ K,      // [n_heads, kv_len, head_dim]
-    const float* __restrict__ V,      // [n_heads, kv_len, head_dim]
+    const float* __restrict__ K,      // [n_heads, kv_stride, head_dim]
+    const float* __restrict__ V,      // [n_heads, kv_stride, head_dim]
     float* __restrict__ output,       // [n_heads, q_len, head_dim]
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,                      // 1/sqrt(head_dim)
     int causal_offset                 // kv_len - q_len (for proper causal masking)
@@ -53,10 +54,10 @@ __global__ void flash_attention_f32_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
-    // Pointers for this head/query position
+    // Pointers for this head/query position (use kv_stride for K/V, not kv_len)
     const float* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const float* K_head = K + head_idx * kv_len * head_dim;
-    const float* V_head = V + head_idx * kv_len * head_dim;
+    const float* K_head = K + head_idx * kv_stride * head_dim;
+    const float* V_head = V + head_idx * kv_stride * head_dim;
     float* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     // Causal mask: can attend to positions 0..(causal_offset + q_pos)
@@ -235,6 +236,7 @@ __global__ void flash_attention_f16_kernel(
     int n_heads,
     int q_len,
     int kv_len,
+    int kv_stride,
     int head_dim,
     float scale,
     int causal_offset
@@ -245,8 +247,8 @@ __global__ void flash_attention_f16_kernel(
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
     const __half* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const __half* K_head = K + head_idx * kv_len * head_dim;
-    const __half* V_head = V + head_idx * kv_len * head_dim;
+    const __half* K_head = K + head_idx * kv_stride * head_dim;
+    const __half* V_head = V + head_idx * kv_stride * head_dim;
     __half* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     int max_attend = causal_offset + q_pos + 1;
@@ -400,6 +402,7 @@ __global__ void flash_attention_bf16_kernel(
     int n_heads,
     int q_len,
     int kv_len,
+    int kv_stride,
     int head_dim,
     float scale,
     int causal_offset
@@ -410,8 +413,8 @@ __global__ void flash_attention_bf16_kernel(
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
     const __nv_bfloat16* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const __nv_bfloat16* K_head = K + head_idx * kv_len * head_dim;
-    const __nv_bfloat16* V_head = V + head_idx * kv_len * head_dim;
+    const __nv_bfloat16* K_head = K + head_idx * kv_stride * head_dim;
+    const __nv_bfloat16* V_head = V + head_idx * kv_stride * head_dim;
     __nv_bfloat16* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     int max_attend = causal_offset + q_pos + 1;

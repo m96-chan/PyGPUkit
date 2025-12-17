@@ -297,6 +297,11 @@ void init_ops_bindings(py::module_& m) {
           py::arg("a"), py::arg("b"),
           "In-place addition: a += b");
 
+    // In-place multiplication (for CUDA Graph)
+    m.def("mul_inplace", &ops::mul_inplace,
+          py::arg("a"), py::arg("b"),
+          "In-place multiplication: a *= b");
+
     // GPU-to-GPU copy (for CUDA Graph)
     m.def("copy_to", &ops::copy_to,
           py::arg("src"), py::arg("dst"),
