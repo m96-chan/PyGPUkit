@@ -107,7 +107,7 @@ def print_results(
     # Standard results
     avg_tps_std = sum(r.tps for r in standard) / len(standard)
     avg_ms_std = sum(r.ms_per_token for r in standard) / len(standard)
-    print(f"\n  Standard (dynamic KV cache):")
+    print("\n  Standard (dynamic KV cache):")
     print(f"    Average: {avg_tps_std:.2f} tok/s ({avg_ms_std:.0f} ms/tok)")
     for i, r in enumerate(standard):
         print(f"    Run {i + 1}: {r.tps:.2f} tok/s ({r.time_ms:.0f} ms, {r.tokens} tokens)")
@@ -117,7 +117,7 @@ def print_results(
     # Fixed cache results
     avg_tps_fix = sum(r.tps for r in fixed) / len(fixed)
     avg_ms_fix = sum(r.ms_per_token for r in fixed) / len(fixed)
-    print(f"\n  Fixed Cache (pre-allocated, GQA-expanded):")
+    print("\n  Fixed Cache (pre-allocated, GQA-expanded):")
     print(f"    Average: {avg_tps_fix:.2f} tok/s ({avg_ms_fix:.0f} ms/tok)")
     for i, r in enumerate(fixed):
         print(f"    Run {i + 1}: {r.tps:.2f} tok/s ({r.time_ms:.0f} ms, {r.tokens} tokens)")
@@ -166,7 +166,7 @@ def main():
     spec = detect_model_spec(st.tensor_names)
     model = load_model_from_safetensors(model_path, dtype="float16", spec=spec)
 
-    print(f"  Model: Qwen3-8B")
+    print("  Model: Qwen3-8B")
     print(f"  Layers: {model.config.num_layers}")
     print(f"  Hidden: {model.config.hidden_size}")
     print(f"  Heads: {model.config.num_heads} (Q), {model.config.num_kv_heads} (KV)")
