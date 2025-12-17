@@ -682,15 +682,27 @@ void silu(const GPUArray& input, GPUArray& out) {
 // Scaled Dot-Product Attention (SDPA) with Causal Mask
 // ============================================================================
 
-// Check if Flash Attention is enabled via environment variable
-static bool is_flash_attention_enabled() {
-    static int cached = -1;
-    if (cached < 0) {
+// Flash Attention mode:
+// - "0" or "false": Always use standard SDPA
+// - "1" or "true": Always use Flash Attention
+// - "auto" or unset: Auto-select based on sequence length (>2048 uses Flash)
+static int get_flash_attention_mode() {
+    static int cached = -2;  // -2 = not checked, -1 = auto, 0 = off, 1 = on
+    if (cached == -2) {
         const char* env = std::getenv("PYGPUKIT_FLASH_ATTENTION");
-        cached = (env != nullptr && (std::string(env) == "1" || std::string(env) == "true"));
+        if (env == nullptr || std::string(env) == "auto") {
+            cached = -1;  // auto mode
+        } else if (std::string(env) == "1" || std::string(env) == "true") {
+            cached = 1;   // force on
+        } else {
+            cached = 0;   // force off
+        }
     }
-    return cached != 0;
+    return cached;
 }
+
+// Threshold for auto-selecting Flash Attention (sequence length)
+constexpr int FLASH_ATTENTION_SEQ_THRESHOLD = 2048;
 
 // Internal helper for SDPA kernel dispatch
 // context_len: if > 0, use this as kv_len (for fixed-length cache)
@@ -722,8 +734,19 @@ static void sdpa_causal_dispatch(
     // Use capture stream if available
     cudaStream_t stream = internal::get_capture_stream();
 
-    // Use Flash Attention if enabled and head_dim is reasonable
-    bool use_flash = is_flash_attention_enabled() && head_dim <= 128;
+    // Determine whether to use Flash Attention
+    // - Auto mode: use Flash for long sequences (>2048) where memory savings matter
+    // - Force mode: respect user preference
+    int flash_mode = get_flash_attention_mode();
+    bool use_flash = false;
+    if (flash_mode == 1) {
+        // Force on
+        use_flash = (head_dim <= 128);
+    } else if (flash_mode == -1) {
+        // Auto: use Flash for long sequences
+        use_flash = (head_dim <= 128) && (kv_len > FLASH_ATTENTION_SEQ_THRESHOLD);
+    }
+    // flash_mode == 0: force off, use_flash stays false
 
     if (use_flash) {
         // Flash Attention 2: O(n) memory, tiled computation
