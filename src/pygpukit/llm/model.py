@@ -28,9 +28,11 @@ from pygpukit.ops.basic import (
     concat_axis0,
     copy_to,
     embedding_lookup,
+    embedding_lookup_ptr,
     gelu,
     kv_cache_prefill_gqa,
     kv_cache_update_gqa,
+    kv_cache_update_gqa_ptr,
     layernorm,
     matmul,
     mul,
@@ -598,6 +600,9 @@ class DecodeBuffers:
     q_flat: GPUArray | None = None  # [num_heads, head_dim] - rmsnorm input
     k_flat: GPUArray | None = None  # [num_kv_heads, head_dim] - rmsnorm input
 
+    # GPU position buffer for CUDA Graph replay (int32)
+    position_buf: GPUArray | None = None  # [1] int32
+
     @classmethod
     def allocate(
         cls,
@@ -651,6 +656,9 @@ class DecodeBuffers:
             q_flat = zeros((config.num_heads, config.head_dim), dtype=dtype)
             k_flat = zeros((config.num_kv_heads, config.head_dim), dtype=dtype)
 
+        # GPU position buffer for CUDA Graph replay
+        position_buf = zeros((1,), dtype="int32")
+
         return cls(
             hidden=hidden,
             q=q,
@@ -674,6 +682,7 @@ class DecodeBuffers:
             k_2d=k_2d,
             q_flat=q_flat,
             k_flat=k_flat,
+            position_buf=position_buf,
         )
 
 
@@ -1697,9 +1706,12 @@ class CausalTransformerModel:
             model_self = self  # Closure capture
 
             def _inline_decode_step(tok_id: int, pos: int, ctx_len: int) -> None:
-                """Inline decode step for reliable graph capture."""
-                embedding_lookup(model_self.embed_tokens, buffers.embed_out, tok_id)
-                copy_to(buffers.embed_out, buffers.hidden)
+                """Inline decode step for reliable graph capture.
+
+                Uses use_position_ptr=True so kernels read position from GPU buffer,
+                allowing graph replay with different positions without recapture.
+                """
+                embedding_lookup(model_self.embed_tokens, buffers.hidden, tok_id)
                 for block in model_self.blocks:
                     rmsnorm(
                         buffers.hidden,
@@ -1709,7 +1721,8 @@ class CausalTransformerModel:
                     )
                     copy_to(buffers.hidden, buffers.residual)
                     model_self._attention_forward_zero_alloc(
-                        block.attn, buffers.norm_out, pos, ctx_len, buffers
+                        block.attn, buffers.norm_out, pos, ctx_len, buffers,
+                        use_position_ptr=True,  # Read position from GPU buffer
                     )
                     add_inplace(buffers.hidden, buffers.residual)
                     copy_to(buffers.hidden, buffers.residual)
@@ -1732,13 +1745,21 @@ class CausalTransformerModel:
             graph = CudaGraph()
             graph_ready = False
 
+            # Helper to update position buffer (outside graph capture/replay)
+            def _update_position_buf(pos: int) -> None:
+                """Write position to GPU buffer for _ptr kernels."""
+                pos_np = np.array([pos], dtype=np.int32)
+                pos_gpu = from_numpy(pos_np)
+                copy_to(pos_gpu, _decode_buffers.position_buf)
+
         for _step in range(max_new_tokens - 1):
             position = context_len - 1  # Position of current token
 
             if use_graph and not graph_ready:
-                # First decode step: capture the graph using inline function
-                # NOTE: This captures with current token_id/position/context_len
-                # Graph replay will use these exact values (not ideal, but tests capture)
+                # First decode step: capture the graph
+                # Write position to GPU buffer BEFORE capture (not captured)
+                _update_position_buf(position)
+
                 # Disable GC during capture to prevent allocations
                 gc.disable()
                 try:
@@ -1751,10 +1772,9 @@ class CausalTransformerModel:
                 hidden = _decode_buffers.hidden
                 print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes")
             elif use_graph and graph_ready:
-                # Subsequent steps: replay the captured graph
-                # WARNING: This replays with the SAME parameters as capture
-                # (token_id, position, context_len are baked in)
-                # This produces incorrect output but tests graph overhead
+                # Subsequent steps: update position buffer, then replay
+                # Position is read from GPU buffer by _ptr kernels
+                _update_position_buf(position)
                 graph.replay()
                 hidden = _decode_buffers.hidden
             else:
@@ -1844,10 +1864,15 @@ class CausalTransformerModel:
         position: int,
         context_len: int,
         buffers: DecodeBuffers,
+        use_position_ptr: bool = False,
     ) -> None:
         """Attention forward pass with zero allocations.
 
         Result is written to buffers.hidden.
+
+        Args:
+            use_position_ptr: If True, read position from buffers.position_buf
+                              (for CUDA Graph replay without recapture).
         """
         # Project Q, K, V using pre-allocated buffers
         # x: [1, hidden_size]
@@ -1878,15 +1903,24 @@ class CausalTransformerModel:
         # Apply RoPE using pre-computed GPU tables (zero allocation)
         if self.config.use_rope and hasattr(self, "_rope_cos_gpu"):
             # Extract single row from pre-computed tables using GPU kernel
-            # Reuse embedding_lookup which copies a row from 2D matrix
-            embedding_lookup(self._rope_cos_gpu, buffers.cos, position)
-            embedding_lookup(self._rope_sin_gpu, buffers.sin, position)
+            if use_position_ptr and buffers.position_buf is not None:
+                # Use _ptr variants for CUDA Graph replay
+                embedding_lookup_ptr(self._rope_cos_gpu, buffers.cos, buffers.position_buf)
+                embedding_lookup_ptr(self._rope_sin_gpu, buffers.sin, buffers.position_buf)
+            else:
+                embedding_lookup(self._rope_cos_gpu, buffers.cos, position)
+                embedding_lookup(self._rope_sin_gpu, buffers.sin, position)
             # buffers.cos/sin are already [1, head_dim] - use directly
             rope_inplace(q, k, buffers.cos, buffers.sin)
 
         # Update KV cache at position (GQA-expanded, transposed)
-        kv_cache_update_gqa(k, attn._k_cache, attn.num_heads, position)
-        kv_cache_update_gqa(v, attn._v_cache, attn.num_heads, position)
+        if use_position_ptr and buffers.position_buf is not None:
+            # Use _ptr variants for CUDA Graph replay
+            kv_cache_update_gqa_ptr(k, attn._k_cache, attn.num_heads, buffers.position_buf)
+            kv_cache_update_gqa_ptr(v, attn._v_cache, attn.num_heads, buffers.position_buf)
+        else:
+            kv_cache_update_gqa(k, attn._k_cache, attn.num_heads, position)
+            kv_cache_update_gqa(v, attn._v_cache, attn.num_heads, position)
 
         # Transpose Q for SDPA: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
         transpose_3d_021(q, out=buffers.q_t)

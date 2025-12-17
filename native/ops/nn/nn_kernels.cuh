@@ -1390,6 +1390,18 @@ __global__ void copy_bf16_kernel(
     }
 }
 
+// INT32 copy kernel (for position buffers in CUDA Graph)
+__global__ void copy_i32_kernel(
+    const int* __restrict__ src,
+    int* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = src[idx];
+    }
+}
+
 // ============================================================================
 // RoPE (Rotary Position Embedding)
 // ============================================================================
@@ -2202,6 +2214,79 @@ __global__ void kv_cache_update_gqa_f32_kernel(
     }
 }
 
+// =============================================================================
+// KV Cache Update with GPU position pointer (for CUDA Graph replay)
+// =============================================================================
+
+__global__ void kv_cache_update_gqa_f16_kernel_ptr(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int* __restrict__ position_ptr
+) {
+    int position = *position_ptr;
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_update_gqa_bf16_kernel_ptr(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int* __restrict__ position_ptr
+) {
+    int position = *position_ptr;
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_update_gqa_f32_kernel_ptr(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int* __restrict__ position_ptr
+) {
+    int position = *position_ptr;
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
 // Prefill with GQA expansion
 // new_kv: [seq_len, num_kv_heads, head_dim]
 // cache: [num_heads, max_seq_len, head_dim]
@@ -2332,6 +2417,49 @@ __global__ void embedding_lookup_f32_kernel(
     int hidden_size,
     int token_id
 ) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+// =============================================================================
+// Embedding Lookup with GPU index pointer (for CUDA Graph replay)
+// =============================================================================
+
+__global__ void embedding_lookup_f16_kernel_ptr(
+    const __half* __restrict__ embed_matrix,
+    __half* __restrict__ out,
+    int hidden_size,
+    const int* __restrict__ token_id_ptr
+) {
+    int token_id = *token_id_ptr;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_bf16_kernel_ptr(
+    const __nv_bfloat16* __restrict__ embed_matrix,
+    __nv_bfloat16* __restrict__ out,
+    int hidden_size,
+    const int* __restrict__ token_id_ptr
+) {
+    int token_id = *token_id_ptr;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_f32_kernel_ptr(
+    const float* __restrict__ embed_matrix,
+    float* __restrict__ out,
+    int hidden_size,
+    const int* __restrict__ token_id_ptr
+) {
+    int token_id = *token_id_ptr;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < hidden_size) {
         out[idx] = embed_matrix[token_id * hidden_size + idx];

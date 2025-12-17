@@ -1746,6 +1746,29 @@ def kv_cache_prefill_gqa(
     native.kv_cache_prefill_gqa(new_kv_native, cache_native, num_heads, start_pos)
 
 
+def kv_cache_update_gqa_ptr(
+    new_kv: GPUArray, cache: GPUArray, num_heads: int, position_buf: GPUArray
+) -> None:
+    """Update GQA-expanded KV cache reading position from GPU buffer.
+
+    For CUDA Graph replay: position is read from GPU memory, allowing
+    graph replay with different positions without recapturing.
+
+    Args:
+        new_kv: K or V tensor of shape [1, num_kv_heads, head_dim].
+        cache: Pre-allocated cache of shape [num_heads, max_seq_len, head_dim].
+        num_heads: Total number of attention heads.
+        position_buf: GPUArray[1] int32 containing position value.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    position_buf_native = position_buf._get_native()
+    native.kv_cache_update_gqa_ptr(new_kv_native, cache_native, num_heads, position_buf_native)
+
+
 def embedding_lookup(embed_matrix: GPUArray, out: GPUArray, token_id: int) -> None:
     """Lookup embedding on GPU without CPU transfer.
 
@@ -1762,6 +1785,28 @@ def embedding_lookup(embed_matrix: GPUArray, out: GPUArray, token_id: int) -> No
     embed_native = embed_matrix._get_native()
     out_native = out._get_native()
     native.embedding_lookup(embed_native, out_native, token_id)
+
+
+def embedding_lookup_ptr(
+    embed_matrix: GPUArray, out: GPUArray, token_id_buf: GPUArray
+) -> None:
+    """Lookup embedding reading index from GPU buffer.
+
+    For CUDA Graph replay: index is read from GPU memory, allowing
+    graph replay with different indices without recapturing.
+
+    Args:
+        embed_matrix: Embedding matrix [vocab_size, hidden_size].
+        out: Pre-allocated output buffer [1, hidden_size].
+        token_id_buf: GPUArray[1] int32 containing token/position value.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    embed_native = embed_matrix._get_native()
+    out_native = out._get_native()
+    token_id_buf_native = token_id_buf._get_native()
+    native.embedding_lookup_ptr(embed_native, out_native, token_id_buf_native)
 
 
 def add_inplace(a: GPUArray, b: GPUArray) -> None:

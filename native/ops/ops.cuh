@@ -189,11 +189,13 @@ void kv_cache_prefill(const GPUArray& new_kv, GPUArray& cache, int start_pos);
 // GQA-expanded KV cache operations (for CUDA Graph optimization)
 // These write to transposed, GQA-expanded cache: [num_heads, max_seq_len, head_dim]
 void kv_cache_update_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads, int position);
+void kv_cache_update_gqa_ptr(const GPUArray& new_kv, GPUArray& cache, int num_heads, const GPUArray& position_buf);
 void kv_cache_prefill_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads, int start_pos);
 
 // Embedding lookup - GPU-only, no CPU transfer
 // embed_matrix: [vocab_size, hidden_size], out: [1, hidden_size], token_id: row index
 void embedding_lookup(const GPUArray& embed_matrix, GPUArray& out, int token_id);
+void embedding_lookup_ptr(const GPUArray& embed_matrix, GPUArray& out, const GPUArray& token_id_buf);
 
 // In-place addition: a += b
 void add_inplace(GPUArray& a, const GPUArray& b);

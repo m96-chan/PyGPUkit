@@ -1379,6 +1379,68 @@ void kv_cache_update_gqa(
     sync_and_check("kv_cache_update_gqa kernel failed");
 }
 
+// GQA-expanded KV cache update with GPU position pointer (for CUDA Graph replay)
+void kv_cache_update_gqa_ptr(
+    const GPUArray& new_kv,
+    GPUArray& cache,
+    int num_heads,
+    const GPUArray& position_buf
+) {
+    if (new_kv.ndim() != 3 || cache.ndim() != 3) {
+        throw std::runtime_error("kv_cache_update_gqa_ptr: expected 3D tensors");
+    }
+    if (new_kv.shape()[0] != 1) {
+        throw std::runtime_error("kv_cache_update_gqa_ptr: new_kv should have seq_len=1");
+    }
+    if (new_kv.dtype() != cache.dtype()) {
+        throw std::runtime_error("kv_cache_update_gqa_ptr: dtype mismatch");
+    }
+    if (static_cast<int>(cache.shape()[0]) != num_heads) {
+        throw std::runtime_error("kv_cache_update_gqa_ptr: cache shape[0] should equal num_heads");
+    }
+    if (position_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("kv_cache_update_gqa_ptr: position_buf must be int32");
+    }
+
+    int num_kv_heads = static_cast<int>(new_kv.shape()[1]);
+    int head_dim = static_cast<int>(new_kv.shape()[2]);
+    int max_seq_len = static_cast<int>(cache.shape()[1]);
+    int total_elements = num_heads * head_dim;
+
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (new_kv.dtype()) {
+        case DataType::Float16:
+            nn::kv_cache_update_gqa_f16_kernel_ptr<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(new_kv.data()),
+                static_cast<__half*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len,
+                static_cast<const int*>(position_buf.data()));
+            break;
+        case DataType::BFloat16:
+            nn::kv_cache_update_gqa_bf16_kernel_ptr<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(new_kv.data()),
+                static_cast<__nv_bfloat16*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len,
+                static_cast<const int*>(position_buf.data()));
+            break;
+        case DataType::Float32:
+            nn::kv_cache_update_gqa_f32_kernel_ptr<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(new_kv.data()),
+                static_cast<float*>(cache.data()),
+                num_heads, num_kv_heads, head_dim, max_seq_len,
+                static_cast<const int*>(position_buf.data()));
+            break;
+        default:
+            throw std::runtime_error("kv_cache_update_gqa_ptr: unsupported dtype");
+    }
+
+    sync_and_check("kv_cache_update_gqa_ptr kernel failed");
+}
+
 // GQA-expanded KV cache prefill
 // new_kv: [seq_len, num_kv_heads, head_dim]
 // cache: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)
@@ -1481,6 +1543,58 @@ void embedding_lookup(
     }
 
     sync_and_check("embedding_lookup kernel failed");
+}
+
+// Embedding lookup with GPU index pointer (for CUDA Graph replay)
+void embedding_lookup_ptr(
+    const GPUArray& embed_matrix,
+    GPUArray& out,
+    const GPUArray& token_id_buf
+) {
+    if (embed_matrix.ndim() != 2) {
+        throw std::runtime_error("embedding_lookup_ptr: embed_matrix must be 2D");
+    }
+    if (embed_matrix.dtype() != out.dtype()) {
+        throw std::runtime_error("embedding_lookup_ptr: dtype mismatch");
+    }
+    if (token_id_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("embedding_lookup_ptr: token_id_buf must be int32");
+    }
+
+    int hidden_size = static_cast<int>(embed_matrix.shape()[1]);
+
+    const int block_size = 256;
+    const int grid_size = (hidden_size + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (embed_matrix.dtype()) {
+        case DataType::Float16:
+            nn::embedding_lookup_f16_kernel_ptr<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(embed_matrix.data()),
+                static_cast<__half*>(out.data()),
+                hidden_size,
+                static_cast<const int*>(token_id_buf.data()));
+            break;
+        case DataType::BFloat16:
+            nn::embedding_lookup_bf16_kernel_ptr<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(embed_matrix.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                hidden_size,
+                static_cast<const int*>(token_id_buf.data()));
+            break;
+        case DataType::Float32:
+            nn::embedding_lookup_f32_kernel_ptr<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(embed_matrix.data()),
+                static_cast<float*>(out.data()),
+                hidden_size,
+                static_cast<const int*>(token_id_buf.data()));
+            break;
+        default:
+            throw std::runtime_error("embedding_lookup_ptr: unsupported dtype");
+    }
+
+    sync_and_check("embedding_lookup_ptr kernel failed");
 }
 
 // In-place addition: a += b
@@ -1599,6 +1713,11 @@ void copy_to(const GPUArray& src, GPUArray& dst) {
             nn::copy_f32_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<const float*>(src.data()),
                 static_cast<float*>(dst.data()), n);
+            break;
+        case DataType::Int32:
+            nn::copy_i32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const int*>(src.data()),
+                static_cast<int*>(dst.data()), n);
             break;
         default:
             throw std::runtime_error("copy_to: unsupported dtype");

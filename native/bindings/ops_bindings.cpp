@@ -284,6 +284,12 @@ void init_ops_bindings(py::module_& m) {
           "num_heads: total number of attention heads\n"
           "start_pos: where to start writing in cache");
 
+    // GPU position pointer variants (for CUDA Graph replay without recapture)
+    m.def("kv_cache_update_gqa_ptr", &ops::kv_cache_update_gqa_ptr,
+          py::arg("new_kv"), py::arg("cache"), py::arg("num_heads"), py::arg("position_buf"),
+          "Update GQA-expanded KV cache reading position from GPU buffer.\n"
+          "position_buf: GPUArray[1] int32 containing position value");
+
     // GPU-only embedding lookup (for CUDA Graph)
     m.def("embedding_lookup", &ops::embedding_lookup,
           py::arg("embed_matrix"), py::arg("out"), py::arg("token_id"),
@@ -291,6 +297,11 @@ void init_ops_bindings(py::module_& m) {
           "embed_matrix: [vocab_size, hidden_size]\n"
           "out: [1, hidden_size] pre-allocated buffer\n"
           "token_id: row index to copy");
+
+    m.def("embedding_lookup_ptr", &ops::embedding_lookup_ptr,
+          py::arg("embed_matrix"), py::arg("out"), py::arg("token_id_buf"),
+          "Lookup embedding reading index from GPU buffer.\n"
+          "token_id_buf: GPUArray[1] int32 containing token/position value");
 
     // In-place addition (for CUDA Graph)
     m.def("add_inplace", &ops::add_inplace,
