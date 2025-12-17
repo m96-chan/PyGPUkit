@@ -1800,11 +1800,8 @@ class CausalTransformerModel:
         Returns:
             Hidden states [1, hidden_size]
         """
-        # Get token embedding via GPU kernel (no CPU-GPU transfer)
-        embedding_lookup(self.embed_tokens, buffers.embed_out, token_id)
-
-        # Copy to hidden buffer
-        copy_to(buffers.embed_out, buffers.hidden)
+        # Get token embedding directly to hidden (no copy needed)
+        embedding_lookup(self.embed_tokens, buffers.hidden, token_id)
 
         # Transformer blocks with fixed cache
         for block in self.blocks:
@@ -1905,9 +1902,8 @@ class CausalTransformerModel:
         # Reshape to 2D: [1, hidden_size] - reuse q_proj_out buffer
         reshape_copy(buffers.q, (1, attn.num_heads * attn.head_dim), out=buffers.q_proj_out)
 
-        # Output projection -> o_proj_out, then copy to hidden
-        attn.o_proj(buffers.q_proj_out, out=buffers.o_proj_out)
-        copy_to(buffers.o_proj_out, buffers.hidden)
+        # Output projection directly to hidden (eliminates copy)
+        attn.o_proj(buffers.q_proj_out, out=buffers.hidden)
 
     def _mlp_forward_zero_alloc(
         self,
@@ -1933,9 +1929,8 @@ class CausalTransformerModel:
             # mlp_gate = mlp_gate * mlp_up (in-place)
             mul_inplace(buffers.mlp_gate, buffers.mlp_up)
 
-            # Down projection -> mlp_down, then copy to hidden
-            mlp.down_proj(buffers.mlp_gate, out=buffers.mlp_down)
-            copy_to(buffers.mlp_down, buffers.hidden)
+            # Down projection directly to hidden (eliminates copy)
+            mlp.down_proj(buffers.mlp_gate, out=buffers.hidden)
         else:
             # GELU path (GPT-2) - still has allocations, rarely used
             fc1_out = mlp.fc1(x)
