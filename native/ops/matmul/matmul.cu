@@ -15,7 +15,6 @@
 #include "../matmul_f16_bf16.cuh"
 #include "../matmul_f16_bf16_tc.cuh"
 #include "../matmul_f16_bf16_tc_generic.cuh"
-#include "../matmul_cublas.cuh"
 #include "../matmul_cublaslt.cuh"
 
 #include <cstdlib>
@@ -125,109 +124,53 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                       N >= TILED_MATMUL_THRESHOLD ||
                       K >= TILED_MATMUL_THRESHOLD);
 
-    // Check if cuBLAS/cuBLASLt should be used
-    // cuBLAS is preferred for small M (batch size) where CUTLASS is not compatible
-    // Environment variables:
-    //   PYGPUKIT_NO_CUBLAS=1     - Disable cuBLAS/cuBLASLt entirely
-    //   PYGPUKIT_USE_CUBLASLT=1  - Use cuBLASLt instead of cuBLAS
-    const char* no_cublas_env = std::getenv("PYGPUKIT_NO_CUBLAS");
-    bool cublas_disabled = no_cublas_env &&
-        (no_cublas_env[0] == '1' || no_cublas_env[0] == 'y' || no_cublas_env[0] == 'Y');
+    // cuBLASLt for small M (batch size) where CUTLASS is not compatible
+    // Environment variable: PYGPUKIT_NO_CUBLASLT=1 to disable
+    // Note: cuBLAS was removed due to CUDA Graph incompatibility (segfaults during capture)
+    const char* no_cublaslt_env = std::getenv("PYGPUKIT_NO_CUBLASLT");
+    bool cublaslt_disabled = no_cublaslt_env &&
+        (no_cublaslt_env[0] == '1' || no_cublaslt_env[0] == 'y' || no_cublaslt_env[0] == 'Y');
 
-    const char* use_cublaslt_env = std::getenv("PYGPUKIT_USE_CUBLASLT");
-    bool prefer_cublaslt = use_cublaslt_env &&
-        (use_cublaslt_env[0] == '1' || use_cublaslt_env[0] == 'y' || use_cublaslt_env[0] == 'Y');
+    // Get current stream (capture stream if in CUDA Graph mode, otherwise nullptr for default)
+    cudaStream_t stream = internal::get_capture_stream();
 
-    // Check if we're in CUDA Graph capture mode
-    cudaStream_t capture_stream = internal::get_capture_stream();
-    bool is_capturing = (capture_stream != nullptr);
+    // Use cuBLASLt for small M (< 16) or when CUTLASS is not compatible
+    bool use_cublaslt = !cublaslt_disabled && (M < 16 || !cutlass_is_compatible(M, N, K));
 
-    // Use cuBLAS/cuBLASLt for small M (< 16) or when CUTLASS is not compatible
-    bool use_cublas_family = !cublas_disabled && (M < 16 || !cutlass_is_compatible(M, N, K));
-
-    // During CUDA Graph capture:
-    // - cuBLAS causes segfaults, so we MUST use cuBLASLt instead
-    // - cuBLASLt works correctly with graph capture (verified)
-    // - Set PYGPUKIT_NO_CUBLASLT_CAPTURE=1 to disable and fall back to native kernels
-    if (is_capturing && use_cublas_family) {
-        const char* no_cublaslt_capture_env = std::getenv("PYGPUKIT_NO_CUBLASLT_CAPTURE");
-        bool disable_cublaslt_capture = no_cublaslt_capture_env &&
-            (no_cublaslt_capture_env[0] == '1' || no_cublaslt_capture_env[0] == 'y' || no_cublaslt_capture_env[0] == 'Y');
-
-        if (disable_cublaslt_capture) {
-            use_cublas_family = false;  // Fall back to native kernels
-        } else {
-            prefer_cublaslt = true;  // Force cuBLASLt during capture (cuBLAS segfaults)
-        }
-    }
-
-    // cuBLAS/cuBLASLt dispatch (for small batch sizes and CUTLASS-incompatible dimensions)
-    if (use_cublas_family) {
+    // cuBLASLt dispatch (for small batch sizes and CUTLASS-incompatible dimensions)
+    if (use_cublaslt) {
         cudaError_t err = cudaSuccess;
-        cudaStream_t stream = capture_stream ? capture_stream : nullptr;
 
-        if (prefer_cublaslt) {
-            // Use cuBLASLt
-            switch (a.dtype()) {
-                case DataType::Float32:
-                    err = cublaslt_gemm::gemm_fp32(
-                        static_cast<const float*>(a.data()),
-                        static_cast<const float*>(b.data()),
-                        static_cast<float*>(c.data()),
-                        M, N, K, stream);
-                    break;
-                case DataType::Float16:
-                    err = cublaslt_gemm::gemm_fp16(
-                        static_cast<const __half*>(a.data()),
-                        static_cast<const __half*>(b.data()),
-                        static_cast<__half*>(c.data()),
-                        M, N, K, stream);
-                    break;
-                case DataType::BFloat16:
-                    err = cublaslt_gemm::gemm_bf16(
-                        static_cast<const __nv_bfloat16*>(a.data()),
-                        static_cast<const __nv_bfloat16*>(b.data()),
-                        static_cast<__nv_bfloat16*>(c.data()),
-                        M, N, K, stream);
-                    break;
-                default:
-                    throw std::runtime_error("cuBLASLt matmul only supports float types");
-            }
-            if (err != cudaSuccess) {
-                throw std::runtime_error("cuBLASLt GEMM failed");
-            }
-        } else {
-            // Use cuBLAS
-            switch (a.dtype()) {
-                case DataType::Float32:
-                    err = cublas_gemm::gemm_fp32(
-                        static_cast<const float*>(a.data()),
-                        static_cast<const float*>(b.data()),
-                        static_cast<float*>(c.data()),
-                        M, N, K, stream);
-                    break;
-                case DataType::Float16:
-                    err = cublas_gemm::gemm_fp16(
-                        static_cast<const __half*>(a.data()),
-                        static_cast<const __half*>(b.data()),
-                        static_cast<__half*>(c.data()),
-                        M, N, K, stream);
-                    break;
-                case DataType::BFloat16:
-                    err = cublas_gemm::gemm_bf16(
-                        static_cast<const __nv_bfloat16*>(a.data()),
-                        static_cast<const __nv_bfloat16*>(b.data()),
-                        static_cast<__nv_bfloat16*>(c.data()),
-                        M, N, K, stream);
-                    break;
-                default:
-                    throw std::runtime_error("cuBLAS matmul only supports float types");
-            }
-            if (err != cudaSuccess) {
-                throw std::runtime_error("cuBLAS GEMM failed");
-            }
+        switch (a.dtype()) {
+            case DataType::Float32:
+                err = cublaslt_gemm::gemm_fp32(
+                    static_cast<const float*>(a.data()),
+                    static_cast<const float*>(b.data()),
+                    static_cast<float*>(c.data()),
+                    M, N, K, stream);
+                break;
+            case DataType::Float16:
+                err = cublaslt_gemm::gemm_fp16(
+                    static_cast<const __half*>(a.data()),
+                    static_cast<const __half*>(b.data()),
+                    static_cast<__half*>(c.data()),
+                    M, N, K, stream);
+                break;
+            case DataType::BFloat16:
+                err = cublaslt_gemm::gemm_bf16(
+                    static_cast<const __nv_bfloat16*>(a.data()),
+                    static_cast<const __nv_bfloat16*>(b.data()),
+                    static_cast<__nv_bfloat16*>(c.data()),
+                    M, N, K, stream);
+                break;
+            default:
+                throw std::runtime_error("cuBLASLt matmul only supports float types");
         }
-        sync_and_check("cuBLAS matmul kernel failed");
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("cuBLASLt GEMM failed");
+        }
+        sync_and_check("cuBLASLt matmul kernel failed");
         return;
     }
 
