@@ -2539,6 +2539,214 @@ class CausalTransformerModel:
 
         return hidden
 
+    # =========================================================================
+    # Self-Speculative Decoding
+    # =========================================================================
+
+    def snapshot_kv_cache(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Snapshot all layer KV caches to CPU memory.
+
+        Returns:
+            List of (k_cache_np, v_cache_np) tuples, one per layer.
+            Each cache is numpy array of shape [num_heads, max_seq_len, head_dim].
+        """
+        snapshot = []
+        for block in self.blocks:
+            k_np = block.attn._k_cache.to_numpy().copy()
+            v_np = block.attn._v_cache.to_numpy().copy()
+            snapshot.append((k_np, v_np))
+        return snapshot
+
+    def restore_kv_cache(self, snapshot: list[tuple[np.ndarray, np.ndarray]]) -> None:
+        """Restore all layer KV caches from CPU snapshot.
+
+        Args:
+            snapshot: List of (k_cache_np, v_cache_np) tuples from snapshot_kv_cache().
+        """
+        for i, block in enumerate(self.blocks):
+            k_np, v_np = snapshot[i]
+            block.attn._k_cache = from_numpy(k_np.astype(np.float16))
+            block.attn._v_cache = from_numpy(v_np.astype(np.float16))
+
+    def _draft_forward_early_layers(
+        self,
+        token_id: int,
+        position: int,
+        context_len: int,
+        num_draft_layers: int,
+    ) -> GPUArray:
+        """Forward pass through only the first N layers (draft model).
+
+        Uses the same KV cache as the full model but only updates early layers.
+        After draft is done, the early layer KV entries need to be restored
+        before running the full model verification.
+
+        Args:
+            token_id: Current token ID
+            position: Position in sequence
+            context_len: Total context length
+            num_draft_layers: Number of early layers to use as draft
+
+        Returns:
+            Hidden states [1, hidden_size] after num_draft_layers
+        """
+        # Get token embedding
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[token_id : token_id + 1]
+        hidden = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
+
+        # Only run through first num_draft_layers blocks
+        for i in range(min(num_draft_layers, len(self.blocks))):
+            block = self.blocks[i]
+            # Pre-norm
+            residual = hidden
+            hidden = block.attn_norm(hidden)
+
+            # Attention with fixed cache
+            hidden = block.attn.forward_fixed_cache(hidden, position, context_len)
+            hidden = add(residual, hidden)
+
+            # MLP
+            residual = hidden
+            hidden = block.mlp_norm(hidden)
+            hidden = block.mlp(hidden)
+            hidden = add(residual, hidden)
+
+        # Note: We do NOT apply final_norm here since draft output
+        # is only used for sampling, not for precise logits
+        return hidden
+
+    def _draft_get_logits(self, hidden: GPUArray) -> GPUArray:
+        """Get logits from draft hidden states (after early layers).
+
+        This applies final_norm and then computes logits.
+        Note: The draft hidden states are from early layers, so the logits
+        may not be identical to full model logits.
+        """
+        # Apply final norm (needed for proper logits computation)
+        hidden_normed = self.final_norm(hidden)
+        return self.get_logits(hidden_normed)
+
+    def decode_step_self_speculative(
+        self,
+        token_id: int,
+        position: int,
+        context_len: int,
+        max_draft_tokens: int = 4,
+        draft_layers: int = 8,
+    ) -> tuple[list[int], int, dict]:
+        """Self-speculative decode step using early layers as draft.
+
+        Algorithm:
+        1. Snapshot KV cache state
+        2. Generate max_draft_tokens using early layers (draft)
+        3. Verify all draft tokens in one batch forward pass (full model)
+        4. Accept tokens until first disagreement (greedy)
+        5. Restore KV cache to snapshot
+        6. Re-run single-token decode for accepted tokens to update KV properly
+
+        Args:
+            token_id: Current token ID (the last accepted token)
+            position: Position in sequence (position of token_id)
+            context_len: Total context length
+            max_draft_tokens: Maximum number of draft tokens to generate
+            draft_layers: Number of early layers to use as draft
+
+        Returns:
+            Tuple of:
+            - accepted_tokens: List of accepted token IDs (may be 1 to max_draft_tokens+1)
+            - new_position: Updated position after accepting tokens
+            - stats: Dict with 'draft_count', 'accepted_count' for analysis
+        """
+        # Snapshot KV cache before speculation
+        kv_snapshot = self.snapshot_kv_cache()
+
+        # === Step 1: Generate draft tokens using early layers ===
+        draft_tokens = []
+        draft_pos = position
+        draft_ctx = context_len
+        current_token = token_id
+
+        for _ in range(max_draft_tokens):
+            # Forward through early layers only
+            hidden = self._draft_forward_early_layers(
+                current_token, draft_pos, draft_ctx, draft_layers
+            )
+            # Get logits and sample (greedy for self-speculative)
+            logits = self._draft_get_logits(hidden)
+            logits_np = logits.to_numpy()[-1]  # [vocab_size]
+            next_token = int(np.argmax(logits_np))  # Greedy sampling
+
+            draft_tokens.append(next_token)
+            current_token = next_token
+            draft_pos += 1
+            draft_ctx += 1
+
+        # === Step 2: Restore KV cache for verification ===
+        self.restore_kv_cache(kv_snapshot)
+
+        # === Step 3: Verify with full model in batch ===
+        # Input: [token_id, draft[0], draft[1], ..., draft[K-2]]
+        # This gives logits for positions: [draft[0], draft[1], ..., draft[K-1]]
+        verify_input = [token_id] + draft_tokens[:-1]
+        # Context length should be: start_position + number of tokens being processed
+        verify_ctx = position + len(verify_input)
+
+        hidden_batch = self._decode_step_fixed_cache_batch(
+            verify_input, position, verify_ctx
+        )
+        verify_logits = self.get_logits(hidden_batch)
+        verify_logits_np = verify_logits.to_numpy()  # [K, vocab_size]
+
+        # === Step 4: Accept/Reject tokens (greedy matching) ===
+        accepted_tokens = []
+        for i, draft_token in enumerate(draft_tokens):
+            # Greedy: check if argmax matches draft
+            target_token = int(np.argmax(verify_logits_np[i]))
+
+            if target_token == draft_token:
+                # Accept
+                accepted_tokens.append(draft_token)
+            else:
+                # Reject: use target's token and stop
+                accepted_tokens.append(target_token)
+                break
+
+        # If all draft tokens accepted, we can also take one bonus token
+        # from the last position's distribution
+        if len(accepted_tokens) == len(draft_tokens):
+            # Need to run one more verify step to get the bonus token
+            # For simplicity, we'll skip the bonus token in initial implementation
+            pass
+
+        # === Step 5: Restore KV cache and re-run accepted tokens ===
+        self.restore_kv_cache(kv_snapshot)
+
+        # Re-run full model single-token decode for each accepted token
+        # This properly updates the KV cache
+        new_pos = position
+        new_ctx = context_len
+        prev_token = token_id
+
+        for acc_token in accepted_tokens:
+            # Run full model decode (updates KV cache)
+            self._decode_step_fixed_cache(prev_token, new_pos, new_ctx)
+            prev_token = acc_token
+            new_pos += 1
+            new_ctx += 1
+
+        # Stats for analysis
+        stats = {
+            "draft_count": len(draft_tokens),
+            "accepted_count": len(
+                [t for i, t in enumerate(accepted_tokens)
+                 if i < len(draft_tokens) and t == draft_tokens[i]]
+            ),
+        }
+
+        return accepted_tokens, new_pos, stats
+
 
 # =============================================================================
 # Type Aliases
