@@ -61,6 +61,7 @@ def _normalize_messages(messages: Messages) -> list[dict[str, str]]:
 # =============================================================================
 
 # Qwen3 / Qwen2 Chat template
+# fmt: off
 QWEN_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'system' %}<|im_start|>system
 {{ message['content'] }}<|im_end|>
 {% elif message['role'] == 'user' %}<|im_start|>user
@@ -68,14 +69,14 @@ QWEN_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'system
 {% elif message['role'] == 'assistant' %}<|im_start|>assistant
 {{ message['content'] }}<|im_end|>
 {% endif %}{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant
-{% endif %}"""
+{% endif %}"""  # noqa: E501
 
 # LLaMA 2 Chat template
 LLAMA2_TEMPLATE = """{% if messages[0]['role'] == 'system' %}{% set system_message = messages[0]['content'] %}{% set messages = messages[1:] %}{% else %}{% set system_message = '' %}{% endif %}{% for message in messages %}{% if message['role'] == 'user' %}[INST] {% if loop.first and system_message %}<<SYS>>
 {{ system_message }}
 <</SYS>>
 
-{% endif %}{{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %} {{ message['content'] }}</s>{% endif %}{% endfor %}"""
+{% endif %}{{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %} {{ message['content'] }}</s>{% endif %}{% endfor %}"""  # noqa: E501
 
 # LLaMA 3 Chat template
 LLAMA3_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'system' %}<|start_header_id|>system<|end_header_id|>
@@ -86,10 +87,11 @@ LLAMA3_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'syst
 
 {{ message['content'] }}<|eot_id|>{% endif %}{% endfor %}{% if add_generation_prompt %}<|start_header_id|>assistant<|end_header_id|>
 
-{% endif %}"""
+{% endif %}"""  # noqa: E501
 
 # Mistral Instruct template
-MISTRAL_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'user' %}[INST] {{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %}{{ message['content'] }}</s>{% endif %}{% endfor %}"""
+MISTRAL_TEMPLATE = """{% for message in messages %}{% if message['role'] == 'user' %}[INST] {{ message['content'] }} [/INST]{% elif message['role'] == 'assistant' %}{{ message['content'] }}</s>{% endif %}{% endfor %}"""  # noqa: E501
+# fmt: on
 
 # ChatML template (generic, used by many models)
 CHATML_TEMPLATE = """{% for message in messages %}<|im_start|>{{ message['role'] }}

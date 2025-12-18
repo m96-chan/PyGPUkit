@@ -1871,7 +1871,10 @@ class CausalTransformerModel:
                     graph.begin_capture()
                     _inline_decode_step(next_token, position, context_len)
                     # Include get_logits in graph (matmul to pre-allocated buffer)
-                    matmul(_decode_buffers.hidden, self._lm_head_t_cache, out=_decode_buffers.logits)
+                    matmul(
+                        _decode_buffers.hidden, self._lm_head_t_cache,
+                        out=_decode_buffers.logits,
+                    )
                     # Include sampling in graph (if top_k > 0)
                     if include_sampling_in_graph:
                         sample_topk_to_buf_ptr(
@@ -1885,7 +1888,9 @@ class CausalTransformerModel:
                 finally:
                     gc.enable()
                 graph_ready = True
-                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes (sampling={'in graph' if include_sampling_in_graph else 'outside'})")
+                sampling_str = "in graph" if include_sampling_in_graph else "outside"
+                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes "
+                      f"(sampling={sampling_str})")
 
                 # Get result
                 if include_sampling_in_graph:
@@ -2121,7 +2126,9 @@ class CausalTransformerModel:
             Tuple of (hidden_states, present_key_values)
         """
         seq_len = len(input_ids)
-        assert seq_len <= buffers.max_seq_len, f"seq_len {seq_len} > max_seq_len {buffers.max_seq_len}"
+        assert seq_len <= buffers.max_seq_len, (
+            f"seq_len {seq_len} > max_seq_len {buffers.max_seq_len}"
+        )
 
         position_ids = list(range(seq_len))
 
@@ -2270,7 +2277,8 @@ class CausalTransformerModel:
 
         # Store for KV cache - MUST copy since buffers.k/v are reused across layers
         if use_cache:
-            # Create copies of K, V to avoid aliasing (shared buffers get overwritten by later layers)
+            # Create copies of K, V to avoid aliasing
+            # (shared buffers get overwritten by later layers)
             k_copy = reshape_copy(k, k.shape)
             v_copy = reshape_copy(v, v.shape)
             present_kv = (k_copy, v_copy)
