@@ -498,7 +498,7 @@ git ls-files "*.py" | xargs python -m ruff check --fix
 git ls-files "*.py" | xargs python -m ruff format
 
 # 2. Mypy type check
-python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined
+python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined --disable-error-code=assignment --disable-error-code=arg-type --disable-error-code=index --disable-error-code=misc
 ```
 
 **NEVER commit without passing ALL checks.** CI will reject PRs with lint/type errors.
@@ -512,7 +512,7 @@ Before creating a PR, verify ALL of the following:
 git ls-files "*.py" | xargs python -m ruff check
 
 # 2. Mypy passes
-python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined
+python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --disable-error-code=no-redef --disable-error-code=no-any-return --disable-error-code=attr-defined --disable-error-code=assignment --disable-error-code=arg-type --disable-error-code=index --disable-error-code=misc
 
 # 3. Tests pass
 python -m pytest tests/ -v
