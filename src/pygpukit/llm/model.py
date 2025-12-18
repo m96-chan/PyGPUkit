@@ -1328,6 +1328,12 @@ class Attention:
         assert self._k_cache is not None, "Call init_fixed_cache first"
         seq_len = x.shape[0]
 
+        # Dispatch to optimized single-token path for M=1
+        # (uses zero-copy view/narrow instead of numpy slicing)
+        if seq_len == 1:
+            return self.forward_fixed_cache(x, start_position, context_len)
+
+        # M > 1: Batch decode path
         # Fused QKV projection
         qkv = self.qkv_proj(x)  # [seq_len, q_dim + k_dim + v_dim]
 
@@ -2494,6 +2500,13 @@ class CausalTransformerModel:
         Returns:
             Hidden states [seq_len, hidden_size]
         """
+        # Dispatch to optimized single-token path for M=1
+        if len(token_ids) == 1:
+            return self._decode_step_fixed_cache(
+                token_ids[0], start_position, context_len
+            )
+
+        # M > 1: Batch decode path
         # Get token embeddings for batch
         if not hasattr(self, "_embed_np_cache"):
             self._embed_np_cache = self.embed_tokens.to_numpy()
