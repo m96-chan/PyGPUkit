@@ -125,19 +125,26 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                       K >= TILED_MATMUL_THRESHOLD);
 
     // cuBLASLt for small M (batch size) where CUTLASS is not compatible
-    // Environment variable: PYGPUKIT_NO_CUBLASLT=1 to disable
-    // Note: cuBLAS was removed due to CUDA Graph incompatibility (segfaults during capture)
-    const char* no_cublaslt_env = std::getenv("PYGPUKIT_NO_CUBLASLT");
-    bool cublaslt_disabled = no_cublaslt_env &&
-        (no_cublaslt_env[0] == '1' || no_cublaslt_env[0] == 'y' || no_cublaslt_env[0] == 'Y');
+    // Cache environment variable and availability check for performance
+    static bool cublaslt_checked = false;
+    static bool cublaslt_available = false;
+    if (!cublaslt_checked) {
+        const char* no_cublaslt_env = std::getenv("PYGPUKIT_NO_CUBLASLT");
+        bool cublaslt_disabled = no_cublaslt_env &&
+            (no_cublaslt_env[0] == '1' || no_cublaslt_env[0] == 'y' || no_cublaslt_env[0] == 'Y');
+        cublaslt_available = !cublaslt_disabled && cublaslt_gemm::is_available();
+        cublaslt_checked = true;
+    }
 
     // Get current stream (capture stream if in CUDA Graph mode, otherwise nullptr for default)
     cudaStream_t stream = internal::get_capture_stream();
 
     // Use cuBLASLt for small M (< 16) or when CUTLASS is not compatible
-    bool use_cublaslt = !cublaslt_disabled && (M < 16 || !cutlass_is_compatible(M, N, K));
+    bool use_cublaslt = cublaslt_available &&
+                        (M < 16 || !cutlass_is_compatible(M, N, K));
 
     // cuBLASLt dispatch (for small batch sizes and CUTLASS-incompatible dimensions)
+    // Note: cuBLASLt may fail on some CUDA versions, fall back to native kernels in that case
     if (use_cublaslt) {
         cudaError_t err = cudaSuccess;
 
@@ -164,14 +171,14 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
                     M, N, K, stream);
                 break;
             default:
-                throw std::runtime_error("cuBLASLt matmul only supports float types");
+                break;  // Fall through to native kernels
         }
 
-        if (err != cudaSuccess) {
-            throw std::runtime_error("cuBLASLt GEMM failed");
+        if (err == cudaSuccess) {
+            sync_and_check("cuBLASLt matmul kernel failed");
+            return;
         }
-        sync_and_check("cuBLASLt matmul kernel failed");
-        return;
+        // cuBLASLt failed - fall through to native kernels
     }
 
     // CUTLASS dispatch (highest priority when enabled)

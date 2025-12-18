@@ -76,6 +76,7 @@ pybind11_add_module(_pygpukit_native
     jit/compiler.cpp
     jit/kernel.cpp
     jit/nvrtc_loader.cpp
+    jit/cublaslt_loader.cpp
     # Ops - Modular structure
     ops/elementwise/elementwise.cu
     ops/unary/unary.cu
@@ -94,13 +95,12 @@ pybind11_add_module(_pygpukit_native
     bindings/ops_bindings.cpp
 )
 
-# Link only cuda_driver (no cudart, no nvrtc link-time dependency)
+# Link only cuda_driver (no cudart, no nvrtc/cublasLt link-time dependency)
 # NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
+# cuBLASLt is loaded dynamically at runtime via cublaslt_loader.cpp
 # This enables single-binary distribution that works with just GPU drivers
 target_link_libraries(_pygpukit_native PRIVATE
     CUDA::cuda_driver
-    CUDA::cublas
-    CUDA::cublasLt
 )
 
 # IMPORTANT: Do NOT enable CUDA_SEPARABLE_COMPILATION
