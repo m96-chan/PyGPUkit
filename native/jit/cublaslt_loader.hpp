@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <tuple>
 #include <string>
 #include <cuda_runtime.h>
