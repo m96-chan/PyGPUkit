@@ -8,8 +8,8 @@ Compares performance of:
 Uses official Qwen3-8B model for benchmarking.
 """
 
-import time
 import sys
+import time
 
 # Model paths (Aratako Qwen3-8B from CLAUDE.md)
 model_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/model.safetensors.index.json"
@@ -46,7 +46,7 @@ messages = [
 ]
 prompt = format_chat_messages(messages, model_type="qwen3")
 input_ids = tokenizer.encode(prompt).ids
-print(f"\nModel: Qwen3-8B (FP16)")
+print("\nModel: Qwen3-8B (FP16)")
 print(f"Prompt tokens: {len(input_ids)}")
 print(f"Max new tokens: {MAX_NEW_TOKENS}")
 print(f"Runs per mode: {NUM_RUNS}")
