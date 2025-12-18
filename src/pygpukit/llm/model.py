@@ -42,6 +42,7 @@ from pygpukit.ops.basic import (
     rmsnorm,
     rope_inplace,
     sample_token_gpu,
+    sample_topk_to_buf_ptr,
     sdpa_causal,
     sdpa_causal_fixed_cache,
     silu,
@@ -622,6 +623,10 @@ class DecodeBuffers:
     # Logits buffer for CUDA Graph (lm_head projection output)
     logits: GPUArray | None = None  # [1, vocab_size]
 
+    # Sampling buffers for CUDA Graph
+    sampled_token: GPUArray | None = None  # [1] int32 - sampled token ID
+    random_val: GPUArray | None = None  # [1] float32 - random value for sampling
+
     @classmethod
     def allocate(
         cls,
@@ -696,8 +701,12 @@ class DecodeBuffers:
 
         # Logits buffer for CUDA Graph (optional)
         logits_buf = None
+        sampled_token_buf = None
+        random_val_buf = None
         if vocab_size is not None:
             logits_buf = zeros((1, vocab_size), dtype=dtype)
+            sampled_token_buf = zeros((1,), dtype="int32")
+            random_val_buf = zeros((1,), dtype="float32")
 
         return cls(
             hidden=hidden,
@@ -731,6 +740,8 @@ class DecodeBuffers:
             gate_view=gate_view,
             up_view=up_view,
             logits=logits_buf,
+            sampled_token=sampled_token_buf,
+            random_val=random_val_buf,
         )
 
 
@@ -1829,13 +1840,26 @@ class CausalTransformerModel:
                 pos_gpu = from_numpy(pos_np)
                 copy_to(pos_gpu, _decode_buffers.position_buf)
 
+            # Helper to update random_val buffer (outside graph capture/replay)
+            import random
+            def _update_random_val_buf() -> None:
+                """Write random value to GPU buffer for sampling kernel."""
+                rand_np = np.array([random.random()], dtype=np.float32)
+                rand_gpu = from_numpy(rand_np)
+                copy_to(rand_gpu, _decode_buffers.random_val)
+
+            # Check if we can include sampling in Graph (top_k > 0 required)
+            include_sampling_in_graph = gpu_sampling and top_k > 0
+
         for _step in range(max_new_tokens - 1):
             position = context_len - 1  # Position of current token
 
             if use_graph and not graph_ready:
                 # First decode step: capture the graph
-                # Write position to GPU buffer BEFORE capture (not captured)
+                # Write position and random_val to GPU buffers BEFORE capture
                 _update_position_buf(position)
+                if include_sampling_in_graph:
+                    _update_random_val_buf()
 
                 # Disable GC during capture to prevent allocations
                 gc.disable()
@@ -1844,29 +1868,59 @@ class CausalTransformerModel:
                     _inline_decode_step(next_token, position, context_len)
                     # Include get_logits in graph (matmul to pre-allocated buffer)
                     matmul(_decode_buffers.hidden, self._lm_head_t_cache, out=_decode_buffers.logits)
+                    # Include sampling in graph (if top_k > 0)
+                    if include_sampling_in_graph:
+                        sample_topk_to_buf_ptr(
+                            _decode_buffers.logits,
+                            _decode_buffers.sampled_token,
+                            _decode_buffers.random_val,
+                            top_k,
+                            temperature,
+                        )
                     graph.end_capture()
                 finally:
                     gc.enable()
                 graph_ready = True
-                logits = _decode_buffers.logits
-                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes")
+                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes (sampling={'in graph' if include_sampling_in_graph else 'outside'})")
+
+                # Get result
+                if include_sampling_in_graph:
+                    graph.synchronize()
+                    next_token = int(_decode_buffers.sampled_token.to_numpy()[0])
+                else:
+                    logits = _decode_buffers.logits
+                    if gpu_sampling:
+                        next_token = sample_token_gpu(logits, temperature, top_k, top_p)
+                    else:
+                        last_logits = logits.to_numpy()[0]
+                        next_token = sample_token(last_logits, temperature, top_k, top_p)
             elif use_graph and graph_ready:
-                # Subsequent steps: update position buffer, then replay
-                # Position is read from GPU buffer by _ptr kernels
+                # Subsequent steps: update position and random_val buffers, then replay
                 _update_position_buf(position)
+                if include_sampling_in_graph:
+                    _update_random_val_buf()
                 graph.replay()
-                logits = _decode_buffers.logits
+
+                # Get result
+                if include_sampling_in_graph:
+                    graph.synchronize()
+                    next_token = int(_decode_buffers.sampled_token.to_numpy()[0])
+                else:
+                    logits = _decode_buffers.logits
+                    if gpu_sampling:
+                        next_token = sample_token_gpu(logits, temperature, top_k, top_p)
+                    else:
+                        last_logits = logits.to_numpy()[0]
+                        next_token = sample_token(last_logits, temperature, top_k, top_p)
             else:
                 # No graph: use legacy decode step with allocations
                 hidden = self._decode_step_fixed_cache(next_token, position, context_len)
                 logits = self.get_logits(hidden)  # [1, vocab_size]
-
-            if gpu_sampling:
-                # logits shape is [1, vocab_size], sample_token_gpu handles this
-                next_token = sample_token_gpu(logits, temperature, top_k, top_p)
-            else:
-                last_logits = logits.to_numpy()[0]  # [vocab_size]
-                next_token = sample_token(last_logits, temperature, top_k, top_p)
+                if gpu_sampling:
+                    next_token = sample_token_gpu(logits, temperature, top_k, top_p)
+                else:
+                    last_logits = logits.to_numpy()[0]
+                    next_token = sample_token(last_logits, temperature, top_k, top_p)
             tokens.append(next_token)
 
             context_len += 1

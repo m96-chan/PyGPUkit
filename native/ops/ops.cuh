@@ -353,6 +353,30 @@ int sample_multinomial(const GPUArray& logits, float temperature);
 // top_k: number of tokens to consider (> 0)
 int sample_topk(const GPUArray& logits, int top_k, float temperature);
 
+// Top-K sampling (CUDA Graph compatible)
+// Writes result to pre-allocated buffer, no sync/D2H
+// result_buf: pre-allocated int32 buffer [1]
+// random_val: pre-generated random value [0, 1)
+void sample_topk_to_buf(
+    const GPUArray& logits,
+    GPUArray& result_buf,
+    int top_k,
+    float temperature,
+    float random_val
+);
+
+// Top-K sampling with pointer (CUDA Graph replay compatible)
+// random_val is read from GPU buffer, allowing update before replay
+// result_buf: pre-allocated int32 buffer [1]
+// random_val_buf: pre-allocated float32 buffer [1] (updated before replay)
+void sample_topk_to_buf_ptr(
+    const GPUArray& logits,
+    GPUArray& result_buf,
+    const GPUArray& random_val_buf,
+    int top_k,
+    float temperature
+);
+
 // Top-P (Nucleus) sampling
 // Samples from smallest set of tokens whose cumulative probability >= top_p
 // top_p: cumulative probability threshold (0 < p <= 1)

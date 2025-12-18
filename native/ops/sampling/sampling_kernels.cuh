@@ -753,6 +753,80 @@ __global__ void sample_topp_bf16_kernel(
     *result = sampled_idx;
 }
 
+// ============================================================================
+// Top-K Sampling with Pointer-based random_val (CUDA Graph compatible)
+// random_val is read from GPU buffer, allowing update before Graph replay
+// ============================================================================
+
+__global__ void sample_topk_f16_ptr_kernel(
+    const __half* __restrict__ logits,
+    int* __restrict__ result,
+    const float* __restrict__ random_val_ptr,
+    int vocab_size,
+    int top_k,
+    float temperature
+) {
+    extern __shared__ char shared_mem[];
+    float* top_vals = reinterpret_cast<float*>(shared_mem);
+    int* top_idxs = reinterpret_cast<int*>(top_vals + top_k);
+
+    const int tid = threadIdx.x;
+
+    if (tid == 0) {
+        for (int i = 0; i < top_k; i++) {
+            top_vals[i] = -FLT_MAX;
+            top_idxs[i] = 0;
+        }
+    }
+    __syncthreads();
+
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        float val = __half2float(logits[i]) / temperature;
+
+        int min_idx = 0;
+        float min_val = top_vals[0];
+        for (int j = 1; j < top_k; j++) {
+            if (top_vals[j] < min_val) {
+                min_val = top_vals[j];
+                min_idx = j;
+            }
+        }
+
+        if (val > min_val) {
+            atomicExch(&top_vals[min_idx], val);
+            atomicExch(&top_idxs[min_idx], i);
+        }
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        float max_val = top_vals[0];
+        for (int i = 1; i < top_k; i++) {
+            max_val = fmaxf(max_val, top_vals[i]);
+        }
+
+        float sum = 0.0f;
+        for (int i = 0; i < top_k; i++) {
+            sum += expf(top_vals[i] - max_val);
+        }
+
+        // Read random_val from GPU buffer (allows update before Graph replay)
+        float random_val = *random_val_ptr;
+        float threshold = random_val * sum;
+        float cumsum = 0.0f;
+        int sampled_idx = top_idxs[top_k - 1];
+
+        for (int i = 0; i < top_k; i++) {
+            cumsum += expf(top_vals[i] - max_val);
+            if (cumsum >= threshold) {
+                sampled_idx = top_idxs[i];
+                break;
+            }
+        }
+        *result = sampled_idx;
+    }
+}
+
 } // namespace sampling
 } // namespace ops
 } // namespace pygpukit

@@ -183,6 +183,97 @@ int sample_topk(const GPUArray& logits, int top_k, float temperature) {
 }
 
 // ============================================================================
+// Top-K Sampling (CUDA Graph compatible)
+// ============================================================================
+
+void sample_topk_to_buf(
+    const GPUArray& logits,
+    GPUArray& result_buf,
+    int top_k,
+    float temperature,
+    float random_val
+) {
+    if (logits.ndim() != 1 && logits.ndim() != 2) {
+        throw std::runtime_error("sample_topk_to_buf: expected 1D or 2D logits");
+    }
+    if (result_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("sample_topk_to_buf: result_buf must be int32");
+    }
+
+    int vocab_size = (logits.ndim() == 1) ? logits.shape()[0] : logits.shape()[1];
+    top_k = std::min(top_k, vocab_size);
+
+    const int block_size = 256;
+    size_t shared_mem = top_k * (sizeof(float) + sizeof(int));
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (logits.dtype()) {
+        case DataType::Float32:
+            sample_topk_f32_kernel<<<1, block_size, shared_mem, stream>>>(
+                static_cast<const float*>(logits.data()),
+                static_cast<int*>(result_buf.data()),
+                vocab_size, top_k, temperature, random_val);
+            break;
+        case DataType::Float16:
+            sample_topk_f16_kernel<<<1, block_size, shared_mem, stream>>>(
+                static_cast<const __half*>(logits.data()),
+                static_cast<int*>(result_buf.data()),
+                vocab_size, top_k, temperature, random_val);
+            break;
+        case DataType::BFloat16:
+            sample_topk_bf16_kernel<<<1, block_size, shared_mem, stream>>>(
+                static_cast<const __nv_bfloat16*>(logits.data()),
+                static_cast<int*>(result_buf.data()),
+                vocab_size, top_k, temperature, random_val);
+            break;
+        default:
+            throw std::runtime_error("sample_topk_to_buf: unsupported dtype");
+    }
+    // No sync - caller is responsible (for CUDA Graph compatibility)
+}
+
+// ============================================================================
+// Top-K Sampling with Pointer (CUDA Graph replay compatible)
+// ============================================================================
+
+void sample_topk_to_buf_ptr(
+    const GPUArray& logits,
+    GPUArray& result_buf,
+    const GPUArray& random_val_buf,
+    int top_k,
+    float temperature
+) {
+    if (logits.ndim() != 1 && logits.ndim() != 2) {
+        throw std::runtime_error("sample_topk_to_buf_ptr: expected 1D or 2D logits");
+    }
+    if (result_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("sample_topk_to_buf_ptr: result_buf must be int32");
+    }
+    if (random_val_buf.dtype() != DataType::Float32) {
+        throw std::runtime_error("sample_topk_to_buf_ptr: random_val_buf must be float32");
+    }
+    if (logits.dtype() != DataType::Float16) {
+        throw std::runtime_error("sample_topk_to_buf_ptr: only float16 logits supported (for now)");
+    }
+
+    int vocab_size = (logits.ndim() == 1) ? logits.shape()[0] : logits.shape()[1];
+    top_k = std::min(top_k, vocab_size);
+
+    const int block_size = 256;
+    size_t shared_mem = top_k * (sizeof(float) + sizeof(int));
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    sample_topk_f16_ptr_kernel<<<1, block_size, shared_mem, stream>>>(
+        static_cast<const __half*>(logits.data()),
+        static_cast<int*>(result_buf.data()),
+        static_cast<const float*>(random_val_buf.data()),
+        vocab_size, top_k, temperature);
+    // No sync - caller is responsible (for CUDA Graph compatibility)
+}
+
+// ============================================================================
 // Top-P (Nucleus) Sampling
 // ============================================================================
 

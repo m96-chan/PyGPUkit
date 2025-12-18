@@ -1898,6 +1898,37 @@ def sample_token_gpu(
     return native.sample_token_gpu(logits_native, temperature, top_k, top_p)
 
 
+def sample_topk_to_buf_ptr(
+    logits: GPUArray,
+    result_buf: GPUArray,
+    random_val_buf: GPUArray,
+    top_k: int,
+    temperature: float,
+) -> None:
+    """Top-K sampling with pointer (CUDA Graph replay compatible).
+
+    Reads random_val from GPU buffer, allowing update before Graph replay.
+    Result is written to pre-allocated buffer (no D2H copy).
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size] (float16 only).
+        result_buf: Pre-allocated int32 buffer [1] for sampled token ID.
+        random_val_buf: Pre-allocated float32 buffer [1] for random value.
+        top_k: Number of top tokens to consider.
+        temperature: Sampling temperature (>0).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    native.sample_topk_to_buf_ptr(
+        logits._get_native(),
+        result_buf._get_native(),
+        random_val_buf._get_native(),
+        top_k,
+        temperature,
+    )
+
+
 def sample_greedy(logits: GPUArray) -> int:
     """Greedy sampling (argmax) from logits on GPU.
 
