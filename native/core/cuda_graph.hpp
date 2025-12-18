@@ -54,10 +54,17 @@ public:
     void end_capture();
 
     /**
-     * Replay the captured graph.
+     * Replay the captured graph (asynchronous).
      * This executes all captured operations with minimal CPU overhead.
+     * Call synchronize() after replay to wait for completion.
      */
     void replay();
+
+    /**
+     * Synchronize the graph's internal stream.
+     * Call this after replay() to wait for the graph execution to complete.
+     */
+    void synchronize();
 
     /**
      * Check if the graph has been captured and is ready for replay.

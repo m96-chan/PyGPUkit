@@ -142,21 +142,22 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
     cudaStream_t capture_stream = internal::get_capture_stream();
     bool is_capturing = (capture_stream != nullptr);
 
-    // Disable cuBLAS during CUDA Graph capture (causes segfault with cuBLAS)
-    // cuBLASLt might work during capture - controlled by PYGPUKIT_CUBLASLT_CAPTURE=1
-    const char* cublaslt_capture_env = std::getenv("PYGPUKIT_CUBLASLT_CAPTURE");
-    bool allow_cublaslt_capture = cublaslt_capture_env &&
-        (cublaslt_capture_env[0] == '1' || cublaslt_capture_env[0] == 'y' || cublaslt_capture_env[0] == 'Y');
-
     // Use cuBLAS/cuBLASLt for small M (< 16) or when CUTLASS is not compatible
     bool use_cublas_family = !cublas_disabled && (M < 16 || !cutlass_is_compatible(M, N, K));
 
-    // During capture: only use cuBLASLt if explicitly enabled
+    // During CUDA Graph capture:
+    // - cuBLAS causes segfaults, so we MUST use cuBLASLt instead
+    // - cuBLASLt works correctly with graph capture (verified)
+    // - Set PYGPUKIT_NO_CUBLASLT_CAPTURE=1 to disable and fall back to native kernels
     if (is_capturing && use_cublas_family) {
-        if (prefer_cublaslt && allow_cublaslt_capture) {
-            // Use cuBLASLt during capture (experimental)
-        } else {
+        const char* no_cublaslt_capture_env = std::getenv("PYGPUKIT_NO_CUBLASLT_CAPTURE");
+        bool disable_cublaslt_capture = no_cublaslt_capture_env &&
+            (no_cublaslt_capture_env[0] == '1' || no_cublaslt_capture_env[0] == 'y' || no_cublaslt_capture_env[0] == 'Y');
+
+        if (disable_cublaslt_capture) {
             use_cublas_family = false;  // Fall back to native kernels
+        } else {
+            prefer_cublaslt = true;  // Force cuBLASLt during capture (cuBLAS segfaults)
         }
     }
 

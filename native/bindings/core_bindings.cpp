@@ -225,8 +225,12 @@ void init_core_bindings(py::module_& m) {
              "End capturing and create an executable graph.\n"
              "After this call, the graph can be replayed.")
         .def("replay", &CudaGraph::replay,
-             "Replay the captured graph.\n"
-             "Executes all captured operations with minimal CPU overhead.")
+             "Replay the captured graph (asynchronous).\n"
+             "Executes all captured operations with minimal CPU overhead.\n"
+             "Call synchronize() after replay to wait for completion.")
+        .def("synchronize", &CudaGraph::synchronize,
+             "Synchronize the graph's internal stream.\n"
+             "Call this after replay() to wait for the graph execution to complete.")
         .def("reset", &CudaGraph::reset,
              "Reset the graph, freeing all resources.\n"
              "After reset, begin_capture() can be called again.")

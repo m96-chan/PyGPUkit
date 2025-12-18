@@ -161,16 +161,25 @@ void CudaGraph::replay() {
         throw std::runtime_error("Graph not ready - call end_capture() first");
     }
 
-    // Launch the graph
+    // Launch the graph (asynchronous - caller should sync if needed)
     cudaError_t err = cudaGraphLaunch(impl_->graph_exec, impl_->capture_stream);
     if (err != cudaSuccess) {
         throw CudaError(std::string("Failed to launch graph: ") + cudaGetErrorString(err));
     }
+    // NOTE: No synchronization here - caller is responsible for syncing
+    // Use stream.synchronize() or graph.synchronize() when results are needed
+}
 
-    // Synchronize
-    err = cudaStreamSynchronize(impl_->capture_stream);
+void CudaGraph::synchronize() {
+    if (!impl_) {
+        throw std::runtime_error("CudaGraph: invalid state (moved-from object)");
+    }
+    if (impl_->capture_stream == nullptr) {
+        throw std::runtime_error("No stream to synchronize");
+    }
+    cudaError_t err = cudaStreamSynchronize(impl_->capture_stream);
     if (err != cudaSuccess) {
-        throw CudaError(std::string("Failed to synchronize after graph launch: ") + cudaGetErrorString(err));
+        throw CudaError(std::string("Failed to synchronize graph stream: ") + cudaGetErrorString(err));
     }
 }
 
