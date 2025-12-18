@@ -384,6 +384,7 @@ class TransformerConfig:
     num_heads: int = 32
     num_kv_heads: int | None = None  # None = MHA, int = GQA/MQA
     intermediate_size: int | None = None  # None = 4 * hidden_size
+    _head_dim: int | None = None  # None = hidden_size // num_heads (default)
 
     # Architecture choices
     norm_type: Literal["rmsnorm", "layernorm"] = "rmsnorm"
@@ -407,6 +408,8 @@ class TransformerConfig:
 
     @property
     def head_dim(self) -> int:
+        if self._head_dim is not None:
+            return self._head_dim
         return self.hidden_size // self.num_heads
 
     @property
@@ -3039,6 +3042,11 @@ def load_model_from_safetensors(
         intermediate_size = fc1_info.shape[0]
 
     # Build TransformerConfig
+    # Pass head_dim explicitly if it differs from hidden_size // num_heads
+    explicit_head_dim = None
+    if head_dim != hidden_size // num_heads:
+        explicit_head_dim = head_dim
+
     transformer_config = TransformerConfig(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
@@ -3046,6 +3054,7 @@ def load_model_from_safetensors(
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
         intermediate_size=intermediate_size,
+        _head_dim=explicit_head_dim,
         norm_type=spec.norm_type,
         activation=spec.activation,
         use_rope=spec.use_rope,
