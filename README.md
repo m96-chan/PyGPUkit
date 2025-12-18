@@ -33,6 +33,35 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.10
+
+### Dynamic cuBLASLt Loading
+cuBLASLt is now loaded dynamically at runtime, enabling true **driver-only deployment**. No CUDA Toolkit installation required on target machines.
+
+| Feature | Description |
+|---------|-------------|
+| **Dynamic Loading** | `LoadLibrary`/`dlopen` for cuBLASLt DLL |
+| **Descriptor Caching** | GEMM descriptors cached per (M, N, K, dtype) |
+| **2.67x Faster** | 224 matmuls: 395ms → 148ms |
+
+```python
+# Works with just GPU drivers - no CUDA Toolkit needed
+import pygpukit as gk
+C = A @ B  # Uses dynamically-loaded cuBLASLt for small batch sizes
+```
+
+### CUDA Graph Optimizations
+- Eliminated GPU allocations in position/random buffer updates
+- Direct `copy_from_numpy` for H2D transfers during graph replay
+
+### Performance (Qwen3-8B, RTX 3090 Ti)
+| Mode | Throughput |
+|------|------------|
+| Standard decode | 1.85 tok/s |
+| CUDA Graph | 2.12 tok/s |
+
+---
+
 ## What's New in v0.2.9
 
 ### Unified LLM Interface
