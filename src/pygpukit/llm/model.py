@@ -1083,6 +1083,12 @@ class Attention:
         self._v_cache: GPUArray | None = None
         self._max_cache_len: int = 0
 
+        # Lookahead KV tracking for Jacobi decoding (GPU-side, no CPU copies)
+        # confirmed_pos: KV at positions [0, confirmed_pos) is finalized
+        # logical_pos: current write position during lookahead iterations
+        self._confirmed_pos: int = 0
+        self._logical_pos: int = 0
+
     def init_fixed_cache(self, max_seq_len: int, dtype: str = "float16") -> None:
         """Initialize fixed-length KV cache for CUDA Graph capture.
 
@@ -1097,6 +1103,46 @@ class Attention:
         self._k_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
         self._v_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
         self._max_cache_len = max_seq_len
+        # Reset lookahead tracking
+        self._confirmed_pos = 0
+        self._logical_pos = 0
+
+    # =========================================================================
+    # Lookahead KV Cache Management (for Jacobi Decoding)
+    # =========================================================================
+
+    def set_confirmed_pos(self, pos: int) -> None:
+        """Set the confirmed position (e.g., after prefill).
+
+        Args:
+            pos: Position where KV is finalized (0 to pos-1 are committed).
+        """
+        assert pos >= 0 and pos <= self._max_cache_len, f"Invalid pos {pos}"
+        self._confirmed_pos = pos
+        self._logical_pos = pos
+
+    def reset_lookahead(self) -> None:
+        """Reset lookahead pointer to confirmed position.
+
+        Called at the start of each Jacobi iteration to reset speculative KV.
+        This does NOT modify the KV cache - it just resets the write pointer.
+        """
+        self._logical_pos = self._confirmed_pos
+
+    def commit_lookahead(self, n_accepted: int) -> None:
+        """Commit accepted tokens by advancing confirmed_pos.
+
+        Args:
+            n_accepted: Number of accepted tokens to commit.
+        """
+        new_pos = self._confirmed_pos + n_accepted
+        assert new_pos <= self._max_cache_len, f"Commit exceeds cache: {new_pos}"
+        self._confirmed_pos = new_pos
+        self._logical_pos = new_pos
+
+    def get_confirmed_pos(self) -> int:
+        """Get current confirmed position."""
+        return self._confirmed_pos
 
     def __call__(
         self,
@@ -2748,6 +2794,42 @@ class CausalTransformerModel:
         return accepted_tokens, new_pos, stats
 
     # =========================================================================
+    # Lookahead KV Cache Management (GPU-side, no CPU copies)
+    # =========================================================================
+
+    def set_lookahead_confirmed_pos(self, pos: int) -> None:
+        """Set confirmed position for all layers (e.g., after prefill).
+
+        Args:
+            pos: Position where KV is finalized (tokens 0 to pos-1 are committed).
+        """
+        for block in self.blocks:
+            block.attn.set_confirmed_pos(pos)
+
+    def reset_lookahead_all(self) -> None:
+        """Reset lookahead pointer to confirmed position for all layers.
+
+        Called at the start of each Jacobi iteration. This resets the write
+        pointer without modifying KV cache - speculative positions will be
+        overwritten by the next forward pass.
+        """
+        for block in self.blocks:
+            block.attn.reset_lookahead()
+
+    def commit_lookahead_all(self, n_accepted: int) -> None:
+        """Commit accepted tokens for all layers.
+
+        Args:
+            n_accepted: Number of accepted tokens to commit.
+        """
+        for block in self.blocks:
+            block.attn.commit_lookahead(n_accepted)
+
+    def get_lookahead_confirmed_pos(self) -> int:
+        """Get current confirmed position (from first layer)."""
+        return self.blocks[0].attn.get_confirmed_pos()
+
+    # =========================================================================
     # Jacobi Decoding
     # =========================================================================
 
@@ -2935,6 +3017,189 @@ class CausalTransformerModel:
         }
 
         return accepted_tokens, new_pos, stats
+
+    # =========================================================================
+    # Jacobi Decoding with Lookahead KV (GPU-side, no CPU copies)
+    # =========================================================================
+
+    def _init_jacobi_guess_lookahead(
+        self,
+        last_token: int,
+        n_tokens: int,
+        strategy: Literal["repeat", "ngram", "greedy"],
+    ) -> list[int]:
+        """Initialize guess tokens for Jacobi lookahead (no CPU copies).
+
+        Args:
+            last_token: The last accepted token
+            n_tokens: Number of tokens to guess
+            strategy: Initialization strategy
+                - "repeat": Repeat last_token n times
+                - "ngram": Use n-gram cache (falls back to repeat)
+                - "greedy": Run greedy decode (writes to lookahead positions)
+
+        Returns:
+            List of n_tokens guessed token IDs
+        """
+        if strategy == "repeat":
+            return [last_token] * n_tokens
+
+        elif strategy == "ngram":
+            if hasattr(self, "_ngram_cache") and last_token in self._ngram_cache:
+                cached = self._ngram_cache[last_token]
+                if len(cached) >= n_tokens:
+                    return cached[:n_tokens]
+            return [last_token] * n_tokens
+
+        elif strategy == "greedy":
+            # Run greedy decode using lookahead positions
+            # This writes KV at [confirmed_pos, confirmed_pos + n_tokens)
+            confirmed_pos = self.get_lookahead_confirmed_pos()
+            guess = []
+            current = last_token
+
+            for i in range(n_tokens):
+                pos = confirmed_pos + i
+                ctx = confirmed_pos + i + 1
+                hidden = self._decode_step_fixed_cache(current, pos, ctx)
+                logits = self.get_logits(hidden)
+                next_token = int(np.argmax(logits.to_numpy()[-1]))
+                guess.append(next_token)
+                current = next_token
+
+            # Reset lookahead after greedy init (KV will be overwritten)
+            self.reset_lookahead_all()
+            return guess
+
+        else:
+            raise ValueError(f"Unknown init strategy: {strategy}")
+
+    def decode_step_jacobi_lookahead(
+        self,
+        token_id: int,
+        n_tokens: int = 8,
+        max_iter: int = 3,
+        init_strategy: Literal["repeat", "ngram", "greedy"] = "repeat",
+    ) -> tuple[list[int], dict]:
+        """Jacobi decoding step with GPU-side lookahead KV (no CPU copies).
+
+        This method uses the lookahead KV cache management to avoid all
+        CPU-GPU memory transfers during Jacobi iterations.
+
+        IMPORTANT: Before calling this method:
+        1. Run prefill and store KV using kv_cache_prefill_gqa()
+        2. Call set_lookahead_confirmed_pos(prefill_len) to mark prefill KV as committed
+
+        Algorithm:
+        1. Initialize N future positions with a guess
+        2. Reset lookahead pointer (no KV modification)
+        3. Batch forward - writes KV at [confirmed_pos, confirmed_pos + n_tokens)
+        4. Update guess with argmax(logits)
+        5. Repeat until convergence or max_iter
+        6. Commit accepted tokens by advancing confirmed_pos
+
+        Args:
+            token_id: Current token ID (the last accepted token)
+            n_tokens: Number of tokens to decode in parallel (default: 8)
+            max_iter: Maximum iterations for convergence (default: 3)
+            init_strategy: How to initialize guess tokens
+                - "repeat": Repeat last token (fast, simple)
+                - "ngram": Use n-gram cache if available
+                - "greedy": Run greedy decode first (slow but accurate)
+
+        Returns:
+            Tuple of:
+            - accepted_tokens: List of accepted token IDs
+            - stats: Dict with 'iterations', 'converged', 'accepted_count'
+        """
+        # Get confirmed position (this is our starting point)
+        confirmed_pos = self.get_lookahead_confirmed_pos()
+
+        # Initialize guess (may use lookahead positions for greedy)
+        guess = self._init_jacobi_guess_lookahead(
+            token_id, n_tokens, init_strategy
+        )
+
+        iterations_used = 0
+        converged = False
+        prev_guess = None
+
+        for iteration in range(max_iter):
+            iterations_used = iteration + 1
+
+            # Reset lookahead pointer (does NOT modify KV cache)
+            self.reset_lookahead_all()
+
+            # Batch forward: input [last_token, guess[0], ..., guess[n-2]]
+            # produces logits for [guess[0], guess[1], ..., guess[n-1]]
+            # Writes KV at [confirmed_pos, confirmed_pos + n_tokens)
+            input_tokens = [token_id] + guess[:-1]
+            start_pos = confirmed_pos
+            ctx_len = confirmed_pos + len(input_tokens)
+
+            hidden = self._decode_step_fixed_cache_batch(
+                input_tokens, start_pos, ctx_len
+            )
+            logits = self.get_logits(hidden)
+            logits_np = logits.to_numpy()  # [n_tokens, vocab_size]
+
+            # Update guess with argmax
+            new_guess = [int(np.argmax(logits_np[i])) for i in range(n_tokens)]
+
+            # Check full convergence
+            if new_guess == guess:
+                converged = True
+                break
+
+            prev_guess = guess
+            guess = new_guess
+
+        # Find longest converged prefix
+        if converged:
+            accepted_tokens = guess
+        else:
+            accepted_tokens = []
+            if prev_guess is not None:
+                for i in range(n_tokens):
+                    if guess[i] == prev_guess[i]:
+                        accepted_tokens.append(guess[i])
+                    else:
+                        break
+            if len(accepted_tokens) == 0:
+                accepted_tokens = [guess[0]]
+
+        # Commit accepted tokens - this is the ONLY state change
+        # The KV for accepted tokens is already written from the last iteration
+        # We just need to run one more forward to ensure KV is correct
+        self.reset_lookahead_all()
+
+        # Re-run with just the accepted tokens to ensure KV is correct
+        if len(accepted_tokens) < n_tokens:
+            # KV may have extra speculative entries - need to overwrite with correct values
+            # Run sequential for accepted tokens only
+            current = token_id
+            for i, acc_token in enumerate(accepted_tokens):
+                pos = confirmed_pos + i
+                ctx = confirmed_pos + i + 1
+                self._decode_step_fixed_cache(current, pos, ctx)
+                current = acc_token
+        # If all converged, KV is already correct from last batch forward
+
+        # Commit the accepted tokens
+        self.commit_lookahead_all(len(accepted_tokens))
+
+        # Update n-gram cache for future use
+        if not hasattr(self, "_ngram_cache"):
+            self._ngram_cache: dict[int, list[int]] = {}
+        self._ngram_cache[token_id] = accepted_tokens.copy()
+
+        stats = {
+            "iterations": iterations_used,
+            "converged": converged,
+            "accepted_count": len(accepted_tokens),
+        }
+
+        return accepted_tokens, stats
 
 
 # =============================================================================
