@@ -1305,6 +1305,93 @@ class Attention:
 
         return self.o_proj(attn_output)
 
+    def forward_fixed_cache_batch(
+        self,
+        x: GPUArray,
+        start_position: int,
+        context_len: int,
+    ) -> GPUArray:
+        """Forward pass for batch decode using fixed-length KV cache.
+
+        Processes multiple tokens at once for speculative decoding verification.
+        Each query token attends to all KV up to its position (causal masking).
+
+        Args:
+            x: Input tensor [seq_len, hidden_size] - multiple tokens
+            start_position: Starting position for the batch (first token's position)
+            context_len: Total context length after adding this batch
+                        (should equal start_position + seq_len)
+
+        Returns:
+            Output tensor [seq_len, hidden_size]
+        """
+        assert self._k_cache is not None, "Call init_fixed_cache first"
+        seq_len = x.shape[0]
+
+        # Fused QKV projection
+        qkv = self.qkv_proj(x)  # [seq_len, q_dim + k_dim + v_dim]
+
+        # For seq_len > 1, we can't use narrow() because it doesn't handle
+        # strided access for 2D arrays. Split QKV via numpy slicing.
+        # TODO: Add a native batch_narrow kernel for better performance.
+        qkv_np = qkv.to_numpy()  # [seq_len, total_qkv]
+        q_np = qkv_np[:, :self.q_dim]  # [seq_len, q_dim]
+        k_np = qkv_np[:, self.q_dim:self.q_dim + self.k_dim]  # [seq_len, k_dim]
+        v_np = qkv_np[:, self.q_dim + self.k_dim:]  # [seq_len, v_dim]
+
+        q_2d = from_numpy(q_np.astype(qkv_np.dtype))
+        k_2d = from_numpy(k_np.astype(qkv_np.dtype))
+        v_2d = from_numpy(v_np.astype(qkv_np.dtype))
+
+        # Reshape for multi-head: [seq_len, num_heads, head_dim]
+        q = reshape_copy(q_2d, (seq_len, self.num_heads, self.head_dim))
+        k = reshape_copy(k_2d, (seq_len, self.num_kv_heads, self.head_dim))
+        v = reshape_copy(v_2d, (seq_len, self.num_kv_heads, self.head_dim))
+
+        # QK Norm (Qwen3 style)
+        if self.q_norm is not None:
+            q_flat = reshape_copy(q, (seq_len * self.num_heads, self.head_dim))
+            q_normed = self.q_norm(q_flat)
+            q = reshape_copy(q_normed, (seq_len, self.num_heads, self.head_dim))
+        if self.k_norm is not None:
+            k_flat = reshape_copy(k, (seq_len * self.num_kv_heads, self.head_dim))
+            k_normed = self.k_norm(k_flat)
+            k = reshape_copy(k_normed, (seq_len, self.num_kv_heads, self.head_dim))
+
+        # Apply RoPE for multiple positions
+        if self.config.use_rope and self._cos is not None and self._sin is not None:
+            q_dtype_name = q.dtype.name
+            end_pos = start_position + seq_len
+            if q_dtype_name == "float16":
+                cos = from_numpy(self._cos[start_position:end_pos].astype(np.float16))
+                sin = from_numpy(self._sin[start_position:end_pos].astype(np.float16))
+            else:
+                cos = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
+                sin = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
+            rope_inplace(q, k, cos, sin)
+
+        # Update KV cache with batch (use prefill kernel)
+        # k, v: [seq_len, num_kv_heads, head_dim] -> cache: [num_heads, max_seq_len, head_dim]
+        kv_cache_prefill_gqa(k, self._k_cache, self.num_heads, start_position)
+        kv_cache_prefill_gqa(v, self._v_cache, self.num_heads, start_position)
+
+        # Transpose Q for SDPA: [seq_len, num_heads, head_dim] -> [num_heads, seq_len, head_dim]
+        q_t = transpose_3d_021(q)
+
+        # Allocate output buffer
+        attn_out = from_numpy(
+            np.zeros((self.num_heads, seq_len, self.head_dim), dtype=np.float16)
+        )
+
+        # SDPA with causal masking - context_len should equal start_position + seq_len
+        sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
+
+        # Transpose and reshape output: [num_heads, seq_len, head_dim] -> [seq_len, hidden_size]
+        attn_output = transpose_3d_021(attn_out)  # [seq_len, num_heads, head_dim]
+        attn_output = reshape_copy(attn_output, (seq_len, self.num_heads * self.head_dim))
+
+        return self.o_proj(attn_output)
+
 
 # =============================================================================
 # Unified MLP
@@ -2375,6 +2462,54 @@ class CausalTransformerModel:
 
             # Attention with fixed cache
             hidden = block.attn.forward_fixed_cache(hidden, position, context_len)
+            hidden = add(residual, hidden)
+
+            # MLP
+            residual = hidden
+            hidden = block.mlp_norm(hidden)
+            hidden = block.mlp(hidden)
+            hidden = add(residual, hidden)
+
+        # Final norm
+        hidden = self.final_norm(hidden)
+
+        return hidden
+
+    def _decode_step_fixed_cache_batch(
+        self,
+        token_ids: list[int],
+        start_position: int,
+        context_len: int,
+    ) -> GPUArray:
+        """Batch decode step using fixed-length KV cache.
+
+        Processes multiple tokens at once for speculative decoding verification.
+
+        Args:
+            token_ids: List of token IDs to decode [seq_len tokens]
+            start_position: Starting position in sequence (first token's position)
+            context_len: Total context length after adding this batch
+                        (should equal start_position + len(token_ids))
+
+        Returns:
+            Hidden states [seq_len, hidden_size]
+        """
+        # Get token embeddings for batch
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[token_ids]  # [seq_len, hidden_size]
+        hidden = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
+
+        # Transformer blocks with fixed cache (batch)
+        for block in self.blocks:
+            # Pre-norm
+            residual = hidden
+            hidden = block.attn_norm(hidden)
+
+            # Attention with fixed cache (batch)
+            hidden = block.attn.forward_fixed_cache_batch(
+                hidden, start_position, context_len
+            )
             hidden = add(residual, hidden)
 
             # MLP
