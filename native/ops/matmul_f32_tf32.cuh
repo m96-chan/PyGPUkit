@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {
@@ -124,9 +125,9 @@ __global__ void sgemm_tf32_single_tile_verified(
 
 inline cudaError_t launch_single_tile_verified(
     const float* A, const float* B, float* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     sgemm_tf32_single_tile_verified<<<1, 32, 0, stream>>>(A, B, C, M, N, K);
     return cudaGetLastError();
 }
@@ -279,9 +280,9 @@ sgemm_tf32_ampere_kernel(
 
 inline cudaError_t launch_sgemm_tf32(
     const float* A, const float* B, float* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     dim3 block(256);
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
     sgemm_tf32_ampere_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);

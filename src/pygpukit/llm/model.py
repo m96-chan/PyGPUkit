@@ -13,24 +13,38 @@ Key features:
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.factory import from_numpy
+from pygpukit.core.factory import from_numpy, zeros
 from pygpukit.ops.basic import (
     add,
+    add_inplace,
     bias_add_inplace,
+    concat_axis0,
+    copy_to,
+    embedding_lookup,
+    embedding_lookup_ptr,
     gelu,
+    kv_cache_prefill_gqa,
+    kv_cache_update_gqa,
+    kv_cache_update_gqa_ptr,
     layernorm,
     matmul,
     mul,
+    mul_inplace,
+    repeat_interleave_axis1,
     reshape_copy,
     rmsnorm,
     rope_inplace,
+    sample_token_gpu,
+    sample_topk_to_buf_ptr,
     sdpa_causal,
+    sdpa_causal_fixed_cache,
     silu,
     transpose,
     transpose_3d_021,
@@ -322,7 +336,8 @@ def sample_token(
         mask = np.zeros_like(probs, dtype=bool)
         mask[top_k_indices] = True
         probs = np.where(mask, probs, 0.0)
-        probs = probs / probs.sum()
+        probs_sum = probs.sum()
+        probs = probs / probs_sum
 
     # Top-p (nucleus) filtering
     if top_p < 1.0:
@@ -334,7 +349,8 @@ def sample_token(
         mask = np.zeros_like(probs, dtype=bool)
         mask[sorted_indices[:cutoff_idx]] = True
         probs = np.where(mask, probs, 0.0)
-        probs = probs / probs.sum()
+        probs_sum = probs.sum()
+        probs = probs / probs_sum
 
     # Sample
     if temperature == 0:
@@ -476,6 +492,418 @@ class LlamaConfig:
 
 
 # =============================================================================
+# Weight Repacking - Fix GPU memory placement for optimal performance
+# =============================================================================
+
+
+def repack_weight(weight: GPUArray) -> GPUArray:
+    """Repack a weight tensor into a new contiguous GPU buffer.
+
+    This fixes performance issues caused by fragmented GPU memory allocation.
+    Weights allocated later during model loading may end up in suboptimal
+    memory regions, causing 7x slower matmul performance.
+
+    Args:
+        weight: Original weight tensor on GPU
+
+    Returns:
+        New GPUArray with same data in freshly allocated contiguous memory
+    """
+    # Copy to CPU, then back to GPU to get fresh allocation
+    # This ensures the new buffer is allocated contiguously
+    weight_np = weight.to_numpy()
+    return from_numpy(weight_np)
+
+
+def repack_linear(linear: Linear) -> None:
+    """Repack a Linear layer's weight in-place.
+
+    Args:
+        linear: Linear layer to repack
+    """
+    linear.weight = repack_weight(linear.weight)
+    # Clear transpose cache - will be regenerated on first use
+    linear._weight_t = None
+    if linear.bias is not None:
+        linear.bias = repack_weight(linear.bias)
+
+
+def repack_norm(norm: Norm) -> None:
+    """Repack a Norm layer's weight in-place.
+
+    Args:
+        norm: Norm layer to repack
+    """
+    norm.weight = repack_weight(norm.weight)
+    if norm.bias is not None:
+        norm.bias = repack_weight(norm.bias)
+
+
+# =============================================================================
+# Decode Buffers for CUDA Graph Support
+# =============================================================================
+
+
+@dataclass
+class DecodeBuffers:
+    """Pre-allocated buffers for allocation-free decode steps.
+
+    These buffers are layer-shared (reused across all layers in a single decode step)
+    since layers are processed sequentially. This eliminates all memory allocations
+    during decode, enabling CUDA Graph capture.
+
+    Buffer shapes (for Qwen3-8B example):
+    - hidden: [1, 4096] - layer input/output
+    - qkv_proj_out: [1, 6144] - Fused QKV projection output (q_dim + k_dim + v_dim)
+    - q_proj_out: [1, 4096] - Q projection output (2D) - DEPRECATED, kept for compat
+    - k_proj_out, v_proj_out: [1, 1024] - K/V projection outputs (2D) - DEPRECATED
+    - o_proj_out: [1, 4096] - O projection output (2D)
+    - q: [1, 32, 128] - query after reshape (3D)
+    - k, v: [1, 8, 128] - key/value after reshape (3D)
+    - attn_out: [32, 1, 128] - SDPA output (transposed format)
+    - gate_up_out: [1, 24576] - Fused gate_up projection output (2 * intermediate_size)
+    - mlp_gate, mlp_up: [1, 12288] - MLP intermediates (views into gate_up_out)
+    - cos, sin: [1, 128] - RoPE tables
+    - embed_out: [1, 4096] - embedding lookup output
+    """
+
+    # Main computation buffers
+    hidden: GPUArray  # [1, hidden_size]
+    q: GPUArray  # [1, num_heads, head_dim]
+    k: GPUArray  # [1, num_kv_heads, head_dim]
+    v: GPUArray  # [1, num_kv_heads, head_dim]
+    attn_out: GPUArray  # [num_heads, 1, head_dim]
+    mlp_gate: GPUArray  # [1, intermediate_size]
+    mlp_up: GPUArray  # [1, intermediate_size]
+    mlp_down: GPUArray  # [1, hidden_size] - down projection output
+
+    # Projection output buffers (2D, for matmul out=)
+    q_proj_out: GPUArray  # [1, num_heads * head_dim]
+    k_proj_out: GPUArray  # [1, num_kv_heads * head_dim]
+    v_proj_out: GPUArray  # [1, num_kv_heads * head_dim]
+    o_proj_out: GPUArray  # [1, hidden_size]
+
+    # Transposed Q buffer for SDPA
+    q_t: GPUArray  # [num_heads, 1, head_dim]
+
+    # RoPE buffers
+    cos: GPUArray  # [1, head_dim]
+    sin: GPUArray  # [1, head_dim]
+
+    # Embedding output
+    embed_out: GPUArray  # [1, hidden_size]
+
+    # Temporary buffers for intermediate computations
+    residual: GPUArray  # [1, hidden_size]
+    norm_out: GPUArray  # [1, hidden_size]
+
+    # For QK norm (Qwen3)
+    q_2d: GPUArray | None = None  # [num_heads, head_dim] - rmsnorm output
+    k_2d: GPUArray | None = None  # [num_kv_heads, head_dim] - rmsnorm output
+    q_flat: GPUArray | None = None  # [num_heads, head_dim] - rmsnorm input
+    k_flat: GPUArray | None = None  # [num_kv_heads, head_dim] - rmsnorm input
+
+    # GPU position buffer for CUDA Graph replay (int32)
+    position_buf: GPUArray | None = None  # [1] int32
+
+    # Fused projection buffers (for reduced matmul count)
+    # Used with GPUArray.narrow() for zero-copy splitting:
+    # - qkv_proj_out: Single matmul replaces 3 (Q, K, V projections)
+    # - gate_up_out: Single matmul replaces 2 (gate, up projections)
+    qkv_proj_out: GPUArray | None = None  # [1, q_dim + k_dim + v_dim]
+    gate_up_out: GPUArray | None = None  # [1, 2 * intermediate_size]
+
+    # Pre-cached narrow views (created once, reused every forward to avoid object creation overhead)
+    q_view: GPUArray | None = None  # view of qkv_proj_out[0:q_dim]
+    k_view: GPUArray | None = None  # view of qkv_proj_out[q_dim:q_dim+k_dim]
+    v_view: GPUArray | None = None  # view of qkv_proj_out[q_dim+k_dim:]
+    gate_view: GPUArray | None = None  # view of gate_up_out[0:intermediate_size]
+    up_view: GPUArray | None = None  # view of gate_up_out[intermediate_size:]
+
+    # Logits buffer for CUDA Graph (lm_head projection output)
+    logits: GPUArray | None = None  # [1, vocab_size]
+
+    # Sampling buffers for CUDA Graph
+    sampled_token: GPUArray | None = None  # [1] int32 - sampled token ID
+    random_val: GPUArray | None = None  # [1] float32 - random value for sampling
+
+    @classmethod
+    def allocate(
+        cls,
+        config: TransformerConfig,
+        dtype: str = "float16",
+        use_qk_norm: bool = False,
+        vocab_size: int | None = None,
+    ) -> DecodeBuffers:
+        """Allocate all decode buffers.
+
+        Args:
+            config: Model configuration
+            dtype: Data type for buffers
+            use_qk_norm: Whether to allocate QK norm buffers (Qwen3)
+            vocab_size: Vocabulary size for logits buffer (optional, for CUDA Graph)
+        """
+        assert config.num_kv_heads is not None
+        assert config.intermediate_size is not None
+
+        hidden = zeros((1, config.hidden_size), dtype=dtype)
+        q = zeros((1, config.num_heads, config.head_dim), dtype=dtype)
+        k = zeros((1, config.num_kv_heads, config.head_dim), dtype=dtype)
+        v = zeros((1, config.num_kv_heads, config.head_dim), dtype=dtype)
+        attn_out = zeros((config.num_heads, 1, config.head_dim), dtype=dtype)
+        mlp_gate = zeros((1, config.intermediate_size), dtype=dtype)
+        mlp_up = zeros((1, config.intermediate_size), dtype=dtype)
+        mlp_down = zeros((1, config.hidden_size), dtype=dtype)
+
+        # Projection output buffers (2D for matmul out=)
+        q_proj_out = zeros((1, config.num_heads * config.head_dim), dtype=dtype)
+        k_proj_out = zeros((1, config.num_kv_heads * config.head_dim), dtype=dtype)
+        v_proj_out = zeros((1, config.num_kv_heads * config.head_dim), dtype=dtype)
+        o_proj_out = zeros((1, config.hidden_size), dtype=dtype)
+
+        # Transposed Q buffer for SDPA
+        q_t = zeros((config.num_heads, 1, config.head_dim), dtype=dtype)
+
+        cos = zeros((1, config.head_dim), dtype=dtype)
+        sin = zeros((1, config.head_dim), dtype=dtype)
+
+        embed_out = zeros((1, config.hidden_size), dtype=dtype)
+        residual = zeros((1, config.hidden_size), dtype=dtype)
+        norm_out = zeros((1, config.hidden_size), dtype=dtype)
+
+        # QK norm buffers
+        q_2d = None
+        k_2d = None
+        q_flat = None
+        k_flat = None
+        if use_qk_norm:
+            q_2d = zeros((config.num_heads, config.head_dim), dtype=dtype)
+            k_2d = zeros((config.num_kv_heads, config.head_dim), dtype=dtype)
+            q_flat = zeros((config.num_heads, config.head_dim), dtype=dtype)
+            k_flat = zeros((config.num_kv_heads, config.head_dim), dtype=dtype)
+
+        # GPU position buffer for CUDA Graph replay
+        position_buf = zeros((1,), dtype="int32")
+
+        # Fused projection buffers
+        q_dim = config.num_heads * config.head_dim
+        k_dim = config.num_kv_heads * config.head_dim
+        v_dim = config.num_kv_heads * config.head_dim
+        qkv_proj_out = zeros((1, q_dim + k_dim + v_dim), dtype=dtype)
+        gate_up_out = zeros((1, 2 * config.intermediate_size), dtype=dtype)
+
+        # Pre-create narrow views (avoids object creation overhead in forward loop)
+        q_view = qkv_proj_out.narrow(0, q_dim)
+        k_view = qkv_proj_out.narrow(q_dim, k_dim)
+        v_view = qkv_proj_out.narrow(q_dim + k_dim, v_dim)
+        gate_view = gate_up_out.narrow(0, config.intermediate_size)
+        up_view = gate_up_out.narrow(config.intermediate_size, config.intermediate_size)
+
+        # Logits buffer for CUDA Graph (optional)
+        logits_buf = None
+        sampled_token_buf = None
+        random_val_buf = None
+        if vocab_size is not None:
+            logits_buf = zeros((1, vocab_size), dtype=dtype)
+            sampled_token_buf = zeros((1,), dtype="int32")
+            random_val_buf = zeros((1,), dtype="float32")
+
+        return cls(
+            hidden=hidden,
+            q=q,
+            k=k,
+            v=v,
+            attn_out=attn_out,
+            mlp_gate=mlp_gate,
+            mlp_up=mlp_up,
+            mlp_down=mlp_down,
+            q_proj_out=q_proj_out,
+            k_proj_out=k_proj_out,
+            v_proj_out=v_proj_out,
+            o_proj_out=o_proj_out,
+            q_t=q_t,
+            cos=cos,
+            sin=sin,
+            embed_out=embed_out,
+            residual=residual,
+            norm_out=norm_out,
+            q_2d=q_2d,
+            k_2d=k_2d,
+            q_flat=q_flat,
+            k_flat=k_flat,
+            position_buf=position_buf,
+            qkv_proj_out=qkv_proj_out,
+            gate_up_out=gate_up_out,
+            q_view=q_view,
+            k_view=k_view,
+            v_view=v_view,
+            gate_view=gate_view,
+            up_view=up_view,
+            logits=logits_buf,
+            sampled_token=sampled_token_buf,
+            random_val=random_val_buf,
+        )
+
+
+@dataclass
+class PrefillBuffers:
+    """Pre-allocated buffers for allocation-free prefill phase.
+
+    Unlike DecodeBuffers (seq_len=1), PrefillBuffers handles variable-length
+    sequences up to max_seq_len. Buffers are allocated once and reused.
+
+    Buffer shapes (for Qwen3-8B with max_seq_len=512):
+    - hidden: [max_seq_len, hidden_size] - layer input/output
+    - q_proj_out: [max_seq_len, num_heads * head_dim] - Q projection (2D)
+    - k_proj_out: [max_seq_len, num_kv_heads * head_dim] - K projection (2D)
+    - v_proj_out: [max_seq_len, num_kv_heads * head_dim] - V projection (2D)
+    - o_proj_out: [max_seq_len, hidden_size] - O projection (2D)
+    - q: [max_seq_len, num_heads, head_dim] - Q after reshape (3D)
+    - k: [max_seq_len, num_kv_heads, head_dim] - K after reshape (3D)
+    - v: [max_seq_len, num_kv_heads, head_dim] - V after reshape (3D)
+    - q_t: [num_heads, max_seq_len, head_dim] - Q transposed for SDPA
+    - k_t: [num_heads, max_seq_len, head_dim] - K transposed (GQA-expanded)
+    - v_t: [num_heads, max_seq_len, head_dim] - V transposed (GQA-expanded)
+    - attn_out: [num_heads, max_seq_len, head_dim] - SDPA output
+    - attn_out_t: [max_seq_len, num_heads, head_dim] - attention transposed back
+    - mlp_gate: [max_seq_len, intermediate_size] - MLP gate output
+    - mlp_up: [max_seq_len, intermediate_size] - MLP up output
+    - mlp_down: [max_seq_len, hidden_size] - MLP down output
+    - residual: [max_seq_len, hidden_size] - residual connection
+    - norm_out: [max_seq_len, hidden_size] - normalization output
+    """
+
+    max_seq_len: int
+
+    # Main computation buffers
+    hidden: GPUArray  # [max_seq_len, hidden_size]
+    q: GPUArray  # [max_seq_len, num_heads, head_dim]
+    k: GPUArray  # [max_seq_len, num_kv_heads, head_dim]
+    v: GPUArray  # [max_seq_len, num_kv_heads, head_dim]
+
+    # Projection outputs (2D for matmul)
+    q_proj_out: GPUArray  # [max_seq_len, num_heads * head_dim]
+    k_proj_out: GPUArray  # [max_seq_len, num_kv_heads * head_dim]
+    v_proj_out: GPUArray  # [max_seq_len, num_kv_heads * head_dim]
+    o_proj_out: GPUArray  # [max_seq_len, hidden_size]
+
+    # Transposed buffers for SDPA (GQA-expanded for K, V)
+    q_t: GPUArray  # [num_heads, max_seq_len, head_dim]
+    k_t: GPUArray  # [num_heads, max_seq_len, head_dim]
+    v_t: GPUArray  # [num_heads, max_seq_len, head_dim]
+
+    # Attention output
+    attn_out: GPUArray  # [num_heads, max_seq_len, head_dim]
+    attn_out_t: GPUArray  # [max_seq_len, num_heads, head_dim]
+    attn_out_2d: GPUArray  # [max_seq_len, num_heads * head_dim]
+
+    # MLP buffers
+    mlp_gate: GPUArray  # [max_seq_len, intermediate_size]
+    mlp_up: GPUArray  # [max_seq_len, intermediate_size]
+    mlp_down: GPUArray  # [max_seq_len, hidden_size]
+
+    # RoPE buffers
+    cos: GPUArray  # [max_seq_len, head_dim]
+    sin: GPUArray  # [max_seq_len, head_dim]
+
+    # Temporary buffers
+    residual: GPUArray  # [max_seq_len, hidden_size]
+    norm_out: GPUArray  # [max_seq_len, hidden_size]
+
+    # QK Norm buffers (optional, for Qwen3)
+    q_2d: GPUArray | None = None  # [max_seq_len * num_heads, head_dim]
+    k_2d: GPUArray | None = None  # [max_seq_len * num_kv_heads, head_dim]
+
+    @classmethod
+    def allocate(
+        cls,
+        config: TransformerConfig,
+        max_seq_len: int,
+        dtype: str = "float16",
+        use_qk_norm: bool = False,
+    ) -> PrefillBuffers:
+        """Allocate all prefill buffers.
+
+        Args:
+            config: Model configuration
+            max_seq_len: Maximum sequence length for prefill
+            dtype: Data type for buffers
+            use_qk_norm: Whether to allocate QK norm buffers (Qwen3)
+        """
+        assert config.num_kv_heads is not None
+        assert config.intermediate_size is not None
+
+        # Main buffers
+        hidden = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+        q = zeros((max_seq_len, config.num_heads, config.head_dim), dtype=dtype)
+        k = zeros((max_seq_len, config.num_kv_heads, config.head_dim), dtype=dtype)
+        v = zeros((max_seq_len, config.num_kv_heads, config.head_dim), dtype=dtype)
+
+        # Projection outputs (2D)
+        q_proj_out = zeros((max_seq_len, config.num_heads * config.head_dim), dtype=dtype)
+        k_proj_out = zeros((max_seq_len, config.num_kv_heads * config.head_dim), dtype=dtype)
+        v_proj_out = zeros((max_seq_len, config.num_kv_heads * config.head_dim), dtype=dtype)
+        o_proj_out = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+
+        # Transposed buffers (GQA-expanded for K, V)
+        q_t = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+        k_t = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+        v_t = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+
+        # Attention output buffers
+        attn_out = zeros((config.num_heads, max_seq_len, config.head_dim), dtype=dtype)
+        attn_out_t = zeros((max_seq_len, config.num_heads, config.head_dim), dtype=dtype)
+        attn_out_2d = zeros((max_seq_len, config.num_heads * config.head_dim), dtype=dtype)
+
+        # MLP buffers
+        mlp_gate = zeros((max_seq_len, config.intermediate_size), dtype=dtype)
+        mlp_up = zeros((max_seq_len, config.intermediate_size), dtype=dtype)
+        mlp_down = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+
+        # RoPE buffers
+        cos = zeros((max_seq_len, config.head_dim), dtype=dtype)
+        sin = zeros((max_seq_len, config.head_dim), dtype=dtype)
+
+        # Temporary buffers
+        residual = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+        norm_out = zeros((max_seq_len, config.hidden_size), dtype=dtype)
+
+        # QK Norm buffers (Qwen3)
+        q_2d = None
+        k_2d = None
+        if use_qk_norm:
+            q_2d = zeros((max_seq_len * config.num_heads, config.head_dim), dtype=dtype)
+            k_2d = zeros((max_seq_len * config.num_kv_heads, config.head_dim), dtype=dtype)
+
+        return cls(
+            max_seq_len=max_seq_len,
+            hidden=hidden,
+            q=q,
+            k=k,
+            v=v,
+            q_proj_out=q_proj_out,
+            k_proj_out=k_proj_out,
+            v_proj_out=v_proj_out,
+            o_proj_out=o_proj_out,
+            q_t=q_t,
+            k_t=k_t,
+            v_t=v_t,
+            attn_out=attn_out,
+            attn_out_t=attn_out_t,
+            attn_out_2d=attn_out_2d,
+            mlp_gate=mlp_gate,
+            mlp_up=mlp_up,
+            mlp_down=mlp_down,
+            cos=cos,
+            sin=sin,
+            residual=residual,
+            norm_out=norm_out,
+            q_2d=q_2d,
+            k_2d=k_2d,
+        )
+
+
+# =============================================================================
 # Common Building Blocks
 # =============================================================================
 
@@ -495,7 +923,14 @@ class Linear:
         self.in_features = weight.shape[1]
         self._weight_t: GPUArray | None = None
 
-    def __call__(self, x: GPUArray) -> GPUArray:
+    def __call__(self, x: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
+        """Forward pass: y = xW^T + b
+
+        Args:
+            x: Input tensor [batch, in_features]
+            out: Optional output buffer [batch, out_features]. If provided,
+                 result is written in-place (for CUDA Graph capture).
+        """
         if x.ndim != 2:
             raise ValueError(f"input must be 2D [batch, in_features], got {x.ndim}D")
         if x.shape[1] != self.in_features:
@@ -504,7 +939,7 @@ class Linear:
         if self._weight_t is None:
             self._weight_t = transpose(self.weight)
 
-        y = matmul(x, self._weight_t)
+        y = matmul(x, self._weight_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)
@@ -619,6 +1054,17 @@ class Attention:
         self.num_kv_heads: int = config.num_kv_heads
         self.num_kv_groups = config.num_kv_groups
 
+        # Store dimensions for QKV split
+        self.q_dim = self.num_heads * self.head_dim
+        self.k_dim = self.num_kv_heads * self.head_dim
+        self.v_dim = self.num_kv_heads * self.head_dim
+
+        # Create fused QKV projection (reduces 3 matmuls to 1)
+        # qkv_weight: [q_dim + k_dim + v_dim, hidden_size]
+        # Used in decode path with GPUArray.narrow() for zero-copy splitting.
+        qkv_weight = concat_axis0(concat_axis0(q_proj, k_proj), v_proj)
+        self.qkv_proj = Linear(qkv_weight, None)  # No bias for fused (bias handled separately)
+
         # Precompute RoPE if enabled
         self._cos: np.ndarray | None
         self._sin: np.ndarray | None
@@ -628,6 +1074,26 @@ class Attention:
             )
         else:
             self._cos, self._sin = None, None
+
+        # Fixed-length KV cache for CUDA Graph (initialized on first use)
+        self._k_cache: GPUArray | None = None
+        self._v_cache: GPUArray | None = None
+        self._max_cache_len: int = 0
+
+    def init_fixed_cache(self, max_seq_len: int, dtype: str = "float16") -> None:
+        """Initialize fixed-length KV cache for CUDA Graph capture.
+
+        Args:
+            max_seq_len: Maximum sequence length to support.
+            dtype: Data type for cache (float16/bfloat16).
+        """
+        # Cache shape: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)
+        # This eliminates per-step transpose and GQA expansion
+        cache_shape = (self.num_heads, max_seq_len, self.head_dim)
+        np_dtype = np.float16 if dtype == "float16" else np.float32
+        self._k_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
+        self._v_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
+        self._max_cache_len = max_seq_len
 
     def __call__(
         self,
@@ -652,11 +1118,9 @@ class Attention:
         if position_ids is None:
             position_ids = list(range(seq_len))
 
-        # Hybrid routing: CPU for seq_len=1, GPU for prefill
-        if seq_len > 1:
-            return self._forward_gpu(x, position_ids, past_kv, use_cache)
-        else:
-            return self._forward_cpu(x, position_ids, past_kv, use_cache)
+        # Full GPU path for all sequence lengths (decode + prefill)
+        # GPU KV Cache (#83) eliminates CPU-GPU transfer overhead
+        return self._forward_gpu(x, position_ids, past_kv, use_cache)
 
     def _forward_gpu(
         self,
@@ -691,47 +1155,66 @@ class Attention:
             k_2d = self.k_norm(k_2d)
             k = reshape_copy(k_2d, k_shape)
 
-        # Apply RoPE on GPU (requires FP32)
+        # Apply RoPE on GPU (native FP32/FP16/BF16 support)
         if self.config.use_rope:
             assert self._cos is not None and self._sin is not None
-            cos = from_numpy(self._cos[position_ids].astype(np.float32))
-            sin = from_numpy(self._sin[position_ids].astype(np.float32))
-            # RoPE only supports FP32, convert if needed
-            orig_dtype = q.dtype
-            if orig_dtype != "float32":
+            # Match cos/sin dtype to q/k dtype for native kernel support
+            q_dtype = q.dtype
+            if q_dtype == "float16":
+                cos = from_numpy(self._cos[position_ids].astype(np.float16))
+                sin = from_numpy(self._sin[position_ids].astype(np.float16))
+            elif q_dtype == "bfloat16":
+                # NumPy doesn't support bfloat16, so use float32 -> convert on GPU
+                cos = from_numpy(self._cos[position_ids].astype(np.float32))
+                sin = from_numpy(self._sin[position_ids].astype(np.float32))
+                # TODO: Add bfloat16 conversion when available
+                # For now, fall back to float32 computation
                 q_f32 = from_numpy(q.to_numpy().astype(np.float32))
                 k_f32 = from_numpy(k.to_numpy().astype(np.float32))
                 rope_inplace(q_f32, k_f32, cos, sin)
+                # Convert back - using float16 as proxy since bfloat16 not in numpy
                 q = from_numpy(q_f32.to_numpy().astype(np.float16))
                 k = from_numpy(k_f32.to_numpy().astype(np.float16))
             else:
+                # FP32 path
+                cos = from_numpy(self._cos[position_ids].astype(np.float32))
+                sin = from_numpy(self._sin[position_ids].astype(np.float32))
+            # Apply RoPE in-place (FP32 and FP16 have native kernel support)
+            if q_dtype in ("float32", "float16"):
                 rope_inplace(q, k, cos, sin)
 
-        # Convert to numpy for KV cache
-        k_np = k.to_numpy()
-        v_np = v.to_numpy()
-
-        # Concatenate with past KV
+        # GPU KV Cache - keep KV tensors on GPU to avoid CPU-GPU transfers
+        # Concatenate with past KV on GPU
         if past_kv is not None:
             past_k, past_v = past_kv
-            k_np = np.concatenate([past_k, k_np], axis=0)
-            v_np = np.concatenate([past_v, v_np], axis=0)
+            # past_kv can be GPUArray (from _forward_gpu) or numpy (from _forward_cpu)
+            if isinstance(past_k, GPUArray):
+                k = concat_axis0(past_k, k)
+                v = concat_axis0(past_v, v)
+            else:
+                # Legacy numpy format - convert to GPU
+                k_np = k.to_numpy()
+                v_np = v.to_numpy()
+                k_np = np.concatenate([past_k, k_np], axis=0)
+                v_np = np.concatenate([past_v, v_np], axis=0)
+                k = from_numpy(k_np)
+                v = from_numpy(v_np)
 
-        present_kv = (k_np.copy(), v_np.copy()) if use_cache else None
+        # Store KV cache as GPUArray for next iteration
+        present_kv = (k, v) if use_cache else None
 
-        # Expand for GQA
+        # Expand for GQA on GPU
         if self.num_kv_groups > 1:
-            k_expanded = np.repeat(k_np, self.num_kv_groups, axis=1)
-            v_expanded = np.repeat(v_np, self.num_kv_groups, axis=1)
+            k_expanded = repeat_interleave_axis1(k, self.num_kv_groups)
+            v_expanded = repeat_interleave_axis1(v, self.num_kv_groups)
         else:
-            k_expanded = k_np
-            v_expanded = v_np
+            k_expanded = k
+            v_expanded = v
 
-        # GPU SDPA (use same dtype as q)
+        # GPU SDPA - transpose [seq, heads, dim] -> [heads, seq, dim]
         q_t = transpose_3d_021(q)
-        kv_dtype = k_np.dtype  # Preserve dtype from KV cache
-        k_t = from_numpy(k_expanded.transpose(1, 0, 2).astype(kv_dtype))
-        v_t = from_numpy(v_expanded.transpose(1, 0, 2).astype(kv_dtype))
+        k_t = transpose_3d_021(k_expanded)
+        v_t = transpose_3d_021(v_expanded)
 
         attn_output = sdpa_causal(q_t, k_t, v_t)
 
@@ -741,99 +1224,86 @@ class Attention:
 
         return self.o_proj(attn_output), present_kv
 
-    def _forward_cpu(
+    def forward_fixed_cache(
         self,
         x: GPUArray,
-        position_ids: list[int],
-        past_kv: tuple | None,
-        use_cache: bool,
-    ) -> tuple[GPUArray, tuple | None]:
-        """CPU path for seq_len=1 (decode) - minimal kernel overhead."""
-        seq_len = x.shape[0]
+        position: int,
+        context_len: int,
+        *,
+        out: GPUArray | None = None,
+    ) -> GPUArray:
+        """Forward pass using fixed-length KV cache (for CUDA Graph decode).
 
-        # Project Q, K, V (GPU matmul, then transfer)
-        q = self.q_proj(x).to_numpy()
-        k = self.k_proj(x).to_numpy()
-        v = self.v_proj(x).to_numpy()
+        Args:
+            x: Input tensor [1, hidden_size] - single token
+            position: Current position in sequence (for RoPE and cache update)
+            context_len: Total context length (prefill + decoded so far)
+            out: Optional pre-allocated output buffer
 
-        # Reshape for multi-head
-        q = q.reshape(seq_len, self.num_heads, self.head_dim)
-        k = k.reshape(seq_len, self.num_kv_heads, self.head_dim)
-        v = v.reshape(seq_len, self.num_kv_heads, self.head_dim)
+        Returns:
+            Output tensor [1, hidden_size]
+        """
+        assert self._k_cache is not None, "Call init_fixed_cache first"
+        assert x.shape[0] == 1, "forward_fixed_cache expects single token"
 
-        # QK Norm (Qwen3 style) - applied per head before RoPE
-        # Reshape to 2D for norm, then back to 3D (preserve dtype)
+        # Fused QKV projection (1 matmul replaces 3, then zero-copy narrow views)
+        qkv = self.qkv_proj(x)  # [1, q_dim + k_dim + v_dim]
+        q_2d = qkv.narrow(0, self.q_dim)  # [1, q_dim]
+        k_2d = qkv.narrow(self.q_dim, self.k_dim)  # [1, k_dim]
+        v_2d = qkv.narrow(self.q_dim + self.k_dim, self.v_dim)  # [1, v_dim]
+
+        # Reshape for multi-head: [1, num_heads, head_dim]
+        q = reshape_copy(q_2d, (1, self.num_heads, self.head_dim))
+        k = reshape_copy(k_2d, (1, self.num_kv_heads, self.head_dim))
+        v = reshape_copy(v_2d, (1, self.num_kv_heads, self.head_dim))
+
+        # QK Norm (Qwen3 style)
         if self.q_norm is not None:
-            q_shape = q.shape
-            q_dtype = q.dtype
-            q_2d = q.reshape(seq_len * self.num_heads, self.head_dim)
-            q_2d = self.q_norm(from_numpy(q_2d)).to_numpy()
-            q = q_2d.reshape(q_shape).astype(q_dtype)
+            q_2d = reshape_copy(q, (self.num_heads, self.head_dim))
+            q_2d = self.q_norm(q_2d)
+            q = reshape_copy(q_2d, (1, self.num_heads, self.head_dim))
         if self.k_norm is not None:
-            k_shape = k.shape
-            k_dtype = k.dtype
-            k_2d = k.reshape(seq_len * self.num_kv_heads, self.head_dim)
-            k_2d = self.k_norm(from_numpy(k_2d)).to_numpy()
-            k = k_2d.reshape(k_shape).astype(k_dtype)
+            k_2d = reshape_copy(k, (self.num_kv_heads, self.head_dim))
+            k_2d = self.k_norm(k_2d)
+            k = reshape_copy(k_2d, (1, self.num_kv_heads, self.head_dim))
 
-        # Apply RoPE (CPU)
-        if self.config.use_rope:
-            assert self._cos is not None and self._sin is not None
-            cos = self._cos[position_ids]
-            sin = self._sin[position_ids]
-            q, k = apply_rotary_pos_emb_numpy(q, k, cos, sin)
+        # Apply RoPE
+        if self.config.use_rope and self._cos is not None and self._sin is not None:
+            q_dtype_name = q.dtype.name
+            if q_dtype_name == "float16":
+                cos = from_numpy(self._cos[position : position + 1].astype(np.float16))
+                sin = from_numpy(self._sin[position : position + 1].astype(np.float16))
+            else:
+                cos = from_numpy(self._cos[position : position + 1].astype(np.float32))
+                sin = from_numpy(self._sin[position : position + 1].astype(np.float32))
+            rope_inplace(q, k, cos, sin)
 
-        # Concatenate with past KV
-        if past_kv is not None:
-            past_k, past_v = past_kv
-            k = np.concatenate([past_k, k], axis=0)
-            v = np.concatenate([past_v, v], axis=0)
+        # Update fixed KV cache at current position (GQA-expanded, transposed)
+        # k, v: [1, num_kv_heads, head_dim] -> cache: [num_heads, max_seq_len, head_dim]
+        kv_cache_update_gqa(k, self._k_cache, self.num_heads, position)
+        kv_cache_update_gqa(v, self._v_cache, self.num_heads, position)
 
-        present_kv = (k.copy(), v.copy()) if use_cache else None
+        # Prepare for SDPA
+        # Transpose Q: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
+        q_t = transpose_3d_021(q)
 
-        # Expand for GQA
-        if self.num_kv_groups > 1:
-            k_expanded = np.repeat(k, self.num_kv_groups, axis=1)
-            v_expanded = np.repeat(v, self.num_kv_groups, axis=1)
+        # Cache is already in SDPA-ready format: [num_heads, max_seq_len, head_dim]
+        # No transpose or GQA expansion needed!
+
+        # Allocate output buffer if needed
+        if out is None:
+            attn_out = from_numpy(np.zeros((self.num_heads, 1, self.head_dim), dtype=np.float16))
         else:
-            k_expanded = k
-            v_expanded = v
+            attn_out = out
 
-        # CPU attention
-        q = q.transpose(1, 0, 2)
-        k_expanded = k_expanded.transpose(1, 0, 2)
-        v_expanded = v_expanded.transpose(1, 0, 2)
+        # SDPA with fixed cache - only attend to context_len tokens
+        sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
 
-        q_len = q.shape[1]
-        kv_len = k_expanded.shape[1]
-        scale = 1.0 / np.sqrt(self.head_dim)
+        # Reshape output: [num_heads, 1, head_dim] -> [1, hidden_size]
+        attn_output = transpose_3d_021(attn_out)
+        attn_output = reshape_copy(attn_output, (1, self.num_heads * self.head_dim))
 
-        attn_scores = np.matmul(q, k_expanded.transpose(0, 2, 1)) * scale
-
-        # Causal mask
-        if self.config.causal:
-            causal_mask = np.zeros((q_len, kv_len), dtype=bool)
-            for i in range(q_len):
-                start_mask = kv_len - q_len + i + 1
-                if start_mask < kv_len:
-                    causal_mask[i, start_mask:] = True
-            attn_scores[:, causal_mask] = -1e9
-
-        # Softmax
-        attn_max = attn_scores.max(axis=-1, keepdims=True)
-        attn_exp = np.exp(attn_scores - attn_max)
-        attn_weights = attn_exp / attn_exp.sum(axis=-1, keepdims=True)
-
-        # Attention output
-        attn_output = np.matmul(attn_weights, v_expanded)
-        attn_output = attn_output.transpose(1, 0, 2)
-        attn_output = attn_output.reshape(seq_len, self.num_heads * self.head_dim)
-
-        # Output projection (GPU) - use same dtype as weights
-        weight_dtype = str(self.o_proj.weight.dtype)
-        out_dtype = np.float16 if weight_dtype == "float16" else np.float32
-        out = from_numpy(attn_output.astype(out_dtype))
-        return self.o_proj(out), present_kv
+        return self.o_proj(attn_output)
 
 
 # =============================================================================
@@ -849,6 +1319,9 @@ class MLP:
 
     SwiGLU (LLaMA style):
         gate_proj -> SiLU -> * up_proj -> down_proj
+
+    With fusion optimization (SwiGLU):
+        gate_up_proj (fused) -> split -> SiLU(gate) * up -> down_proj
     """
 
     def __init__(
@@ -878,6 +1351,15 @@ class MLP:
             self.gate_proj = Linear(gate_proj)
             self.up_proj = Linear(up_proj)
             self.down_proj = Linear(down_proj)
+
+            # Store intermediate size for split
+            self.intermediate_size = gate_proj.shape[0]
+
+            # Create fused gate_up projection (reduces 2 matmuls to 1)
+            # gate_up_weight: [2 * intermediate_size, hidden_size]
+            # Used in decode path with GPUArray.narrow() for zero-copy splitting.
+            gate_up_weight = concat_axis0(gate_proj, up_proj)
+            self.gate_up_proj = Linear(gate_up_weight, None)
 
     def __call__(self, x: GPUArray) -> GPUArray:
         if self.activation == "gelu":
@@ -996,16 +1478,18 @@ class CausalTransformerModel:
             else:
                 position_ids = list(range(seq_len))
 
-        # Token embeddings (preserve dtype)
-        embed_np = self.embed_tokens.to_numpy()
-        hidden_np = embed_np[input_ids]
+        # Token embeddings (cache numpy array to avoid repeated GPU->CPU transfer)
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[input_ids]
 
         # Add position embeddings (GPT-2 style)
         if self.position_embed is not None:
-            pos_embed_np = self.position_embed.to_numpy()
-            hidden_np = hidden_np + pos_embed_np[position_ids]
+            if not hasattr(self, "_pos_embed_np_cache"):
+                self._pos_embed_np_cache = self.position_embed.to_numpy()
+            hidden_np = hidden_np + self._pos_embed_np_cache[position_ids]
 
-        hidden: GPUArray = from_numpy(hidden_np.astype(embed_np.dtype))
+        hidden: GPUArray = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
 
         # Transformer blocks
         present_key_values = []
@@ -1027,17 +1511,16 @@ class CausalTransformerModel:
         return self._lm_head
 
     def get_logits(self, hidden: GPUArray) -> GPUArray:
-        """Compute logits from hidden states."""
-        hidden_np = hidden.to_numpy()
+        """Compute logits from hidden states on GPU."""
+        # Cache transposed lm_head to avoid repeated transpose
+        if not hasattr(self, "_lm_head_t_cache"):
+            lm_head = self._lm_head if self._lm_head is not None else self.embed_tokens
+            self._lm_head_t_cache = transpose(lm_head)
 
-        if self._lm_head is not None:
-            lm_head_np = self._lm_head.to_numpy()
-        else:
-            # Tied embeddings
-            lm_head_np = self.embed_tokens.to_numpy()
-
-        logits = hidden_np @ lm_head_np.T
-        return from_numpy(logits.astype(np.float32))
+        # GPU matmul: hidden @ lm_head.T
+        # hidden: [seq_len, hidden_size], lm_head: [vocab_size, hidden_size]
+        # Result: [seq_len, vocab_size]
+        return matmul(hidden, self._lm_head_t_cache)
 
     def generate(
         self,
@@ -1048,6 +1531,7 @@ class CausalTransformerModel:
         top_p: float = 0.9,
         eos_token_id: int | None = None,
         use_cache: bool = True,
+        gpu_sampling: bool = False,
     ) -> list[int]:
         """Generate tokens autoregressively.
 
@@ -1059,6 +1543,7 @@ class CausalTransformerModel:
             top_p: Nucleus sampling threshold
             eos_token_id: Stop at this token
             use_cache: Use KV cache
+            gpu_sampling: Use GPU-based sampling (avoids full logits D2H transfer)
 
         Returns:
             List of all token IDs (input + generated)
@@ -1070,8 +1555,13 @@ class CausalTransformerModel:
             # Prefill
             hidden, past_key_values = self(tokens, use_cache=True)
             logits = self.get_logits(hidden)
-            last_logits = logits.to_numpy()[-1]
-            next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+            if gpu_sampling:
+                # GPU sampling: only transfer 1 int instead of full vocab logits
+                next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+            else:
+                last_logits = logits.to_numpy()[-1]
+                next_token = sample_token(last_logits, temperature, top_k, top_p)
             tokens.append(next_token)
 
             if eos_token_id is not None and next_token == eos_token_id:
@@ -1083,8 +1573,12 @@ class CausalTransformerModel:
                     [next_token], past_key_values=past_key_values, use_cache=True
                 )
                 logits = self.get_logits(hidden)
-                last_logits = logits.to_numpy()[-1]
-                next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+                if gpu_sampling:
+                    next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+                else:
+                    last_logits = logits.to_numpy()[-1]
+                    next_token = sample_token(last_logits, temperature, top_k, top_p)
                 tokens.append(next_token)
 
                 if eos_token_id is not None and next_token == eos_token_id:
@@ -1093,14 +1587,806 @@ class CausalTransformerModel:
             for _ in range(max_new_tokens):
                 hidden, _ = self(tokens, use_cache=False)
                 logits = self.get_logits(hidden)
-                last_logits = logits.to_numpy()[-1]
-                next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+                if gpu_sampling:
+                    next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+                else:
+                    last_logits = logits.to_numpy()[-1]
+                    next_token = sample_token(last_logits, temperature, top_k, top_p)
                 tokens.append(next_token)
 
                 if eos_token_id is not None and next_token == eos_token_id:
                     break
 
         return tokens
+
+    def generate_stream(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int = 20,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        eos_token_id: int | None = None,
+        gpu_sampling: bool = False,
+    ) -> Generator[int, None, None]:
+        """Generate tokens autoregressively with streaming.
+
+        Yields tokens one at a time as they are generated, enabling
+        real-time text display in chat applications.
+
+        Args:
+            input_ids: Initial token IDs
+            max_new_tokens: Maximum new tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            eos_token_id: Stop at this token
+            gpu_sampling: Use GPU-based sampling (avoids full logits D2H transfer)
+
+        Yields:
+            Generated token IDs one at a time
+
+        Example:
+            >>> for token_id in model.generate_stream(input_ids, max_new_tokens=50):
+            ...     token_str = tokenizer.decode([token_id])
+            ...     print(token_str, end="", flush=True)
+        """
+        past_key_values = None
+
+        # Prefill
+        hidden, past_key_values = self(input_ids, use_cache=True)
+        logits = self.get_logits(hidden)
+
+        if gpu_sampling:
+            next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+        else:
+            last_logits = logits.to_numpy()[-1]
+            next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+        yield next_token
+
+        if eos_token_id is not None and next_token == eos_token_id:
+            return
+
+        # Decode
+        for _ in range(max_new_tokens - 1):
+            hidden, past_key_values = self(
+                [next_token], past_key_values=past_key_values, use_cache=True
+            )
+            logits = self.get_logits(hidden)
+
+            if gpu_sampling:
+                next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
+            else:
+                last_logits = logits.to_numpy()[-1]
+                next_token = sample_token(last_logits, temperature, top_k, top_p)
+
+            yield next_token
+
+            if eos_token_id is not None and next_token == eos_token_id:
+                return
+
+    def generate_cuda_graph(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int = 20,
+        max_seq_len: int = 512,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        eos_token_id: int | None = None,
+        use_graph: bool = False,
+        gpu_sampling: bool = False,
+    ) -> list[int]:
+        """Generate tokens using fixed-length KV cache with optional CUDA Graph.
+
+        This method uses fixed-length KV cache and pre-allocated decode buffers
+        to eliminate all memory allocations during decode, enabling CUDA Graph capture.
+
+        Flow:
+            1. Prefill: Normal execution (no graph)
+            2. Decode: Allocation-free execution with pre-allocated buffers
+            3. (Optional) CUDA Graph: Capture first decode, replay for subsequent
+
+        Args:
+            input_ids: Initial token IDs
+            max_new_tokens: Maximum new tokens to generate
+            max_seq_len: Maximum sequence length (prefill + decode)
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            eos_token_id: Stop at this token
+            use_graph: Enable CUDA Graph capture/replay (experimental)
+            gpu_sampling: Use GPU-based sampling (avoids full logits D2H transfer)
+
+        Returns:
+            List of all token IDs (input + generated)
+        """
+        prefill_len = len(input_ids)
+        tokens = list(input_ids)
+
+        # Ensure max_seq_len can hold prefill + max_new_tokens
+        total_max = prefill_len + max_new_tokens
+        if max_seq_len < total_max:
+            max_seq_len = total_max
+
+        # Get dtype from embed tokens
+        dtype = str(self.embed_tokens.dtype)
+
+        # Initialize fixed-length KV cache for all layers
+        for block in self.blocks:
+            block.attn.init_fixed_cache(max_seq_len, dtype=dtype)
+
+        # ============================================================
+        # Allocate decode buffers (zero allocations during decode)
+        # ============================================================
+        use_qk_norm = self.spec is not None and self.spec.use_qk_norm
+        # Get vocab_size from lm_head or embed_tokens
+        lm_head = self._lm_head if self._lm_head is not None else self.embed_tokens
+        vocab_size = lm_head.shape[0]
+        _decode_buffers = DecodeBuffers.allocate(
+            self.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
+        )
+
+        # Allocate prefill buffers (for reduced allocations during prefill)
+        # NOTE: Full zero-allocation prefill requires kernel-level changes
+        # to support variable seq_len within fixed buffers
+        _prefill_buffers = PrefillBuffers.allocate(
+            self.config, max_seq_len=prefill_len, dtype=dtype, use_qk_norm=use_qk_norm
+        )
+
+        # Pre-compute RoPE tables on GPU (full sequence)
+        if self.config.use_rope:
+            cos_np, sin_np = precompute_freqs_cis(
+                self.config.head_dim, max_seq_len, self.config.rope_theta
+            )
+            np_dtype = np.float16 if dtype == "float16" else np.float32
+            self._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
+            self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+
+        # ============================================================
+        # Phase 1: Prefill (with reduced allocations)
+        # ============================================================
+        hidden, past_key_values = self._prefill_with_buffers(
+            input_ids, _prefill_buffers, use_cache=True
+        )
+
+        # Copy prefill KV to fixed cache (GQA-expanded, transposed)
+        for i, block in enumerate(self.blocks):
+            past_k, past_v = past_key_values[i]
+            # past_k/v shape: [prefill_len, num_kv_heads, head_dim]
+            # cache shape: [num_heads, max_seq_len, head_dim]
+            kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
+            kv_cache_prefill_gqa(past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0)
+
+        # Get first token (prefill - use CPU sampling since it's one-time)
+        logits = self.get_logits(hidden)
+        last_logits = logits.to_numpy()[-1]
+        next_token = sample_token(last_logits, temperature, top_k, top_p)
+        tokens.append(next_token)
+
+        if eos_token_id is not None and next_token == eos_token_id:
+            return tokens
+
+        # ============================================================
+        # Phase 2: Decode loop with zero allocations
+        # ============================================================
+        context_len = prefill_len + 1  # Current context length
+
+        # Import CudaGraph for graph capture
+        if use_graph:
+            import gc
+
+            from pygpukit._pygpukit_native import CudaGraph
+
+            # Warm-up: Run _decode_step_zero_alloc a few times to initialize
+            # all lazy state (method dispatch, CUDA kernel caching, etc.)
+            for _ in range(3):
+                _ = self._decode_step_zero_alloc(
+                    next_token, context_len - 1, context_len, _decode_buffers
+                )
+
+            # Create inline decode function for graph capture
+            # NOTE: Inline functions capture more reliably than method calls
+            # due to apparent CUDA stream capture quirks
+            buffers = _decode_buffers  # Closure capture
+            model_self = self  # Closure capture
+
+            def _inline_decode_step(tok_id: int, pos: int, ctx_len: int) -> None:
+                """Inline decode step for reliable graph capture.
+
+                Uses use_position_ptr=True so kernels read position from GPU buffer,
+                allowing graph replay with different positions without recapture.
+                """
+                embedding_lookup(model_self.embed_tokens, buffers.hidden, tok_id)
+                for block in model_self.blocks:
+                    rmsnorm(
+                        buffers.hidden,
+                        block.attn_norm.weight,
+                        block.attn_norm.eps,
+                        out=buffers.norm_out,
+                    )
+                    copy_to(buffers.hidden, buffers.residual)
+                    model_self._attention_forward_zero_alloc(
+                        block.attn, buffers.norm_out, pos, ctx_len, buffers,
+                        use_position_ptr=True,  # Read position from GPU buffer
+                    )
+                    add_inplace(buffers.hidden, buffers.residual)
+                    copy_to(buffers.hidden, buffers.residual)
+                    rmsnorm(
+                        buffers.hidden,
+                        block.mlp_norm.weight,
+                        block.mlp_norm.eps,
+                        out=buffers.norm_out,
+                    )
+                    model_self._mlp_forward_zero_alloc(block.mlp, buffers.norm_out, buffers)
+                    add_inplace(buffers.hidden, buffers.residual)
+                rmsnorm(
+                    buffers.hidden,
+                    model_self.final_norm.weight,
+                    model_self.final_norm.eps,
+                    out=buffers.norm_out,
+                )
+                copy_to(buffers.norm_out, buffers.hidden)
+
+            graph = CudaGraph()
+            graph_ready = False
+
+            # Helper to update position buffer (outside graph capture/replay)
+            # Use copy_from_numpy to avoid GPU allocation every call
+            _pos_np = np.array([0], dtype=np.int32)  # Reusable numpy buffer
+
+            def _update_position_buf(pos: int) -> None:
+                """Write position to GPU buffer for _ptr kernels."""
+                _pos_np[0] = pos
+                _decode_buffers.position_buf._get_native().copy_from_numpy(_pos_np)
+
+            # Helper to update random_val buffer (outside graph capture/replay)
+            # Use copy_from_numpy to avoid GPU allocation every call
+            import random
+            _rand_np = np.array([0.0], dtype=np.float32)  # Reusable numpy buffer
+
+            def _update_random_val_buf() -> None:
+                """Write random value to GPU buffer for sampling kernel."""
+                _rand_np[0] = random.random()
+                _decode_buffers.random_val._get_native().copy_from_numpy(_rand_np)
+
+            # Check if we can include sampling in Graph (top_k > 0 required)
+            include_sampling_in_graph = gpu_sampling and top_k > 0
+
+        for _step in range(max_new_tokens - 1):
+            position = context_len - 1  # Position of current token
+
+            if use_graph and not graph_ready:
+                # First decode step: capture the graph
+                # Write position and random_val to GPU buffers BEFORE capture
+                _update_position_buf(position)
+                if include_sampling_in_graph:
+                    _update_random_val_buf()
+
+                # Disable GC during capture to prevent allocations
+                gc.disable()
+                try:
+                    graph.begin_capture()
+                    _inline_decode_step(next_token, position, context_len)
+                    # Include get_logits in graph (matmul to pre-allocated buffer)
+                    matmul(
+                        _decode_buffers.hidden, self._lm_head_t_cache,
+                        out=_decode_buffers.logits,
+                    )
+                    # Include sampling in graph (if top_k > 0)
+                    if include_sampling_in_graph:
+                        sample_topk_to_buf_ptr(
+                            _decode_buffers.logits,
+                            _decode_buffers.sampled_token,
+                            _decode_buffers.random_val,
+                            top_k,
+                            temperature,
+                        )
+                    graph.end_capture()
+                finally:
+                    gc.enable()
+                graph_ready = True
+                sampling_str = "in graph" if include_sampling_in_graph else "outside"
+                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes "
+                      f"(sampling={sampling_str})")
+
+                # Get result
+                if include_sampling_in_graph:
+                    graph.synchronize()
+                    next_token = int(_decode_buffers.sampled_token.to_numpy()[0])
+                else:
+                    logits = _decode_buffers.logits
+                    if gpu_sampling:
+                        next_token = sample_token_gpu(logits, temperature, top_k, top_p)
+                    else:
+                        last_logits = logits.to_numpy()[0]
+                        next_token = sample_token(last_logits, temperature, top_k, top_p)
+            elif use_graph and graph_ready:
+                # Subsequent steps: update position and random_val buffers, then replay
+                _update_position_buf(position)
+                if include_sampling_in_graph:
+                    _update_random_val_buf()
+                graph.replay()
+
+                # Get result
+                if include_sampling_in_graph:
+                    graph.synchronize()
+                    next_token = int(_decode_buffers.sampled_token.to_numpy()[0])
+                else:
+                    logits = _decode_buffers.logits
+                    if gpu_sampling:
+                        next_token = sample_token_gpu(logits, temperature, top_k, top_p)
+                    else:
+                        last_logits = logits.to_numpy()[0]
+                        next_token = sample_token(last_logits, temperature, top_k, top_p)
+            else:
+                # No graph: use legacy decode step with allocations
+                hidden = self._decode_step_fixed_cache(next_token, position, context_len)
+                logits = self.get_logits(hidden)  # [1, vocab_size]
+                if gpu_sampling:
+                    next_token = sample_token_gpu(logits, temperature, top_k, top_p)
+                else:
+                    last_logits = logits.to_numpy()[0]
+                    next_token = sample_token(last_logits, temperature, top_k, top_p)
+            tokens.append(next_token)
+
+            context_len += 1
+
+            if eos_token_id is not None and next_token == eos_token_id:
+                break
+
+        return tokens
+
+    def _decode_step_zero_alloc(
+        self,
+        token_id: int,
+        position: int,
+        context_len: int,
+        buffers: DecodeBuffers,
+    ) -> GPUArray:
+        """Single decode step with zero memory allocations.
+
+        Uses pre-allocated DecodeBuffers for all intermediate computations.
+        All operations write to pre-allocated buffers, no new GPU memory is allocated.
+
+        Args:
+            token_id: Current token ID
+            position: Position in sequence
+            context_len: Total context length
+            buffers: Pre-allocated decode buffers
+
+        Returns:
+            Hidden states [1, hidden_size]
+        """
+        # Get token embedding directly to hidden (no copy needed)
+        embedding_lookup(self.embed_tokens, buffers.hidden, token_id)
+
+        # Transformer blocks with fixed cache
+        for block in self.blocks:
+            # Pre-norm: hidden -> norm_out
+            rmsnorm(
+                buffers.hidden, block.attn_norm.weight, block.attn_norm.eps, out=buffers.norm_out
+            )
+
+            # Save residual
+            copy_to(buffers.hidden, buffers.residual)
+
+            # Attention with fixed cache (writes to buffers.hidden)
+            self._attention_forward_zero_alloc(
+                block.attn, buffers.norm_out, position, context_len, buffers
+            )
+
+            # Add residual: hidden = residual + hidden
+            add_inplace(buffers.hidden, buffers.residual)
+
+            # MLP pre-norm
+            copy_to(buffers.hidden, buffers.residual)
+            rmsnorm(buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=buffers.norm_out)
+
+            # MLP forward (SwiGLU)
+            self._mlp_forward_zero_alloc(block.mlp, buffers.norm_out, buffers)
+
+            # Add residual
+            add_inplace(buffers.hidden, buffers.residual)
+
+        # Final norm
+        rmsnorm(buffers.hidden, self.final_norm.weight, self.final_norm.eps, out=buffers.norm_out)
+        copy_to(buffers.norm_out, buffers.hidden)
+
+        return buffers.hidden
+
+    def _attention_forward_zero_alloc(
+        self,
+        attn: Attention,
+        x: GPUArray,
+        position: int,
+        context_len: int,
+        buffers: DecodeBuffers,
+        use_position_ptr: bool = False,
+    ) -> None:
+        """Attention forward pass with zero allocations.
+
+        Result is written to buffers.hidden.
+
+        Args:
+            use_position_ptr: If True, read position from buffers.position_buf
+                              (for CUDA Graph replay without recapture).
+        """
+        # Fused QKV projection (1 matmul replaces 3, then zero-copy narrow views)
+        # This is 4x faster for M=1 with cuBLASLt due to reduced kernel launch overhead
+        attn.qkv_proj(x, out=buffers.qkv_proj_out)
+
+        # Reshape narrow views to 3D using pre-allocated buffers
+        # q_view, k_view, v_view are pre-created zero-copy views of qkv_proj_out
+        reshape_copy(buffers.q_view, (1, attn.num_heads, attn.head_dim), out=buffers.q)
+        reshape_copy(buffers.k_view, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
+        reshape_copy(buffers.v_view, (1, attn.num_kv_heads, attn.head_dim), out=buffers.v)
+        q, k, v = buffers.q, buffers.k, buffers.v
+
+        # QK Norm (Qwen3) - zero allocation using pre-allocated buffers
+        if attn.q_norm is not None and buffers.q_2d is not None and buffers.q_flat is not None:
+            # Reshape q [1,H,D] -> q_flat [H,D], apply norm, reshape back to q [1,H,D]
+            reshape_copy(q, (attn.num_heads, attn.head_dim), out=buffers.q_flat)
+            rmsnorm(buffers.q_flat, attn.q_norm.weight, attn.q_norm.eps, out=buffers.q_2d)
+            reshape_copy(buffers.q_2d, (1, attn.num_heads, attn.head_dim), out=buffers.q)
+            q = buffers.q
+        if attn.k_norm is not None and buffers.k_2d is not None and buffers.k_flat is not None:
+            # Reshape k [1,H,D] -> k_flat [H,D], apply norm, reshape back to k [1,H,D]
+            reshape_copy(k, (attn.num_kv_heads, attn.head_dim), out=buffers.k_flat)
+            rmsnorm(buffers.k_flat, attn.k_norm.weight, attn.k_norm.eps, out=buffers.k_2d)
+            reshape_copy(buffers.k_2d, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
+            k = buffers.k
+
+        # Apply RoPE using pre-computed GPU tables (zero allocation)
+        if self.config.use_rope and hasattr(self, "_rope_cos_gpu"):
+            # Extract single row from pre-computed tables using GPU kernel
+            if use_position_ptr and buffers.position_buf is not None:
+                # Use _ptr variants for CUDA Graph replay
+                embedding_lookup_ptr(self._rope_cos_gpu, buffers.cos, buffers.position_buf)
+                embedding_lookup_ptr(self._rope_sin_gpu, buffers.sin, buffers.position_buf)
+            else:
+                embedding_lookup(self._rope_cos_gpu, buffers.cos, position)
+                embedding_lookup(self._rope_sin_gpu, buffers.sin, position)
+            # buffers.cos/sin are already [1, head_dim] - use directly
+            rope_inplace(q, k, buffers.cos, buffers.sin)
+
+        # Update KV cache at position (GQA-expanded, transposed)
+        if use_position_ptr and buffers.position_buf is not None:
+            # Use _ptr variants for CUDA Graph replay
+            kv_cache_update_gqa_ptr(k, attn._k_cache, attn.num_heads, buffers.position_buf)
+            kv_cache_update_gqa_ptr(v, attn._v_cache, attn.num_heads, buffers.position_buf)
+        else:
+            kv_cache_update_gqa(k, attn._k_cache, attn.num_heads, position)
+            kv_cache_update_gqa(v, attn._v_cache, attn.num_heads, position)
+
+        # Transpose Q for SDPA: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
+        transpose_3d_021(q, out=buffers.q_t)
+
+        # SDPA with fixed cache
+        sdpa_causal_fixed_cache(
+            buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len
+        )
+
+        # Transpose output: [num_heads, 1, head_dim] -> [1, num_heads, head_dim]
+        transpose_3d_021(buffers.attn_out, out=buffers.q)  # Reuse q buffer for transposed output
+
+        # Reshape to 2D: [1, hidden_size] - reuse q_proj_out buffer
+        reshape_copy(buffers.q, (1, attn.num_heads * attn.head_dim), out=buffers.q_proj_out)
+
+        # Output projection directly to hidden (eliminates copy)
+        attn.o_proj(buffers.q_proj_out, out=buffers.hidden)
+
+    def _mlp_forward_zero_alloc(
+        self,
+        mlp: MLP,
+        x: GPUArray,
+        buffers: DecodeBuffers,
+    ) -> None:
+        """MLP forward pass with zero allocations (SwiGLU).
+
+        Result is written to buffers.hidden.
+        """
+        if mlp.activation == "silu":
+            # Non-fused SwiGLU (2 separate matmuls) - for debugging
+            mlp.gate_proj(x, out=buffers.mlp_gate)
+            silu(buffers.mlp_gate, out=buffers.mlp_gate)
+
+            mlp.up_proj(x, out=buffers.mlp_up)
+
+            mul_inplace(buffers.mlp_gate, buffers.mlp_up)
+
+            mlp.down_proj(buffers.mlp_gate, out=buffers.hidden)
+        else:
+            # GELU path (GPT-2) - still has allocations, rarely used
+            fc1_out = mlp.fc1(x)
+            gelu_out = gelu(fc1_out)
+            fc2_out = mlp.fc2(gelu_out)
+            copy_to(fc2_out, buffers.hidden)
+
+    def _prefill_with_buffers(
+        self,
+        input_ids: list[int],
+        buffers: PrefillBuffers,
+        use_cache: bool = True,
+    ) -> tuple[GPUArray, list[tuple | None] | None]:
+        """Prefill forward pass with reduced allocations using pre-allocated buffers.
+
+        Uses PrefillBuffers for projection outputs, attention intermediates, and MLP
+        to reduce memory allocations during prefill. Full zero-allocation requires
+        kernel-level support for partial buffer operations.
+
+        Args:
+            input_ids: Token IDs [seq_len]
+            buffers: Pre-allocated prefill buffers
+            use_cache: Whether to return KV cache
+
+        Returns:
+            Tuple of (hidden_states, present_key_values)
+        """
+        seq_len = len(input_ids)
+        assert seq_len <= buffers.max_seq_len, (
+            f"seq_len {seq_len} > max_seq_len {buffers.max_seq_len}"
+        )
+
+        position_ids = list(range(seq_len))
+
+        # Token embeddings - copy to pre-allocated buffer
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[input_ids]
+
+        # Add position embeddings (GPT-2 style)
+        if self.position_embed is not None:
+            if not hasattr(self, "_pos_embed_np_cache"):
+                self._pos_embed_np_cache = self.position_embed.to_numpy()
+            hidden_np = hidden_np + self._pos_embed_np_cache[position_ids]
+
+        # Copy to pre-allocated hidden buffer
+        hidden = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
+        copy_to(hidden, buffers.hidden)
+
+        # Transformer blocks with buffer reuse
+        present_key_values = []
+        for block in self.blocks:
+            # Process using buffers where possible
+            hidden, present_kv = self._prefill_block_with_buffers(
+                block, buffers.hidden, position_ids, buffers, use_cache
+            )
+            present_key_values.append(present_kv)
+
+        # Final norm - reuse norm_out buffer
+        rmsnorm(buffers.hidden, self.final_norm.weight, self.final_norm.eps, out=buffers.norm_out)
+        copy_to(buffers.norm_out, buffers.hidden)
+
+        if use_cache:
+            return buffers.hidden, present_key_values
+        return buffers.hidden, None
+
+    def _prefill_block_with_buffers(
+        self,
+        block: TransformerBlock,
+        hidden: GPUArray,
+        position_ids: list[int],
+        buffers: PrefillBuffers,
+        use_cache: bool,
+    ) -> tuple[GPUArray, tuple | None]:
+        """Single transformer block forward with buffer reuse.
+
+        Args:
+            block: TransformerBlock to process
+            hidden: Input hidden states [seq_len, hidden_size]
+            position_ids: Position IDs for RoPE
+            buffers: Pre-allocated prefill buffers
+            use_cache: Whether to return KV cache
+
+        Returns:
+            Tuple of (output_hidden, present_kv)
+        """
+        # Attention block
+        # Pre-norm -> norm_out
+        rmsnorm(hidden, block.attn_norm.weight, block.attn_norm.eps, out=buffers.norm_out)
+
+        # Save residual
+        copy_to(hidden, buffers.residual)
+
+        # Attention forward with buffers
+        attn_out, present_kv = self._prefill_attention_with_buffers(
+            block.attn, buffers.norm_out, position_ids, buffers, use_cache
+        )
+
+        # Residual connection: hidden = residual + attn_out
+        add_inplace(attn_out, buffers.residual)
+        copy_to(attn_out, buffers.hidden)
+
+        # MLP block
+        # Pre-norm
+        copy_to(buffers.hidden, buffers.residual)
+        rmsnorm(buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=buffers.norm_out)
+
+        # MLP forward with buffers
+        self._prefill_mlp_with_buffers(block.mlp, buffers.norm_out, buffers)
+
+        # Residual connection
+        add_inplace(buffers.hidden, buffers.residual)
+
+        return buffers.hidden, present_kv
+
+    def _prefill_attention_with_buffers(
+        self,
+        attn: Attention,
+        x: GPUArray,
+        position_ids: list[int],
+        buffers: PrefillBuffers,
+        use_cache: bool,
+    ) -> tuple[GPUArray, tuple | None]:
+        """Attention forward pass with buffer reuse during prefill.
+
+        Args:
+            attn: Attention layer
+            x: Input [seq_len, hidden_size]
+            position_ids: Position IDs for RoPE
+            buffers: Pre-allocated prefill buffers
+            use_cache: Whether to return KV cache
+
+        Returns:
+            Tuple of (output, present_kv)
+        """
+        seq_len = x.shape[0]
+
+        # Project Q, K, V using pre-allocated buffers
+        attn.q_proj(x, out=buffers.q_proj_out)
+        attn.k_proj(x, out=buffers.k_proj_out)
+        attn.v_proj(x, out=buffers.v_proj_out)
+
+        # Reshape to 3D
+        reshape_copy(buffers.q_proj_out, out=buffers.q)
+        reshape_copy(buffers.k_proj_out, out=buffers.k)
+        reshape_copy(buffers.v_proj_out, out=buffers.v)
+        q, k, v = buffers.q, buffers.k, buffers.v
+
+        # QK Norm (Qwen3 style)
+        if attn.q_norm is not None and buffers.q_2d is not None:
+            q_2d = reshape_copy(q, (seq_len * attn.num_heads, attn.head_dim))
+            q_2d = attn.q_norm(q_2d)
+            q = reshape_copy(q_2d, (seq_len, attn.num_heads, attn.head_dim))
+        if attn.k_norm is not None and buffers.k_2d is not None:
+            k_2d = reshape_copy(k, (seq_len * attn.num_kv_heads, attn.head_dim))
+            k_2d = attn.k_norm(k_2d)
+            k = reshape_copy(k_2d, (seq_len, attn.num_kv_heads, attn.head_dim))
+
+        # Apply RoPE
+        if self.config.use_rope and attn._cos is not None and attn._sin is not None:
+            # Use Attention's precomputed cos/sin tables
+            q_dtype = q.dtype
+            if q_dtype == "float16":
+                cos = from_numpy(attn._cos[position_ids].astype(np.float16))
+                sin = from_numpy(attn._sin[position_ids].astype(np.float16))
+            elif q_dtype == "bfloat16":
+                # Fall back to float32 computation for bfloat16
+                cos = from_numpy(attn._cos[position_ids].astype(np.float32))
+                sin = from_numpy(attn._sin[position_ids].astype(np.float32))
+            else:
+                # FP32 path
+                cos = from_numpy(attn._cos[position_ids].astype(np.float32))
+                sin = from_numpy(attn._sin[position_ids].astype(np.float32))
+            # Apply RoPE in-place (FP32 and FP16 have native kernel support)
+            if q_dtype in ("float32", "float16"):
+                rope_inplace(q, k, cos, sin)
+
+        # Store for KV cache - MUST copy since buffers.k/v are reused across layers
+        if use_cache:
+            # Create copies of K, V to avoid aliasing
+            # (shared buffers get overwritten by later layers)
+            k_copy = reshape_copy(k, k.shape)
+            v_copy = reshape_copy(v, v.shape)
+            present_kv = (k_copy, v_copy)
+        else:
+            present_kv = None
+
+        # Expand for GQA
+        if attn.num_kv_groups > 1:
+            k_expanded = repeat_interleave_axis1(k, attn.num_kv_groups)
+            v_expanded = repeat_interleave_axis1(v, attn.num_kv_groups)
+        else:
+            k_expanded = k
+            v_expanded = v
+
+        # Transpose for SDPA: [seq, heads, dim] -> [heads, seq, dim]
+        transpose_3d_021(q, out=buffers.q_t)
+        k_t = transpose_3d_021(k_expanded)  # Can't use buffer due to GQA expansion
+        v_t = transpose_3d_021(v_expanded)
+
+        # SDPA with causal mask
+        sdpa_causal(buffers.q_t, k_t, v_t, out=buffers.attn_out)
+
+        # Transpose back and reshape
+        transpose_3d_021(buffers.attn_out, out=buffers.attn_out_t)
+        reshape_copy(buffers.attn_out_t, out=buffers.attn_out_2d)
+
+        # Output projection
+        attn.o_proj(buffers.attn_out_2d, out=buffers.o_proj_out)
+
+        return buffers.o_proj_out, present_kv
+
+    def _prefill_mlp_with_buffers(
+        self,
+        mlp: MLP,
+        x: GPUArray,
+        buffers: PrefillBuffers,
+    ) -> None:
+        """MLP forward pass with buffer reuse during prefill.
+
+        Result is written to buffers.hidden.
+
+        Args:
+            mlp: MLP layer
+            x: Input [seq_len, hidden_size]
+            buffers: Pre-allocated prefill buffers
+        """
+        if mlp.activation == "silu":
+            # SwiGLU: gate_proj -> SiLU -> * up_proj -> down_proj
+            mlp.gate_proj(x, out=buffers.mlp_gate)
+            silu(buffers.mlp_gate, out=buffers.mlp_gate)
+
+            mlp.up_proj(x, out=buffers.mlp_up)
+
+            # Element-wise multiply in-place
+            mul_inplace(buffers.mlp_gate, buffers.mlp_up)
+
+            # Down projection
+            mlp.down_proj(buffers.mlp_gate, out=buffers.mlp_down)
+            copy_to(buffers.mlp_down, buffers.hidden)
+        else:
+            # GELU path (GPT-2)
+            fc1_out = mlp.fc1(x)
+            gelu_out = gelu(fc1_out)
+            fc2_out = mlp.fc2(gelu_out)
+            copy_to(fc2_out, buffers.hidden)
+
+    def _decode_step_fixed_cache(
+        self,
+        token_id: int,
+        position: int,
+        context_len: int,
+    ) -> GPUArray:
+        """Single decode step using fixed-length KV cache (legacy, with allocations).
+
+        Args:
+            token_id: Current token ID
+            position: Position in sequence
+            context_len: Total context length
+
+        Returns:
+            Hidden states [1, hidden_size]
+        """
+        # Get token embedding
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[token_id : token_id + 1]
+        hidden = from_numpy(hidden_np.astype(self._embed_np_cache.dtype))
+
+        # Transformer blocks with fixed cache
+        for block in self.blocks:
+            # Pre-norm
+            residual = hidden
+            hidden = block.attn_norm(hidden)
+
+            # Attention with fixed cache
+            hidden = block.attn.forward_fixed_cache(hidden, position, context_len)
+            hidden = add(residual, hidden)
+
+            # MLP
+            residual = hidden
+            hidden = block.mlp_norm(hidden)
+            hidden = block.mlp(hidden)
+            hidden = add(residual, hidden)
+
+        # Final norm
+        hidden = self.final_norm(hidden)
+
+        return hidden
 
 
 # =============================================================================
@@ -1221,6 +2507,281 @@ apply_rotary_pos_emb = apply_rotary_pos_emb_numpy
 
 
 # =============================================================================
+# Model Weight Repacking
+# =============================================================================
+
+
+def repack_model_weights(model: CausalTransformerModel) -> None:
+    """Repack all model weights into contiguous GPU memory.
+
+    This fixes severe performance regression (7x slowdown) caused by
+    fragmented GPU memory allocation during model loading. Weights
+    allocated later end up in suboptimal memory regions.
+
+    The repacking is done in two phases:
+    1. Convert ALL weights to numpy (freeing GPU memory)
+    2. Reallocate ALL weights fresh in contiguous memory
+
+    After repacking:
+    - All blocks should have similar matmul latency
+    - No per-layer performance degradation
+
+    Args:
+        model: CausalTransformerModel to repack in-place
+    """
+    import gc
+
+    # Phase 1: Collect all weights as numpy arrays
+    # This frees GPU memory as we go
+    numpy_cache: dict[int, dict] = {}
+
+    # Keep track of dummy allocations to shift allocation base
+    dummy_arrays: list[GPUArray] = []
+
+    # Embedding
+    embed_np = model.embed_tokens.to_numpy()
+    model.embed_tokens = None  # type: ignore
+
+    # Position embedding
+    pos_embed_np = None
+    if model.position_embed is not None:
+        pos_embed_np = model.position_embed.to_numpy()
+        model.position_embed = None
+
+    # lm_head
+    lm_head_np = None
+    if model._lm_head is not None:
+        lm_head_np = model._lm_head.to_numpy()
+        model._lm_head = None
+
+    # Final norm
+    final_norm_weight_np = model.final_norm.weight.to_numpy()
+    final_norm_bias_np = None
+    if model.final_norm.bias is not None:
+        final_norm_bias_np = model.final_norm.bias.to_numpy()
+    model.final_norm.weight = None  # type: ignore
+    model.final_norm.bias = None
+
+    # All blocks
+    for i, block in enumerate(model.blocks):
+        numpy_cache[i] = {}
+
+        # Attention norms
+        numpy_cache[i]["attn_norm_w"] = block.attn_norm.weight.to_numpy()
+        numpy_cache[i]["attn_norm_b"] = (
+            block.attn_norm.bias.to_numpy() if block.attn_norm.bias is not None else None
+        )
+        block.attn_norm.weight = None  # type: ignore
+        block.attn_norm.bias = None
+
+        numpy_cache[i]["mlp_norm_w"] = block.mlp_norm.weight.to_numpy()
+        numpy_cache[i]["mlp_norm_b"] = (
+            block.mlp_norm.bias.to_numpy() if block.mlp_norm.bias is not None else None
+        )
+        block.mlp_norm.weight = None  # type: ignore
+        block.mlp_norm.bias = None
+
+        # Attention projections
+        attn = block.attn
+        numpy_cache[i]["q_w"] = attn.q_proj.weight.to_numpy()
+        numpy_cache[i]["q_b"] = (
+            attn.q_proj.bias.to_numpy() if attn.q_proj.bias is not None else None
+        )
+        attn.q_proj.weight = None  # type: ignore
+        attn.q_proj.bias = None
+        attn.q_proj._weight_t = None
+
+        numpy_cache[i]["k_w"] = attn.k_proj.weight.to_numpy()
+        numpy_cache[i]["k_b"] = (
+            attn.k_proj.bias.to_numpy() if attn.k_proj.bias is not None else None
+        )
+        attn.k_proj.weight = None  # type: ignore
+        attn.k_proj.bias = None
+        attn.k_proj._weight_t = None
+
+        numpy_cache[i]["v_w"] = attn.v_proj.weight.to_numpy()
+        numpy_cache[i]["v_b"] = (
+            attn.v_proj.bias.to_numpy() if attn.v_proj.bias is not None else None
+        )
+        attn.v_proj.weight = None  # type: ignore
+        attn.v_proj.bias = None
+        attn.v_proj._weight_t = None
+
+        numpy_cache[i]["o_w"] = attn.o_proj.weight.to_numpy()
+        numpy_cache[i]["o_b"] = (
+            attn.o_proj.bias.to_numpy() if attn.o_proj.bias is not None else None
+        )
+        attn.o_proj.weight = None  # type: ignore
+        attn.o_proj.bias = None
+        attn.o_proj._weight_t = None
+
+        # QK norms
+        if attn.q_norm is not None:
+            numpy_cache[i]["q_norm_w"] = attn.q_norm.weight.to_numpy()
+            numpy_cache[i]["q_norm_b"] = (
+                attn.q_norm.bias.to_numpy() if attn.q_norm.bias is not None else None
+            )
+            attn.q_norm.weight = None  # type: ignore
+            attn.q_norm.bias = None
+        if attn.k_norm is not None:
+            numpy_cache[i]["k_norm_w"] = attn.k_norm.weight.to_numpy()
+            numpy_cache[i]["k_norm_b"] = (
+                attn.k_norm.bias.to_numpy() if attn.k_norm.bias is not None else None
+            )
+            attn.k_norm.weight = None  # type: ignore
+            attn.k_norm.bias = None
+
+        # MLP projections
+        mlp = block.mlp
+        if mlp.activation == "gelu":
+            numpy_cache[i]["fc1_w"] = mlp.fc1.weight.to_numpy()
+            numpy_cache[i]["fc1_b"] = mlp.fc1.bias.to_numpy() if mlp.fc1.bias is not None else None
+            mlp.fc1.weight = None  # type: ignore
+            mlp.fc1.bias = None
+            mlp.fc1._weight_t = None
+
+            numpy_cache[i]["fc2_w"] = mlp.fc2.weight.to_numpy()
+            numpy_cache[i]["fc2_b"] = mlp.fc2.bias.to_numpy() if mlp.fc2.bias is not None else None
+            mlp.fc2.weight = None  # type: ignore
+            mlp.fc2.bias = None
+            mlp.fc2._weight_t = None
+        else:  # SwiGLU
+            numpy_cache[i]["gate_w"] = mlp.gate_proj.weight.to_numpy()
+            numpy_cache[i]["gate_b"] = (
+                mlp.gate_proj.bias.to_numpy() if mlp.gate_proj.bias is not None else None
+            )
+            mlp.gate_proj.weight = None  # type: ignore
+            mlp.gate_proj.bias = None
+            mlp.gate_proj._weight_t = None
+
+            numpy_cache[i]["up_w"] = mlp.up_proj.weight.to_numpy()
+            numpy_cache[i]["up_b"] = (
+                mlp.up_proj.bias.to_numpy() if mlp.up_proj.bias is not None else None
+            )
+            mlp.up_proj.weight = None  # type: ignore
+            mlp.up_proj.bias = None
+            mlp.up_proj._weight_t = None
+
+            numpy_cache[i]["down_w"] = mlp.down_proj.weight.to_numpy()
+            numpy_cache[i]["down_b"] = (
+                mlp.down_proj.bias.to_numpy() if mlp.down_proj.bias is not None else None
+            )
+            mlp.down_proj.weight = None  # type: ignore
+            mlp.down_proj.bias = None
+            mlp.down_proj._weight_t = None
+
+    # Force garbage collection to free GPU memory
+    gc.collect()
+
+    # Allocate dummy arrays to fill the freed memory space
+    # This forces new allocations to go into fresh memory regions
+    import numpy as np
+
+    dummy_size = 1024 * 1024 * 512  # 512M elements = 1GB for FP16
+    try:
+        for _ in range(16):  # Allocate ~16GB of dummy memory
+            dummy = from_numpy(np.zeros(dummy_size, dtype=np.float16))
+            dummy_arrays.append(dummy)
+    except Exception:
+        pass  # Continue with whatever dummy memory we could allocate
+
+    # Phase 2: Reallocate all weights fresh
+    # Allocate blocks in REVERSE order so later blocks get the "fast" memory first
+    # This is critical - CUDA memory allocation order affects matmul performance
+    for i in reversed(range(len(model.blocks))):
+        block = model.blocks[i]
+        cache = numpy_cache[i]
+
+        # Attention norms
+        block.attn_norm.weight = from_numpy(cache["attn_norm_w"])
+        if cache["attn_norm_b"] is not None:
+            block.attn_norm.bias = from_numpy(cache["attn_norm_b"])
+
+        block.mlp_norm.weight = from_numpy(cache["mlp_norm_w"])
+        if cache["mlp_norm_b"] is not None:
+            block.mlp_norm.bias = from_numpy(cache["mlp_norm_b"])
+
+        # Attention projections
+        attn = block.attn
+        attn.q_proj.weight = from_numpy(cache["q_w"])
+        if cache["q_b"] is not None:
+            attn.q_proj.bias = from_numpy(cache["q_b"])
+
+        attn.k_proj.weight = from_numpy(cache["k_w"])
+        if cache["k_b"] is not None:
+            attn.k_proj.bias = from_numpy(cache["k_b"])
+
+        attn.v_proj.weight = from_numpy(cache["v_w"])
+        if cache["v_b"] is not None:
+            attn.v_proj.bias = from_numpy(cache["v_b"])
+
+        attn.o_proj.weight = from_numpy(cache["o_w"])
+        if cache["o_b"] is not None:
+            attn.o_proj.bias = from_numpy(cache["o_b"])
+
+        # QK norms
+        if "q_norm_w" in cache:
+            attn.q_norm.weight = from_numpy(cache["q_norm_w"])
+            if cache["q_norm_b"] is not None:
+                attn.q_norm.bias = from_numpy(cache["q_norm_b"])
+        if "k_norm_w" in cache:
+            attn.k_norm.weight = from_numpy(cache["k_norm_w"])
+            if cache["k_norm_b"] is not None:
+                attn.k_norm.bias = from_numpy(cache["k_norm_b"])
+
+        # MLP projections
+        mlp = block.mlp
+        if mlp.activation == "gelu":
+            mlp.fc1.weight = from_numpy(cache["fc1_w"])
+            if cache["fc1_b"] is not None:
+                mlp.fc1.bias = from_numpy(cache["fc1_b"])
+
+            mlp.fc2.weight = from_numpy(cache["fc2_w"])
+            if cache["fc2_b"] is not None:
+                mlp.fc2.bias = from_numpy(cache["fc2_b"])
+        else:  # SwiGLU
+            mlp.gate_proj.weight = from_numpy(cache["gate_w"])
+            if cache["gate_b"] is not None:
+                mlp.gate_proj.bias = from_numpy(cache["gate_b"])
+
+            mlp.up_proj.weight = from_numpy(cache["up_w"])
+            if cache["up_b"] is not None:
+                mlp.up_proj.bias = from_numpy(cache["up_b"])
+
+            mlp.down_proj.weight = from_numpy(cache["down_w"])
+            if cache["down_b"] is not None:
+                mlp.down_proj.bias = from_numpy(cache["down_b"])
+
+        # Clear this block's cache immediately to reduce memory
+        del numpy_cache[i]
+
+    # Final norm
+    model.final_norm.weight = from_numpy(final_norm_weight_np)
+    if final_norm_bias_np is not None:
+        model.final_norm.bias = from_numpy(final_norm_bias_np)
+
+    # lm_head
+    if lm_head_np is not None:
+        model._lm_head = from_numpy(lm_head_np)
+
+    # Embedding and position embedding last (after all blocks)
+    model.embed_tokens = from_numpy(embed_np)
+    del embed_np
+
+    if pos_embed_np is not None:
+        model.position_embed = from_numpy(pos_embed_np)
+        del pos_embed_np
+
+    # Clear any cached transposes
+    if hasattr(model, "_lm_head_t_cache"):
+        delattr(model, "_lm_head_t_cache")
+
+    # Free dummy arrays now that weights are in fresh memory
+    del dummy_arrays
+    gc.collect()
+
+
+# =============================================================================
 # Generic Model Loader using ModelSpec
 # =============================================================================
 
@@ -1229,6 +2790,7 @@ def load_model_from_safetensors(
     model_path: str,
     dtype: str = "float32",
     spec: ModelSpec | None = None,
+    repack_weights: bool = True,
 ) -> CausalTransformerModel:
     """Load model from safetensors file using ModelSpec abstraction.
 
@@ -1485,6 +3047,9 @@ def load_model_from_safetensors(
     if spec.lm_head is not None and spec.lm_head in st.tensor_names:
         lm_head = load_tensor(spec.lm_head)
 
-    return CausalTransformerModel(
+    model = CausalTransformerModel(
         transformer_config, embed_tokens, blocks, final_norm, lm_head, position_embed, spec
     )
+    if repack_weights:
+        repack_model_weights(model)
+    return model

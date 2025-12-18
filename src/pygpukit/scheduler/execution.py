@@ -337,7 +337,10 @@ class AsyncKernelRequest:
         return self._inner.block
 
     def __repr__(self) -> str:
-        return f"AsyncKernelRequest(handle=0x{self.kernel_handle:x}, grid={self.grid}, block={self.block})"
+        return (
+            f"AsyncKernelRequest(handle=0x{self.kernel_handle:x}, "
+            f"grid={self.grid}, block={self.block})"
+        )
 
 
 class KernelFuture:

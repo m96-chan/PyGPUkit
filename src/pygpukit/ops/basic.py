@@ -334,23 +334,39 @@ def _relu_native(a: GPUArray) -> GPUArray:
     return GPUArray._wrap_native(c_native)
 
 
-def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArray:
+def matmul(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+    use_tf32: bool | None = None,
+) -> GPUArray:
     """Matrix multiplication of two 2D arrays.
 
     Args:
         a: First input array (M x K).
         b: Second input array (K x N).
+        out: Optional output array (M x N). If provided, result is written to this
+            array instead of allocating a new one. This enables CUDA Graph capture
+            since no memory allocation occurs during the operation.
         use_tf32: Whether to use TF32 TensorCore acceleration (Ampere+ only).
             - None (default): Use PYGPUKIT_ALLOW_TF32 environment variable
             - True: Force TF32 mode (requires SM >= 80 and float32)
             - False: Force FP32 mode
 
     Returns:
-        A new GPUArray containing the matrix product (M x N).
+        The result GPUArray (M x N). If out is provided, returns out.
 
     Raises:
         ValueError: If arrays are not 2D or dimensions don't match.
         RuntimeError: If use_tf32=True but GPU doesn't support it or dtype is not float32.
+
+    Example:
+        # Allocate new output
+        y = pk.matmul(x, W)
+
+        # Write to existing buffer (for CUDA Graph capture)
+        pk.matmul(x, W, out=y)
     """
     if a.ndim != 2:
         raise ValueError(f"matmul requires 2D arrays, got {a.ndim}D for first argument")
@@ -365,6 +381,14 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
 
     _validate_same_dtype(a, b, "matmul")
 
+    # Validate out array if provided
+    if out is not None:
+        expected_shape = (a.shape[0], b.shape[1])
+        if out.shape != expected_shape:
+            raise ValueError(f"out shape {out.shape} does not match expected {expected_shape}")
+        if out.dtype != a.dtype:
+            raise ValueError(f"out dtype {out.dtype} does not match input dtype {a.dtype}")
+
     # Check TF32 dtype requirement early (before backend dispatch)
     if use_tf32 is True:
         from pygpukit.core.dtypes import float32
@@ -375,25 +399,39 @@ def matmul(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArra
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _matmul_native(a, b, use_tf32=use_tf32)
+        return _matmul_native(a, b, out=out, use_tf32=use_tf32)
     else:
-        return _matmul_cpu(a, b)
+        return _matmul_cpu(a, b, out=out)
 
 
-def _matmul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
+def _matmul_cpu(a: GPUArray, b: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """CPU implementation of matmul."""
     a_np = a.to_numpy()
     b_np = b.to_numpy()
-    result_np = np.matmul(a_np, b_np)
-    return from_numpy(result_np)
+    if out is not None:
+        out_np = out.to_numpy()
+        np.matmul(a_np, b_np, out=out_np)
+        # Copy back to GPU - this is inefficient but CPU backend is for fallback only
+        out._data = from_numpy(out_np)._data
+        return out
+    else:
+        result_np = np.matmul(a_np, b_np)
+        return from_numpy(result_np)
 
 
-def _matmul_native(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) -> GPUArray:
+def _matmul_native(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+    use_tf32: bool | None = None,
+) -> GPUArray:
     """Native C++ CUDA implementation of matmul (zero-copy).
 
     Args:
         a: First input array.
         b: Second input array.
+        out: Optional output array. If provided, result is written in-place.
         use_tf32: Whether to use TF32 TensorCore acceleration.
             None means use environment variable PYGPUKIT_ALLOW_TF32.
     """
@@ -405,16 +443,21 @@ def _matmul_native(a: GPUArray, b: GPUArray, *, use_tf32: bool | None = None) ->
     a_native = a._get_native()
     b_native = b._get_native()
 
-    # Perform operation on GPU
-    if use_tf32 is not None:
-        # Use explicit TF32 control
-        c_native = native.matmul_tf32(a_native, b_native, use_tf32)
+    if out is not None:
+        # In-place operation - write to existing buffer
+        out_native = out._get_native()
+        if use_tf32 is not None:
+            native.matmul_tf32_(a_native, b_native, out_native, use_tf32)
+        else:
+            native.matmul_(a_native, b_native, out_native)
+        return out
     else:
-        # Use environment variable for TF32 control
-        c_native = native.matmul(a_native, b_native)
-
-    # Wrap result (zero-copy)
-    return GPUArray._wrap_native(c_native)
+        # Allocate new output
+        if use_tf32 is not None:
+            c_native = native.matmul_tf32(a_native, b_native, use_tf32)
+        else:
+            c_native = native.matmul(a_native, b_native)
+        return GPUArray._wrap_native(c_native)
 
 
 # ============================================================================
@@ -828,6 +871,8 @@ def rmsnorm(
     input: GPUArray,
     gamma: GPUArray,
     eps: float = 1e-5,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """RMS Normalization (Root Mean Square Normalization).
 
@@ -840,9 +885,11 @@ def rmsnorm(
         input: Input array of shape [batch, features].
         gamma: Scale parameter of shape [features].
         eps: Small epsilon for numerical stability.
+        out: Optional output buffer. If provided, result is written in-place
+            (for CUDA Graph capture).
 
     Returns:
-        A new GPUArray containing the normalized output.
+        A new GPUArray containing the normalized output (or out if provided).
 
     Raises:
         ValueError: If shapes or dtypes don't match.
@@ -860,18 +907,27 @@ def rmsnorm(
     if gamma.shape[0] != features:
         raise ValueError(f"rmsnorm: gamma size {gamma.shape[0]} must match features {features}")
 
+    # Validate out array if provided
+    if out is not None:
+        if out.shape != input.shape:
+            raise ValueError(f"out shape {out.shape} does not match input shape {input.shape}")
+        if out.dtype != input.dtype:
+            raise ValueError(f"out dtype {out.dtype} does not match input dtype {input.dtype}")
+
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _rmsnorm_native(input, gamma, eps)
+        return _rmsnorm_native(input, gamma, eps, out=out)
     else:
-        return _rmsnorm_cpu(input, gamma, eps)
+        return _rmsnorm_cpu(input, gamma, eps, out=out)
 
 
 def _rmsnorm_cpu(
     input: GPUArray,
     gamma: GPUArray,
     eps: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """CPU implementation of rmsnorm."""
     x = input.to_numpy()
@@ -882,6 +938,12 @@ def _rmsnorm_cpu(
 
     # Normalize and scale
     result = (x / rms) * g
+
+    if out is not None:
+        out_np = out.to_numpy()
+        np.copyto(out_np, result)
+        out._data = from_numpy(out_np)._data
+        return out
     return from_numpy(result)
 
 
@@ -889,6 +951,8 @@ def _rmsnorm_native(
     input: GPUArray,
     gamma: GPUArray,
     eps: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """Native C++ CUDA implementation of rmsnorm (zero-copy)."""
     from pygpukit.core.backend import get_native_module
@@ -896,8 +960,14 @@ def _rmsnorm_native(
     native = get_native_module()
     input_native = input._get_native()
     gamma_native = gamma._get_native()
-    c_native = native.rmsnorm(input_native, gamma_native, eps)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.rmsnorm_(input_native, gamma_native, out_native, eps)
+        return out
+    else:
+        c_native = native.rmsnorm(input_native, gamma_native, eps)
+        return GPUArray._wrap_native(c_native)
 
 
 def linear_bias_gelu(
@@ -1007,16 +1077,18 @@ def _linear_bias_gelu_native(
 # ============================================================================
 
 
-def silu(a: GPUArray) -> GPUArray:
+def silu(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """SiLU (Swish) activation: y = x * sigmoid(x).
 
     Used in Llama and other modern LLMs as the activation in MLP layers.
 
     Args:
         a: Input array.
+        out: Optional pre-allocated output array. If provided, the result
+            is written to this array (for CUDA Graph capture support).
 
     Returns:
-        A new GPUArray containing the SiLU-activated values.
+        A new GPUArray containing the SiLU-activated values, or the out array if provided.
 
     Raises:
         ValueError: If dtype is not a float type.
@@ -1026,7 +1098,7 @@ def silu(a: GPUArray) -> GPUArray:
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _silu_native(a)
+        return _silu_native(a, out=out)
     else:
         return _silu_cpu(a)
 
@@ -1039,14 +1111,20 @@ def _silu_cpu(a: GPUArray) -> GPUArray:
     return from_numpy(result)
 
 
-def _silu_native(a: GPUArray) -> GPUArray:
+def _silu_native(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """Native C++ CUDA implementation of SiLU (zero-copy)."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
     a_native = a._get_native()
-    c_native = native.silu(a_native)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.silu_(a_native, out_native)
+        return out
+    else:
+        c_native = native.silu(a_native)
+        return GPUArray._wrap_native(c_native)
 
 
 def sdpa_causal(
@@ -1054,6 +1132,8 @@ def sdpa_causal(
     K: GPUArray,
     V: GPUArray,
     scale: float = 0.0,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """Scaled Dot-Product Attention with causal mask.
 
@@ -1073,6 +1153,8 @@ def sdpa_causal(
         V: Value tensor of shape [n_heads, kv_len, head_dim].
         scale: Scaling factor (typically 1/sqrt(head_dim)).
                If <= 0, computed automatically from head_dim.
+        out: Optional output buffer [n_heads, q_len, head_dim].
+             If provided, result is written in-place (for CUDA Graph capture).
 
     Returns:
         Output tensor of shape [n_heads, q_len, head_dim].
@@ -1101,12 +1183,21 @@ def sdpa_causal(
     if K.shape[1] != V.shape[1]:
         raise ValueError("sdpa_causal: K and V seq_len mismatch")
 
+    # Validate out array if provided
+    if out is not None:
+        if out.shape != (n_heads, q_len, head_dim):
+            raise ValueError(
+                f"out shape {out.shape} does not match expected {(n_heads, q_len, head_dim)}"
+            )
+        if out.dtype != Q.dtype:
+            raise ValueError(f"out dtype {out.dtype} does not match Q dtype {Q.dtype}")
+
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _sdpa_causal_native(Q, K, V, scale)
+        return _sdpa_causal_native(Q, K, V, scale, out=out)
     else:
-        return _sdpa_causal_cpu(Q, K, V, scale)
+        return _sdpa_causal_cpu(Q, K, V, scale, out=out)
 
 
 def _sdpa_causal_cpu(
@@ -1114,6 +1205,8 @@ def _sdpa_causal_cpu(
     K: GPUArray,
     V: GPUArray,
     scale: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """CPU implementation of SDPA with causal mask."""
     q = Q.to_numpy()
@@ -1144,6 +1237,11 @@ def _sdpa_causal_cpu(
     # output: [n_heads, q_len, head_dim]
     output = np.matmul(weights, v)
 
+    if out is not None:
+        out_np = out.to_numpy()
+        np.copyto(out_np, output.astype(q.dtype))
+        out._data = from_numpy(out_np)._data
+        return out
     return from_numpy(output.astype(q.dtype))
 
 
@@ -1152,6 +1250,8 @@ def _sdpa_causal_native(
     K: GPUArray,
     V: GPUArray,
     scale: float,
+    *,
+    out: GPUArray | None = None,
 ) -> GPUArray:
     """Native C++ CUDA implementation of SDPA with causal mask."""
     from pygpukit.core.backend import get_native_module
@@ -1160,8 +1260,50 @@ def _sdpa_causal_native(
     q_native = Q._get_native()
     k_native = K._get_native()
     v_native = V._get_native()
-    c_native = native.sdpa_causal(q_native, k_native, v_native, scale)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.sdpa_causal_(q_native, k_native, v_native, out_native, scale)
+        return out
+    else:
+        c_native = native.sdpa_causal(q_native, k_native, v_native, scale)
+        return GPUArray._wrap_native(c_native)
+
+
+def sdpa_causal_fixed_cache(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    out: GPUArray,
+    context_len: int,
+    scale: float = 0.0,
+) -> None:
+    """SDPA with fixed-length KV cache for CUDA Graph capture.
+
+    This variant is designed for use with pre-allocated KV caches where
+    the buffer size (max_seq_len) is larger than the actual context length.
+
+    Args:
+        Q: Query tensor of shape [n_heads, q_len, head_dim].
+        K: Key cache of shape [n_heads, max_seq_len, head_dim].
+        V: Value cache of shape [n_heads, max_seq_len, head_dim].
+        out: Pre-allocated output buffer [n_heads, q_len, head_dim].
+        context_len: Actual number of valid tokens in KV cache.
+        scale: Scaling factor (typically 1/sqrt(head_dim)).
+               If <= 0, computed automatically from head_dim.
+
+    Raises:
+        ValueError: If shapes or dtypes don't match, or context_len is invalid.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    q_native = Q._get_native()
+    k_native = K._get_native()
+    v_native = V._get_native()
+    out_native = out._get_native()
+
+    native.sdpa_causal_fixed_cache(q_native, k_native, v_native, out_native, context_len, scale)
 
 
 def rope_inplace(
@@ -1358,7 +1500,7 @@ def _repeat_interleave_axis1_native(input: GPUArray, repeats: int) -> GPUArray:
     return GPUArray._wrap_native(c_native)
 
 
-def transpose_3d_021(input: GPUArray) -> GPUArray:
+def transpose_3d_021(input: GPUArray, *, out: GPUArray | None = None) -> GPUArray | None:
     """Transpose 3D tensor: [d0, d1, d2] -> [d1, d0, d2].
 
     Swaps axes 0 and 1 while keeping axis 2 in place.
@@ -1366,9 +1508,12 @@ def transpose_3d_021(input: GPUArray) -> GPUArray:
 
     Args:
         input: 3D tensor to transpose.
+        out: Optional pre-allocated output buffer for CUDA Graph capture.
+             If provided, must have shape [d1, d0, d2] and same dtype as input.
 
     Returns:
         Transposed tensor with axes 0 and 1 swapped.
+        Returns None if out is provided (in-place operation).
     """
     _validate_float_dtype(input, "transpose_3d_021")
 
@@ -1381,10 +1526,18 @@ def transpose_3d_021(input: GPUArray) -> GPUArray:
     if isinstance(backend, NativeBackend) and backend.is_available():
         dtype_str = str(input.dtype)
         if dtype_str in ("float32", "float16", "bfloat16"):
-            return _transpose_3d_021_native(input)
+            return _transpose_3d_021_native(input, out=out)
         else:
+            if out is not None:
+                raise NotImplementedError(
+                    "transpose_3d_021: out parameter not supported for CPU fallback"
+                )
             return _transpose_3d_021_cpu(input)
     else:
+        if out is not None:
+            raise NotImplementedError(
+                "transpose_3d_021: out parameter not supported for CPU fallback"
+            )
         return _transpose_3d_021_cpu(input)
 
 
@@ -1395,30 +1548,53 @@ def _transpose_3d_021_cpu(input: GPUArray) -> GPUArray:
     return from_numpy(result)
 
 
-def _transpose_3d_021_native(input: GPUArray) -> GPUArray:
+def _transpose_3d_021_native(input: GPUArray, *, out: GPUArray | None = None) -> GPUArray | None:
     """Native C++ CUDA implementation of transpose_3d_021."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
     input_native = input._get_native()
-    c_native = native.transpose_3d_021(input_native)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.transpose_3d_021_(input_native, out_native)
+        return None
+    else:
+        c_native = native.transpose_3d_021(input_native)
+        return GPUArray._wrap_native(c_native)
 
 
-def reshape_copy(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
+def reshape_copy(
+    input: GPUArray,
+    new_shape: tuple[int, ...] | None = None,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray | None:
     """Reshape tensor with copy (ensures contiguous output).
 
     Args:
         input: Input tensor to reshape.
         new_shape: Target shape (total elements must match).
+                   Required if out is not provided.
+        out: Optional pre-allocated output buffer for CUDA Graph capture.
+             If provided, new_shape is ignored and output shape is determined by out.
 
     Returns:
         Reshaped tensor with new shape.
+        Returns None if out is provided (in-place operation).
 
     Raises:
         ValueError: If total element count doesn't match.
     """
     _validate_float_dtype(input, "reshape_copy")
+
+    # Determine target shape
+    if out is not None:
+        target_shape = out.shape
+    elif new_shape is not None:
+        target_shape = new_shape
+    else:
+        raise ValueError("reshape_copy: either new_shape or out must be provided")
 
     # Verify total size
     input_size = 1
@@ -1426,7 +1602,7 @@ def reshape_copy(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
         input_size *= dim
 
     output_size = 1
-    for dim in new_shape:
+    for dim in target_shape:
         output_size *= dim
 
     if input_size != output_size:
@@ -1438,11 +1614,17 @@ def reshape_copy(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
     if isinstance(backend, NativeBackend) and backend.is_available():
         dtype_str = str(input.dtype)
         if dtype_str in ("float32", "float16", "bfloat16"):
-            return _reshape_copy_native(input, new_shape)
+            return _reshape_copy_native(input, target_shape, out=out)
         else:
-            return _reshape_copy_cpu(input, new_shape)
+            if out is not None:
+                raise NotImplementedError(
+                    "reshape_copy: out parameter not supported for CPU fallback"
+                )
+            return _reshape_copy_cpu(input, target_shape)
     else:
-        return _reshape_copy_cpu(input, new_shape)
+        if out is not None:
+            raise NotImplementedError("reshape_copy: out parameter not supported for CPU fallback")
+        return _reshape_copy_cpu(input, target_shape)
 
 
 def _reshape_copy_cpu(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
@@ -1452,11 +1634,377 @@ def _reshape_copy_cpu(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
     return from_numpy(result)
 
 
-def _reshape_copy_native(input: GPUArray, new_shape: tuple[int, ...]) -> GPUArray:
+def _reshape_copy_native(
+    input: GPUArray,
+    new_shape: tuple[int, ...],
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray | None:
     """Native C++ CUDA implementation of reshape_copy."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
     input_native = input._get_native()
-    c_native = native.reshape_copy(input_native, list(new_shape))
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.reshape_copy_(input_native, out_native)
+        return None
+    else:
+        c_native = native.reshape_copy(input_native, list(new_shape))
+        return GPUArray._wrap_native(c_native)
+
+
+# ============================================================================
+# Fixed-Length KV Cache Operations (CUDA Graph Support)
+# ============================================================================
+
+
+def kv_cache_update(new_kv: GPUArray, cache: GPUArray, position: int) -> None:
+    """Update KV cache at a single position (decode step).
+
+    Used for fixed-length KV cache with CUDA Graph support.
+    Copies new K or V values to a specific position in the pre-allocated cache.
+
+    Args:
+        new_kv: New K or V tensor of shape [1, num_kv_heads, head_dim].
+        cache: Pre-allocated cache tensor of shape [max_seq_len, num_kv_heads, head_dim].
+        position: Position index in cache where to write (0-indexed).
+
+    Raises:
+        ValueError: If shapes are incompatible.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_update(new_kv_native, cache_native, position)
+
+
+def kv_cache_prefill(new_kv: GPUArray, cache: GPUArray, start_pos: int = 0) -> None:
+    """Prefill KV cache from sequence (prefill step).
+
+    Used for fixed-length KV cache with CUDA Graph support.
+    Copies K or V values from prefill to the pre-allocated cache.
+
+    Args:
+        new_kv: K or V tensor from prefill of shape [seq_len, num_kv_heads, head_dim].
+        cache: Pre-allocated cache tensor of shape [max_seq_len, num_kv_heads, head_dim].
+        start_pos: Starting position in cache (default 0).
+
+    Raises:
+        ValueError: If shapes are incompatible.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_prefill(new_kv_native, cache_native, start_pos)
+
+
+def kv_cache_update_gqa(new_kv: GPUArray, cache: GPUArray, num_heads: int, position: int) -> None:
+    """Update GQA-expanded KV cache at a single position (decode step).
+
+    For CUDA Graph optimization: writes to transposed, GQA-expanded cache.
+    Eliminates per-step transpose and GQA expansion overhead.
+
+    Args:
+        new_kv: K or V tensor of shape [1, num_kv_heads, head_dim].
+        cache: Pre-allocated cache of shape [num_heads, max_seq_len, head_dim].
+        num_heads: Total number of attention heads.
+        position: Position in cache to update.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_update_gqa(new_kv_native, cache_native, num_heads, position)
+
+
+def kv_cache_prefill_gqa(
+    new_kv: GPUArray, cache: GPUArray, num_heads: int, start_pos: int = 0
+) -> None:
+    """Prefill GQA-expanded KV cache from sequence.
+
+    For CUDA Graph optimization: writes to transposed, GQA-expanded cache.
+    Eliminates per-step transpose and GQA expansion overhead.
+
+    Args:
+        new_kv: K or V tensor of shape [seq_len, num_kv_heads, head_dim].
+        cache: Pre-allocated cache of shape [num_heads, max_seq_len, head_dim].
+        num_heads: Total number of attention heads.
+        start_pos: Starting position in cache (default 0).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    native.kv_cache_prefill_gqa(new_kv_native, cache_native, num_heads, start_pos)
+
+
+def kv_cache_update_gqa_ptr(
+    new_kv: GPUArray, cache: GPUArray, num_heads: int, position_buf: GPUArray
+) -> None:
+    """Update GQA-expanded KV cache reading position from GPU buffer.
+
+    For CUDA Graph replay: position is read from GPU memory, allowing
+    graph replay with different positions without recapturing.
+
+    Args:
+        new_kv: K or V tensor of shape [1, num_kv_heads, head_dim].
+        cache: Pre-allocated cache of shape [num_heads, max_seq_len, head_dim].
+        num_heads: Total number of attention heads.
+        position_buf: GPUArray[1] int32 containing position value.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    new_kv_native = new_kv._get_native()
+    cache_native = cache._get_native()
+    position_buf_native = position_buf._get_native()
+    native.kv_cache_update_gqa_ptr(new_kv_native, cache_native, num_heads, position_buf_native)
+
+
+def embedding_lookup(embed_matrix: GPUArray, out: GPUArray, token_id: int) -> None:
+    """Lookup embedding on GPU without CPU transfer.
+
+    For CUDA Graph: no allocation, no CPU->GPU transfer.
+
+    Args:
+        embed_matrix: Embedding matrix [vocab_size, hidden_size].
+        out: Pre-allocated output buffer [1, hidden_size].
+        token_id: Token index to lookup.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    embed_native = embed_matrix._get_native()
+    out_native = out._get_native()
+    native.embedding_lookup(embed_native, out_native, token_id)
+
+
+def embedding_lookup_ptr(
+    embed_matrix: GPUArray, out: GPUArray, token_id_buf: GPUArray
+) -> None:
+    """Lookup embedding reading index from GPU buffer.
+
+    For CUDA Graph replay: index is read from GPU memory, allowing
+    graph replay with different indices without recapturing.
+
+    Args:
+        embed_matrix: Embedding matrix [vocab_size, hidden_size].
+        out: Pre-allocated output buffer [1, hidden_size].
+        token_id_buf: GPUArray[1] int32 containing token/position value.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    embed_native = embed_matrix._get_native()
+    out_native = out._get_native()
+    token_id_buf_native = token_id_buf._get_native()
+    native.embedding_lookup_ptr(embed_native, out_native, token_id_buf_native)
+
+
+def add_inplace(a: GPUArray, b: GPUArray) -> None:
+    """In-place addition: a += b.
+
+    For CUDA Graph: no allocation.
+
+    Args:
+        a: Tensor to add to (modified in-place).
+        b: Tensor to add.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    native.add_inplace(a_native, b_native)
+
+
+def mul_inplace(a: GPUArray, b: GPUArray) -> None:
+    """In-place multiplication: a *= b.
+
+    For CUDA Graph: no allocation.
+
+    Args:
+        a: Tensor to multiply (modified in-place).
+        b: Tensor to multiply by.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    a_native = a._get_native()
+    b_native = b._get_native()
+    native.mul_inplace(a_native, b_native)
+
+
+def copy_to(src: GPUArray, dst: GPUArray) -> None:
+    """GPU-to-GPU copy.
+
+    For CUDA Graph: no allocation.
+
+    Args:
+        src: Source tensor.
+        dst: Destination tensor (must be same size).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    src_native = src._get_native()
+    dst_native = dst._get_native()
+    native.copy_to(src_native, dst_native)
+
+
+# =============================================================================
+# GPU Sampling Operations (v0.2.10)
+# =============================================================================
+
+
+def sample_token_gpu(
+    logits: GPUArray,
+    temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 1.0,
+) -> int:
+    """Sample a token from logits on GPU.
+
+    Performs sampling entirely on GPU, avoiding D2H transfer of full logits.
+    Only returns the single sampled token ID.
+
+    Sampling method selection:
+    - temperature=0: greedy (argmax)
+    - top_k > 0: top-k sampling
+    - top_p < 1: top-p (nucleus) sampling
+    - otherwise: multinomial with temperature
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size].
+        temperature: Sampling temperature (>0, lower = more deterministic).
+        top_k: If >0, only sample from top-k tokens.
+        top_p: If <1, sample from smallest set with cumulative prob >= top_p.
+
+    Returns:
+        Sampled token ID (int).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    logits_native = logits._get_native()
+    return native.sample_token_gpu(logits_native, temperature, top_k, top_p)
+
+
+def sample_topk_to_buf_ptr(
+    logits: GPUArray,
+    result_buf: GPUArray,
+    random_val_buf: GPUArray,
+    top_k: int,
+    temperature: float,
+) -> None:
+    """Top-K sampling with pointer (CUDA Graph replay compatible).
+
+    Reads random_val from GPU buffer, allowing update before Graph replay.
+    Result is written to pre-allocated buffer (no D2H copy).
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size] (float16 only).
+        result_buf: Pre-allocated int32 buffer [1] for sampled token ID.
+        random_val_buf: Pre-allocated float32 buffer [1] for random value.
+        top_k: Number of top tokens to consider.
+        temperature: Sampling temperature (>0).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    native.sample_topk_to_buf_ptr(
+        logits._get_native(),
+        result_buf._get_native(),
+        random_val_buf._get_native(),
+        top_k,
+        temperature,
+    )
+
+
+def sample_greedy(logits: GPUArray) -> int:
+    """Greedy sampling (argmax) from logits on GPU.
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size].
+
+    Returns:
+        Token ID with highest logit value.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    logits_native = logits._get_native()
+    return native.sample_greedy(logits_native)
+
+
+def sample_multinomial(logits: GPUArray, temperature: float) -> int:
+    """Multinomial sampling with temperature on GPU.
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size].
+        temperature: Sampling temperature (>0).
+
+    Returns:
+        Sampled token ID.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    logits_native = logits._get_native()
+    return native.sample_multinomial(logits_native, temperature)
+
+
+def sample_topk(logits: GPUArray, top_k: int, temperature: float) -> int:
+    """Top-K sampling on GPU.
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size].
+        top_k: Number of top tokens to consider.
+        temperature: Sampling temperature (>0).
+
+    Returns:
+        Sampled token ID from top-k.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    logits_native = logits._get_native()
+    return native.sample_topk(logits_native, top_k, temperature)
+
+
+def sample_topp(logits: GPUArray, top_p: float, temperature: float) -> int:
+    """Top-P (nucleus) sampling on GPU.
+
+    Args:
+        logits: Logits tensor [vocab_size] or [1, vocab_size].
+        top_p: Cumulative probability threshold (0 < p <= 1).
+        temperature: Sampling temperature (>0).
+
+    Returns:
+        Sampled token ID from nucleus.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    logits_native = logits._get_native()
+    return native.sample_topp(logits_native, top_p, temperature)
+
+
+def set_sampling_seed(seed: int) -> None:
+    """Set random seed for GPU sampling.
+
+    Args:
+        seed: Random seed for reproducibility.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    native.set_sampling_seed(seed)

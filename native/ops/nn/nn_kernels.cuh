@@ -1164,6 +1164,50 @@ __global__ void concat_axis0_f32_kernel(
     }
 }
 
+// FP16 concat along axis 0
+__global__ void concat_axis0_f16_kernel(
+    const __half* __restrict__ src1,
+    const __half* __restrict__ src2,
+    __half* __restrict__ dst,
+    size_t dim0_1,
+    size_t dim0_2,
+    size_t stride
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_src1 = dim0_1 * stride;
+    size_t total = (dim0_1 + dim0_2) * stride;
+
+    if (idx < total) {
+        if (idx < total_src1) {
+            dst[idx] = src1[idx];
+        } else {
+            dst[idx] = src2[idx - total_src1];
+        }
+    }
+}
+
+// BF16 concat along axis 0
+__global__ void concat_axis0_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src1,
+    const __nv_bfloat16* __restrict__ src2,
+    __nv_bfloat16* __restrict__ dst,
+    size_t dim0_1,
+    size_t dim0_2,
+    size_t stride
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_src1 = dim0_1 * stride;
+    size_t total = (dim0_1 + dim0_2) * stride;
+
+    if (idx < total) {
+        if (idx < total_src1) {
+            dst[idx] = src1[idx];
+        } else {
+            dst[idx] = src2[idx - total_src1];
+        }
+    }
+}
+
 // Repeat tensor along axis 1 (for GQA expansion)
 // src: [dim0, dim1, dim2] -> dst: [dim0, dim1 * repeats, dim2]
 // Each element in dim1 is repeated 'repeats' times
@@ -1189,6 +1233,52 @@ __global__ void repeat_interleave_axis1_f32_kernel(
         size_t d1_in = d1_out / repeats;
 
         // Compute source index
+        size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
+        dst[idx] = src[src_idx];
+    }
+}
+
+// FP16 repeat interleave along axis 1
+__global__ void repeat_interleave_axis1_f16_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t repeats
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * repeats * dim2;
+
+    if (idx < total) {
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1_out = remaining % (dim1 * repeats);
+        size_t d0 = remaining / (dim1 * repeats);
+        size_t d1_in = d1_out / repeats;
+        size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
+        dst[idx] = src[src_idx];
+    }
+}
+
+// BF16 repeat interleave along axis 1
+__global__ void repeat_interleave_axis1_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t repeats
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * repeats * dim2;
+
+    if (idx < total) {
+        size_t d2 = idx % dim2;
+        size_t remaining = idx / dim2;
+        size_t d1_out = remaining % (dim1 * repeats);
+        size_t d0 = remaining / (dim1 * repeats);
+        size_t d1_in = d1_out / repeats;
         size_t src_idx = d0 * dim1 * dim2 + d1_in * dim2 + d2;
         dst[idx] = src[src_idx];
     }
@@ -1300,6 +1390,18 @@ __global__ void copy_bf16_kernel(
     }
 }
 
+// INT32 copy kernel (for position buffers in CUDA Graph)
+__global__ void copy_i32_kernel(
+    const int* __restrict__ src,
+    int* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = src[idx];
+    }
+}
+
 // ============================================================================
 // RoPE (Rotary Position Embedding)
 // ============================================================================
@@ -1365,6 +1467,118 @@ __global__ void rope_f32_kernel(
 
         k[base + d] = k0 * c - k1 * sn;
         k[base + d + half_dim] = k1 * c + k0 * sn;
+    }
+}
+
+// FP16 RoPE kernel (compute in FP32 for precision, store in FP16)
+__global__ void rope_f16_kernel(
+    __half* __restrict__ q,      // [seq_len, n_heads_q, head_dim] - modified in-place
+    __half* __restrict__ k,      // [seq_len, n_heads_k, head_dim] - modified in-place
+    const __half* __restrict__ cos,  // [seq_len, head_dim]
+    const __half* __restrict__ sin,  // [seq_len, head_dim]
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = __half2float(q[base + d]);
+        float q1 = __half2float(q[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __half2float(cos[cos_idx]);
+        float sn = __half2float(sin[cos_idx]);
+
+        q[base + d] = __float2half(q0 * c - q1 * sn);
+        q[base + d + half_dim] = __float2half(q1 * c + q0 * sn);
+    }
+
+    // Process K tensor
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = __half2float(k[base + d]);
+        float k1 = __half2float(k[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __half2float(cos[cos_idx]);
+        float sn = __half2float(sin[cos_idx]);
+
+        k[base + d] = __float2half(k0 * c - k1 * sn);
+        k[base + d + half_dim] = __float2half(k1 * c + k0 * sn);
+    }
+}
+
+// BF16 RoPE kernel (compute in FP32 for precision, store in BF16)
+__global__ void rope_bf16_kernel(
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    const __nv_bfloat16* __restrict__ cos,
+    const __nv_bfloat16* __restrict__ sin,
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = __bfloat162float(q[base + d]);
+        float q1 = __bfloat162float(q[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __bfloat162float(cos[cos_idx]);
+        float sn = __bfloat162float(sin[cos_idx]);
+
+        q[base + d] = __float2bfloat16(q0 * c - q1 * sn);
+        q[base + d + half_dim] = __float2bfloat16(q1 * c + q0 * sn);
+    }
+
+    // Process K tensor
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = __bfloat162float(k[base + d]);
+        float k1 = __bfloat162float(k[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = __bfloat162float(cos[cos_idx]);
+        float sn = __bfloat162float(sin[cos_idx]);
+
+        k[base + d] = __float2bfloat16(k0 * c - k1 * sn);
+        k[base + d + half_dim] = __float2bfloat16(k1 * c + k0 * sn);
     }
 }
 
@@ -1436,12 +1650,13 @@ __global__ void silu_bf16_kernel(const __nv_bfloat16* __restrict__ input,
 
 __global__ void sdpa_causal_f32_kernel(
     const float* __restrict__ Q,      // [n_heads, q_len, head_dim]
-    const float* __restrict__ K,      // [n_heads, kv_len, head_dim]
-    const float* __restrict__ V,      // [n_heads, kv_len, head_dim]
+    const float* __restrict__ K,      // [n_heads, kv_stride, head_dim]
+    const float* __restrict__ V,      // [n_heads, kv_stride, head_dim]
     float* __restrict__ output,       // [n_heads, q_len, head_dim]
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to (for masking)
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,                      // 1/sqrt(head_dim)
     int causal_offset                 // kv_len - q_len (for proper causal masking)
@@ -1452,10 +1667,10 @@ __global__ void sdpa_causal_f32_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
-    // Pointers for this head
+    // Pointers for this head - use kv_stride for pointer calculations
     const float* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const float* K_head = K + head_idx * kv_len * head_dim;
-    const float* V_head = V + head_idx * kv_len * head_dim;
+    const float* K_head = K + head_idx * kv_stride * head_dim;
+    const float* V_head = V + head_idx * kv_stride * head_dim;
     float* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     // Causal mask: query at position q_pos can attend to positions 0..(causal_offset + q_pos)
@@ -1559,7 +1774,8 @@ __global__ void sdpa_causal_f16_kernel(
     __half* __restrict__ output,
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to (for masking)
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,
     int causal_offset
@@ -1569,9 +1785,10 @@ __global__ void sdpa_causal_f16_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
+    // Use kv_stride for pointer calculations
     const __half* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const __half* K_head = K + head_idx * kv_len * head_dim;
-    const __half* V_head = V + head_idx * kv_len * head_dim;
+    const __half* K_head = K + head_idx * kv_stride * head_dim;
+    const __half* V_head = V + head_idx * kv_stride * head_dim;
     __half* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     int max_attend = causal_offset + q_pos + 1;
@@ -1665,7 +1882,8 @@ __global__ void sdpa_causal_bf16_kernel(
     __nv_bfloat16* __restrict__ output,
     int n_heads,
     int q_len,
-    int kv_len,
+    int kv_len,                       // Number of KV positions to attend to (for masking)
+    int kv_stride,                    // Actual K/V tensor size (for pointer arithmetic)
     int head_dim,
     float scale,
     int causal_offset
@@ -1675,9 +1893,10 @@ __global__ void sdpa_causal_bf16_kernel(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
+    // Use kv_stride for pointer calculations
     const __nv_bfloat16* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
-    const __nv_bfloat16* K_head = K + head_idx * kv_len * head_dim;
-    const __nv_bfloat16* V_head = V + head_idx * kv_len * head_dim;
+    const __nv_bfloat16* K_head = K + head_idx * kv_stride * head_dim;
+    const __nv_bfloat16* V_head = V + head_idx * kv_stride * head_dim;
     __nv_bfloat16* out_head = output + head_idx * q_len * head_dim + q_pos * head_dim;
 
     int max_attend = causal_offset + q_pos + 1;
@@ -1760,6 +1979,587 @@ __global__ void sdpa_causal_bf16_kernel(
             out_val += scores[kv_pos] * __bfloat162float(V_head[kv_pos * head_dim + d]);
         }
         out_head[d] = __float2bfloat16(out_val);
+    }
+}
+
+// ============================================================================
+// KV Cache Update Kernel (Fixed-Length KV Cache for CUDA Graph)
+// ============================================================================
+
+// Copy new K/V values to position in fixed-length cache
+// new_kv: [1, num_kv_heads, head_dim] - single token K or V
+// cache: [max_seq_len, num_kv_heads, head_dim] - pre-allocated cache
+// position: where to write in cache (0-indexed)
+template <typename T>
+__global__ void kv_cache_update_kernel(
+    const T* __restrict__ new_kv,
+    T* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    // Total elements per position: num_kv_heads * head_dim
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        // new_kv is [1, num_kv_heads, head_dim], so offset is just idx
+        // cache is [max_seq_len, num_kv_heads, head_dim]
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// FP16 version
+__global__ void kv_cache_update_f16_kernel(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// BF16 version
+__global__ void kv_cache_update_bf16_kernel(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// FP32 version
+__global__ void kv_cache_update_f32_kernel(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int position
+) {
+    int total_elements = num_kv_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int cache_offset = position * total_elements + idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// Prefill version: Copy multiple tokens from prefill K/V to cache
+// new_kv: [seq_len, num_kv_heads, head_dim]
+// cache: [max_seq_len, num_kv_heads, head_dim]
+// start_pos: where to start writing in cache
+// seq_len: number of tokens to copy
+__global__ void kv_cache_prefill_f16_kernel(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos,
+    int seq_len
+) {
+    int elements_per_pos = num_kv_heads * head_dim;
+    int total_elements = seq_len * elements_per_pos;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int seq_pos = idx / elements_per_pos;
+        int elem_idx = idx % elements_per_pos;
+        int cache_offset = (start_pos + seq_pos) * elements_per_pos + elem_idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+__global__ void kv_cache_prefill_bf16_kernel(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos,
+    int seq_len
+) {
+    int elements_per_pos = num_kv_heads * head_dim;
+    int total_elements = seq_len * elements_per_pos;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int seq_pos = idx / elements_per_pos;
+        int elem_idx = idx % elements_per_pos;
+        int cache_offset = (start_pos + seq_pos) * elements_per_pos + elem_idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+__global__ void kv_cache_prefill_f32_kernel(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_kv_heads,
+    int head_dim,
+    int start_pos,
+    int seq_len
+) {
+    int elements_per_pos = num_kv_heads * head_dim;
+    int total_elements = seq_len * elements_per_pos;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int seq_pos = idx / elements_per_pos;
+        int elem_idx = idx % elements_per_pos;
+        int cache_offset = (start_pos + seq_pos) * elements_per_pos + elem_idx;
+        cache[cache_offset] = new_kv[idx];
+    }
+}
+
+// ============================================================================
+// GQA-expanded KV Cache Update (for CUDA Graph optimization)
+// ============================================================================
+// These kernels write to a transposed, GQA-expanded cache layout:
+// Input: new_kv [1, num_kv_heads, head_dim] or [seq_len, num_kv_heads, head_dim]
+// Cache: [num_heads, max_seq_len, head_dim] (transposed and expanded)
+// This eliminates per-step transpose and GQA expansion overhead.
+
+// Single token update with GQA expansion
+// new_kv: [1, num_kv_heads, head_dim]
+// cache: [num_heads, max_seq_len, head_dim]
+__global__ void kv_cache_update_gqa_f16_kernel(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    int position
+) {
+    // Total output elements: num_heads * head_dim
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+
+        // GQA: find source kv_head
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+
+        // Source: new_kv[0, kv_head, d] = new_kv[kv_head * head_dim + d]
+        int src_offset = kv_head * head_dim + d;
+
+        // Dest: cache[head, position, d] = cache[head * max_seq_len * head_dim + position * head_dim + d]
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_update_gqa_bf16_kernel(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    int position
+) {
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_update_gqa_f32_kernel(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    int position
+) {
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+// =============================================================================
+// KV Cache Update with GPU position pointer (for CUDA Graph replay)
+// =============================================================================
+
+__global__ void kv_cache_update_gqa_f16_kernel_ptr(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int* __restrict__ position_ptr
+) {
+    int position = *position_ptr;
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_update_gqa_bf16_kernel_ptr(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int* __restrict__ position_ptr
+) {
+    int position = *position_ptr;
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_update_gqa_f32_kernel_ptr(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int* __restrict__ position_ptr
+) {
+    int position = *position_ptr;
+    int total_elements = num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {
+        int head = idx / head_dim;
+        int d = idx % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + position * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+// Prefill with GQA expansion
+// new_kv: [seq_len, num_kv_heads, head_dim]
+// cache: [num_heads, max_seq_len, head_dim]
+__global__ void kv_cache_prefill_gqa_f16_kernel(
+    const __half* __restrict__ new_kv,
+    __half* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    int start_pos,
+    int seq_len
+) {
+    // Total output elements: seq_len * num_heads * head_dim
+    int total_elements = seq_len * num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int elements_per_seq = num_heads * head_dim;
+        int seq_pos = idx / elements_per_seq;
+        int remaining = idx % elements_per_seq;
+        int head = remaining / head_dim;
+        int d = remaining % head_dim;
+
+        // GQA: find source kv_head
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+
+        // Source: new_kv[seq_pos, kv_head, d]
+        int src_offset = seq_pos * num_kv_heads * head_dim + kv_head * head_dim + d;
+
+        // Dest: cache[head, start_pos + seq_pos, d]
+        int dst_offset = head * max_seq_len * head_dim + (start_pos + seq_pos) * head_dim + d;
+
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_prefill_gqa_bf16_kernel(
+    const __nv_bfloat16* __restrict__ new_kv,
+    __nv_bfloat16* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    int start_pos,
+    int seq_len
+) {
+    int total_elements = seq_len * num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int elements_per_seq = num_heads * head_dim;
+        int seq_pos = idx / elements_per_seq;
+        int remaining = idx % elements_per_seq;
+        int head = remaining / head_dim;
+        int d = remaining % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = seq_pos * num_kv_heads * head_dim + kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + (start_pos + seq_pos) * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+__global__ void kv_cache_prefill_gqa_f32_kernel(
+    const float* __restrict__ new_kv,
+    float* __restrict__ cache,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    int start_pos,
+    int seq_len
+) {
+    int total_elements = seq_len * num_heads * head_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < total_elements) {
+        int elements_per_seq = num_heads * head_dim;
+        int seq_pos = idx / elements_per_seq;
+        int remaining = idx % elements_per_seq;
+        int head = remaining / head_dim;
+        int d = remaining % head_dim;
+        int num_kv_groups = num_heads / num_kv_heads;
+        int kv_head = head / num_kv_groups;
+        int src_offset = seq_pos * num_kv_heads * head_dim + kv_head * head_dim + d;
+        int dst_offset = head * max_seq_len * head_dim + (start_pos + seq_pos) * head_dim + d;
+        cache[dst_offset] = new_kv[src_offset];
+    }
+}
+
+// ============================================================================
+// Embedding Lookup (for CUDA Graph - no CPU→GPU transfer)
+// ============================================================================
+// Copy embedding from GPU matrix to output buffer
+// embed_matrix: [vocab_size, hidden_size]
+// out: [1, hidden_size]
+// token_id: which row to copy
+
+__global__ void embedding_lookup_f16_kernel(
+    const __half* __restrict__ embed_matrix,
+    __half* __restrict__ out,
+    int hidden_size,
+    int token_id
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_bf16_kernel(
+    const __nv_bfloat16* __restrict__ embed_matrix,
+    __nv_bfloat16* __restrict__ out,
+    int hidden_size,
+    int token_id
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_f32_kernel(
+    const float* __restrict__ embed_matrix,
+    float* __restrict__ out,
+    int hidden_size,
+    int token_id
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+// =============================================================================
+// Embedding Lookup with GPU index pointer (for CUDA Graph replay)
+// =============================================================================
+
+__global__ void embedding_lookup_f16_kernel_ptr(
+    const __half* __restrict__ embed_matrix,
+    __half* __restrict__ out,
+    int hidden_size,
+    const int* __restrict__ token_id_ptr
+) {
+    int token_id = *token_id_ptr;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_bf16_kernel_ptr(
+    const __nv_bfloat16* __restrict__ embed_matrix,
+    __nv_bfloat16* __restrict__ out,
+    int hidden_size,
+    const int* __restrict__ token_id_ptr
+) {
+    int token_id = *token_id_ptr;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+__global__ void embedding_lookup_f32_kernel_ptr(
+    const float* __restrict__ embed_matrix,
+    float* __restrict__ out,
+    int hidden_size,
+    const int* __restrict__ token_id_ptr
+) {
+    int token_id = *token_id_ptr;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < hidden_size) {
+        out[idx] = embed_matrix[token_id * hidden_size + idx];
+    }
+}
+
+// ============================================================================
+// Add In-place (for CUDA Graph - no allocation)
+// ============================================================================
+// a += b (element-wise)
+
+__global__ void add_inplace_f16_kernel(
+    __half* __restrict__ a,
+    const __half* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+__global__ void add_inplace_bf16_kernel(
+    __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+__global__ void add_inplace_f32_kernel(
+    float* __restrict__ a,
+    const float* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] + b[idx];
+    }
+}
+
+__global__ void add_inplace_f64_kernel(
+    double* __restrict__ a,
+    const double* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] + b[idx];
+    }
+}
+
+// ============================================================================
+// In-place multiply kernels: a *= b
+// ============================================================================
+
+__global__ void mul_inplace_f16_kernel(
+    __half* __restrict__ a,
+    const __half* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+__global__ void mul_inplace_bf16_kernel(
+    __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+__global__ void mul_inplace_f32_kernel(
+    float* __restrict__ a,
+    const float* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] * b[idx];
+    }
+}
+
+__global__ void mul_inplace_f64_kernel(
+    double* __restrict__ a,
+    const double* __restrict__ b,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        a[idx] = a[idx] * b[idx];
     }
 }
 

@@ -4,9 +4,11 @@
 #pragma once
 
 #include <cuda.h>
+#include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
 #include "../../core/memory.hpp"
+#include "../../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {
@@ -21,7 +23,18 @@ inline void check_driver_error(CUresult result, const char* msg) {
 }
 
 // Synchronize and check for errors
+// Skip synchronization during CUDA Graph capture (not allowed)
 inline void sync_and_check(const char* msg) {
+    // Check if we're capturing - if so, skip sync (not allowed during capture)
+    cudaStream_t capture_stream = internal::get_capture_stream();
+    if (capture_stream != nullptr) {
+        // During capture, just check the last error without syncing
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            throw CudaError(std::string(msg) + ": " + cudaGetErrorString(err));
+        }
+        return;
+    }
     check_driver_error(cuCtxSynchronize(), msg);
 }
 

@@ -18,6 +18,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {
@@ -606,9 +607,9 @@ sgemm_128x128x16_4stage(
 
 inline cudaError_t launch_sgemm_ampere(
     const float* A, const float* B, float* C,
-    int M, int N, int K,
-    cudaStream_t stream = 0
+    int M, int N, int K
 ) {
+    cudaStream_t stream = internal::get_capture_stream();
     dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);  // 16x16 = 256 threads
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
 

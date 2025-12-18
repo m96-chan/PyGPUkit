@@ -12,7 +12,18 @@ from pygpukit.core.device import (
     get_device_info,
     is_cuda_available,
 )
-from pygpukit.core.dtypes import DataType, bfloat16, float16, float32, float64, int32, int64
+from pygpukit.core.dtypes import (
+    DataType,
+    bfloat16,
+    float16,
+    float32,
+    float64,
+    int4,
+    int8,
+    int32,
+    int64,
+    uint8,
+)
 from pygpukit.core.factory import empty, from_numpy, ones, zeros
 from pygpukit.core.stream import Stream, StreamManager, default_stream
 from pygpukit.jit.compiler import (
@@ -57,6 +68,12 @@ except ImportError:
     DeviceCapabilities = FallbackDeviceCapabilities
     KernelType = None
 
+# Import CUDA Graph from native module
+try:
+    from pygpukit._pygpukit_native import CudaGraph
+except ImportError:
+    CudaGraph = None
+
 __all__ = [
     # Version
     "__version__",
@@ -77,6 +94,9 @@ __all__ = [
     "bfloat16",
     "int32",
     "int64",
+    "int8",
+    "uint8",
+    "int4",
     # Factory functions
     "zeros",
     "ones",
@@ -122,4 +142,6 @@ __all__ = [
     "max",
     # LLM support
     "llm",
+    # CUDA Graph
+    "CudaGraph",
 ]

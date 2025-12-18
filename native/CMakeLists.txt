@@ -22,8 +22,12 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # CUTLASS (header-only library)
+# Can be disabled via environment variable PYGPUKIT_DISABLE_CUTLASS=1
 set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass")
-if(EXISTS "${CUTLASS_DIR}/include")
+if(DEFINED ENV{PYGPUKIT_DISABLE_CUTLASS})
+    message(STATUS "CUTLASS disabled via PYGPUKIT_DISABLE_CUTLASS environment variable")
+    add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
+elseif(EXISTS "${CUTLASS_DIR}/include")
     message(STATUS "CUTLASS found at: ${CUTLASS_DIR}")
     include_directories(${CUTLASS_DIR}/include)
     include_directories(${CUTLASS_DIR}/tools/util/include)
@@ -67,10 +71,12 @@ pybind11_add_module(_pygpukit_native
     core/memory.cu
     core/stream.cpp
     core/stream.cu
+    core/cuda_graph.cu
     # JIT
     jit/compiler.cpp
     jit/kernel.cpp
     jit/nvrtc_loader.cpp
+    jit/cublaslt_loader.cpp
     # Ops - Modular structure
     ops/elementwise/elementwise.cu
     ops/unary/unary.cu
@@ -78,6 +84,10 @@ pybind11_add_module(_pygpukit_native
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
     ops/nn/nn.cu
+    ops/quantize/quantize.cu
+    ops/attention/paged_attention.cu
+    ops/batch/continuous_batching.cu
+    ops/sampling/sampling.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp
@@ -85,8 +95,9 @@ pybind11_add_module(_pygpukit_native
     bindings/ops_bindings.cpp
 )
 
-# Link only cuda_driver (no cudart, no nvrtc link-time dependency)
+# Link only cuda_driver (no cudart, no nvrtc/cublasLt link-time dependency)
 # NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
+# cuBLASLt is loaded dynamically at runtime via cublaslt_loader.cpp
 # This enables single-binary distribution that works with just GPU drivers
 target_link_libraries(_pygpukit_native PRIVATE
     CUDA::cuda_driver

@@ -5,6 +5,7 @@
 #include "../core/device.hpp"
 #include "../core/memory.hpp"
 #include "../core/stream.hpp"
+#include "../core/cuda_graph.hpp"
 
 namespace py = pybind11;
 using namespace pygpukit;
@@ -18,6 +19,9 @@ void init_core_bindings(py::module_& m) {
         .value("BFloat16", DataType::BFloat16)
         .value("Int32", DataType::Int32)
         .value("Int64", DataType::Int64)
+        .value("Int8", DataType::Int8)
+        .value("UInt8", DataType::UInt8)
+        .value("Int4", DataType::Int4)
         .export_values();
 
     // StreamPriority enum
@@ -101,6 +105,16 @@ void init_core_bindings(py::module_& m) {
                 case DataType::Int64:
                     result = py::array_t<int64_t>(py_shape);
                     break;
+                case DataType::Int8:
+                    result = py::array_t<int8_t>(py_shape);
+                    break;
+                case DataType::UInt8:
+                    result = py::array_t<uint8_t>(py_shape);
+                    break;
+                case DataType::Int4:
+                    // Int4 packs 2 values per byte, use uint8 for storage
+                    result = py::array_t<uint8_t>(py_shape);
+                    break;
             }
 
             self.copy_to_host(result.mutable_data());
@@ -114,7 +128,19 @@ void init_core_bindings(py::module_& m) {
             }
             shape_str += ")";
             return "GPUArray(shape=" + shape_str + ", dtype=" + dtype_name(self.dtype()) + ")";
-        });
+        })
+        .def_property_readonly("owns_memory", &GPUArray::owns_memory,
+            "Whether this array owns its memory (False for views)")
+        .def_static("narrow", &GPUArray::narrow,
+            py::arg("source"), py::arg("offset_elements"), py::arg("new_shape"),
+            "Create a zero-copy view into source array.\n\n"
+            "Args:\n"
+            "    source: Source GPUArray to view into\n"
+            "    offset_elements: Offset from start in number of elements\n"
+            "    new_shape: Shape of the view\n\n"
+            "Returns:\n"
+            "    Non-owning GPUArray pointing to source memory + offset\n\n"
+            "Note: The returned view does not own memory - source must outlive the view.");
 
     // Factory functions
     m.def("zeros", &zeros, py::arg("shape"), py::arg("dtype"),
@@ -178,5 +204,47 @@ void init_core_bindings(py::module_& m) {
         .def("__repr__", [](const Stream& self) {
             return std::string("Stream(priority=") +
                    (self.priority() == StreamPriority::High ? "High" : "Low") + ")";
+        });
+
+    // CudaGraph class for optimized decode
+    py::class_<CudaGraph>(m, "CudaGraph")
+        .def(py::init<>(),
+             "Create a CUDA Graph for capturing and replaying operations.\n\n"
+             "CUDA Graphs reduce kernel launch overhead by capturing a sequence of\n"
+             "operations and replaying them with minimal CPU involvement.\n\n"
+             "Usage:\n"
+             "  graph = CudaGraph()\n"
+             "  graph.begin_capture()\n"
+             "  # ... execute operations to capture ...\n"
+             "  graph.end_capture()\n"
+             "  graph.replay()  # Fast execution")
+        .def("begin_capture", &CudaGraph::begin_capture,
+             "Begin capturing CUDA operations.\n"
+             "All subsequent CUDA operations will be recorded into the graph.")
+        .def("end_capture", &CudaGraph::end_capture,
+             "End capturing and create an executable graph.\n"
+             "After this call, the graph can be replayed.")
+        .def("replay", &CudaGraph::replay,
+             "Replay the captured graph (asynchronous).\n"
+             "Executes all captured operations with minimal CPU overhead.\n"
+             "Call synchronize() after replay to wait for completion.")
+        .def("synchronize", &CudaGraph::synchronize,
+             "Synchronize the graph's internal stream.\n"
+             "Call this after replay() to wait for the graph execution to complete.")
+        .def("reset", &CudaGraph::reset,
+             "Reset the graph, freeing all resources.\n"
+             "After reset, begin_capture() can be called again.")
+        .def("is_ready", &CudaGraph::is_ready,
+             "Check if the graph has been captured and is ready for replay.")
+        .def("is_capturing", &CudaGraph::is_capturing,
+             "Check if the graph is currently capturing operations.")
+        .def_property_readonly("num_nodes", &CudaGraph::num_nodes,
+             "Get the number of nodes in the captured graph.")
+        .def("__repr__", [](const CudaGraph& self) {
+            if (self.is_ready()) {
+                return "CudaGraph(ready, nodes=" + std::to_string(self.num_nodes()) + ")";
+            } else {
+                return std::string("CudaGraph(not ready)");
+            }
         });
 }

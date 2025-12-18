@@ -317,3 +317,55 @@ class GPUArray:
             target_np_dtype = dtype.to_numpy_dtype()
             converted: np.ndarray = np_data.astype(target_np_dtype)
             return from_numpy(converted)
+
+    def narrow(self, offset: int, length: int) -> GPUArray:
+        """Create a zero-copy view into this array (1D slice along last axis).
+
+        For a 2D array [batch, features], returns a view of [batch, length]
+        starting at feature index `offset`.
+
+        Args:
+            offset: Starting index along the last axis (in elements).
+            length: Number of elements to include in the view.
+
+        Returns:
+            A non-owning GPUArray view. Does not allocate memory.
+
+        Note:
+            The source array must outlive the view. The view shares memory
+            with the source and does not own it.
+
+        Example:
+            # Split fused QKV output into Q, K, V views
+            qkv = matmul(x, W_qkv)  # [1, q_dim + k_dim + v_dim]
+            q = qkv.narrow(0, q_dim)  # [1, q_dim]
+            k = qkv.narrow(q_dim, k_dim)  # [1, k_dim]
+            v = qkv.narrow(q_dim + k_dim, v_dim)  # [1, v_dim]
+        """
+        if not has_native_module():
+            raise RuntimeError("narrow() requires native backend")
+
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        # Get source native array
+        src_native = self._get_native()
+
+        # For 2D [batch, features], the view shape is [batch, length]
+        # For 1D [features], the view shape is [length]
+        if self.ndim == 2:
+            new_shape = [self.shape[0], length]
+            # Offset is per-row, so for batch=1, offset_elements = offset
+            offset_elements = offset
+        elif self.ndim == 1:
+            new_shape = [length]
+            offset_elements = offset
+        else:
+            raise ValueError(f"narrow() only supports 1D or 2D arrays, got {self.ndim}D")
+
+        # Call native narrow
+        view_native = native.GPUArray.narrow(src_native, offset_elements, new_shape)
+
+        # Wrap the view
+        return GPUArray._wrap_native(view_native)

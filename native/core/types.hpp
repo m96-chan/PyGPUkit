@@ -14,10 +14,14 @@ enum class DataType {
     Float16,    // FP16 (half precision)
     BFloat16,   // BF16 (bfloat16)
     Int32,
-    Int64
+    Int64,
+    Int8,       // Signed 8-bit integer (for quantization)
+    UInt8,      // Unsigned 8-bit integer
+    Int4,       // 4-bit integer (packed, 2 values per byte)
 };
 
 // Get size in bytes for a data type
+// Note: Int4 returns 1 (stores 2 values per byte, handled specially)
 inline size_t dtype_size(DataType dtype) {
     switch (dtype) {
         case DataType::Float32: return 4;
@@ -26,6 +30,9 @@ inline size_t dtype_size(DataType dtype) {
         case DataType::BFloat16: return 2;
         case DataType::Int32: return 4;
         case DataType::Int64: return 8;
+        case DataType::Int8: return 1;
+        case DataType::UInt8: return 1;
+        case DataType::Int4: return 1;  // 2 values per byte
         default: throw std::runtime_error("Unknown dtype");
     }
 }
@@ -39,6 +46,9 @@ inline std::string dtype_name(DataType dtype) {
         case DataType::BFloat16: return "bfloat16";
         case DataType::Int32: return "int32";
         case DataType::Int64: return "int64";
+        case DataType::Int8: return "int8";
+        case DataType::UInt8: return "uint8";
+        case DataType::Int4: return "int4";
         default: throw std::runtime_error("Unknown dtype");
     }
 }

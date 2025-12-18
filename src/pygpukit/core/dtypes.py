@@ -16,6 +16,9 @@ class DataTypeKind(Enum):
     BFLOAT16 = "bfloat16"
     INT32 = "int32"
     INT64 = "int64"
+    INT8 = "int8"
+    UINT8 = "uint8"
+    INT4 = "int4"
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,9 @@ class DataType:
             DataTypeKind.BFLOAT16: np.uint16,  # NumPy has no native bfloat16
             DataTypeKind.INT32: np.int32,
             DataTypeKind.INT64: np.int64,
+            DataTypeKind.INT8: np.int8,
+            DataTypeKind.UINT8: np.uint8,
+            DataTypeKind.INT4: np.uint8,  # Int4 packed as uint8
         }
         return np.dtype(dtype_map[self.kind])
 
@@ -73,6 +79,10 @@ class DataType:
             return int32
         elif name == "int64":
             return int64
+        elif name == "int8":
+            return int8
+        elif name == "uint8":
+            return uint8
         else:
             raise ValueError(f"Unsupported dtype: {dtype}")
 
@@ -86,6 +96,9 @@ class DataType:
             "bfloat16": bfloat16,
             "int32": int32,
             "int64": int64,
+            "int8": int8,
+            "uint8": uint8,
+            "int4": int4,
         }
         if name not in type_map:
             raise ValueError(f"Unsupported dtype string: {name}")
@@ -99,3 +112,6 @@ float16 = DataType(DataTypeKind.FLOAT16, 2, "float16")
 bfloat16 = DataType(DataTypeKind.BFLOAT16, 2, "bfloat16")
 int32 = DataType(DataTypeKind.INT32, 4, "int32")
 int64 = DataType(DataTypeKind.INT64, 8, "int64")
+int8 = DataType(DataTypeKind.INT8, 1, "int8")
+uint8 = DataType(DataTypeKind.UINT8, 1, "uint8")
+int4 = DataType(DataTypeKind.INT4, 1, "int4")  # 2 values per byte
