@@ -3,6 +3,7 @@
  */
 #include "nn_kernels.cuh"
 #include "flash_attention.cuh"
+#include "flash_decoding.cuh"
 #include "../common/error.cuh"
 #include "../../core/memory.hpp"
 #include "../../core/cuda_graph.hpp"
@@ -704,6 +705,54 @@ static int get_flash_attention_mode() {
 // Threshold for auto-selecting Flash Attention (sequence length)
 constexpr int FLASH_ATTENTION_SEQ_THRESHOLD = 2048;
 
+// Flash-Decoding workspace manager (lazy allocation, auto-expanding)
+class FlashDecodingWorkspace {
+public:
+    static float* get(int n_heads, int head_dim, int kv_len) {
+        static FlashDecodingWorkspace instance;
+        size_t required = flash_decoding::flash_decoding_workspace_size(n_heads, head_dim, kv_len);
+        if (required > instance.size_) {
+            instance.resize(required);
+        }
+        return instance.buffer_;
+    }
+
+private:
+    FlashDecodingWorkspace() : buffer_(nullptr), size_(0) {}
+
+    ~FlashDecodingWorkspace() {
+        if (buffer_) {
+            cudaFree(buffer_);
+        }
+    }
+
+    void resize(size_t new_size) {
+        if (buffer_) {
+            cudaFree(buffer_);
+        }
+        cudaMalloc(&buffer_, new_size);
+        size_ = new_size;
+    }
+
+    float* buffer_;
+    size_t size_;
+};
+
+// Environment variable control for Flash-Decoding
+// PYGPUKIT_FLASH_DECODING: 0=off, 1=on, -1=auto (default)
+static int get_flash_decoding_mode() {
+    static int cached = -999;
+    if (cached == -999) {
+        const char* env = std::getenv("PYGPUKIT_FLASH_DECODING");
+        if (env) {
+            cached = std::atoi(env);
+        } else {
+            cached = -1;  // Auto mode by default
+        }
+    }
+    return cached;
+}
+
 // Internal helper for SDPA kernel dispatch
 // context_len: if > 0, use this as kv_len (for fixed-length cache)
 //              if <= 0, use K.shape()[1] as kv_len
@@ -733,6 +782,43 @@ static void sdpa_causal_dispatch(
 
     // Use capture stream if available
     cudaStream_t stream = internal::get_capture_stream();
+
+    // Flash-Decoding: Optimized for decode phase (q_len=1)
+    // Parallelizes over KV sequence length for better GPU utilization
+    int flash_decoding_mode = get_flash_decoding_mode();
+    bool use_flash_decoding = false;
+    if (q_len == 1 && head_dim <= 128) {
+        if (flash_decoding_mode == 1) {
+            // Force on
+            use_flash_decoding = true;
+        } else if (flash_decoding_mode == -1) {
+            // Auto: use Flash-Decoding when it provides benefit
+            // Crossover point is around kv_len=1024 (4 chunks with chunk_size=256)
+            // Only enable for long contexts where parallelism benefit > kernel launch overhead
+            use_flash_decoding = (kv_len >= 1024);
+        }
+    }
+
+    if (use_flash_decoding) {
+        // Flash-Decoding: chunk-parallel attention for decode phase
+        float* workspace = FlashDecodingWorkspace::get(n_heads, head_dim, kv_len);
+
+        switch (Q.dtype()) {
+            case DataType::Float16:
+                flash_decoding::flash_decoding_f16(
+                    static_cast<const __half*>(Q.data()),
+                    static_cast<const __half*>(K.data()),
+                    static_cast<const __half*>(V.data()),
+                    static_cast<__half*>(result.data()),
+                    workspace,
+                    n_heads, head_dim, kv_len, kv_stride, stream
+                );
+                return;
+            default:
+                // Fall through to standard SDPA for unsupported dtypes
+                break;
+        }
+    }
 
     // Determine whether to use Flash Attention
     // - Auto mode: use Flash for long sequences (>2048) where memory savings matter
