@@ -79,6 +79,11 @@ GPUArray::GPUArray(const std::vector<size_t>& shape, DataType dtype)
     }
 }
 
+// Private constructor for views (no allocation)
+GPUArray::GPUArray(const std::vector<size_t>& shape, DataType dtype, DevicePtr ptr, bool owns)
+    : shape_(shape), dtype_(dtype), ptr_(ptr), owns_memory_(owns) {
+}
+
 GPUArray::~GPUArray() {
     if (owns_memory_ && ptr_ != nullptr) {
         device_free(ptr_);
@@ -125,6 +130,32 @@ void GPUArray::copy_to_host(void* dst) const {
 
 void GPUArray::fill_zeros() {
     device_memset(ptr_, 0, nbytes());
+}
+
+// Zero-copy view (narrow)
+GPUArray GPUArray::narrow(const GPUArray& source, size_t offset_elements,
+                          const std::vector<size_t>& new_shape) {
+    // Calculate view size
+    size_t view_size = 1;
+    for (size_t dim : new_shape) {
+        view_size *= dim;
+    }
+
+    // Validate bounds
+    if (offset_elements + view_size > source.size()) {
+        throw std::runtime_error(
+            "GPUArray::narrow: view exceeds source bounds (offset=" +
+            std::to_string(offset_elements) + ", view_size=" +
+            std::to_string(view_size) + ", source_size=" +
+            std::to_string(source.size()) + ")");
+    }
+
+    // Calculate byte offset
+    size_t byte_offset = offset_elements * source.itemsize();
+
+    // Create view with offset pointer (non-owning)
+    DevicePtr view_ptr = static_cast<char*>(source.data()) + byte_offset;
+    return GPUArray(new_shape, source.dtype(), view_ptr, false);
 }
 
 // Factory functions

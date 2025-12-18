@@ -128,7 +128,19 @@ void init_core_bindings(py::module_& m) {
             }
             shape_str += ")";
             return "GPUArray(shape=" + shape_str + ", dtype=" + dtype_name(self.dtype()) + ")";
-        });
+        })
+        .def_property_readonly("owns_memory", &GPUArray::owns_memory,
+            "Whether this array owns its memory (False for views)")
+        .def_static("narrow", &GPUArray::narrow,
+            py::arg("source"), py::arg("offset_elements"), py::arg("new_shape"),
+            "Create a zero-copy view into source array.\n\n"
+            "Args:\n"
+            "    source: Source GPUArray to view into\n"
+            "    offset_elements: Offset from start in number of elements\n"
+            "    new_shape: Shape of the view\n\n"
+            "Returns:\n"
+            "    Non-owning GPUArray pointing to source memory + offset\n\n"
+            "Note: The returned view does not own memory - source must outlive the view.");
 
     // Factory functions
     m.def("zeros", &zeros, py::arg("shape"), py::arg("dtype"),

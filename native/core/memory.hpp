@@ -46,6 +46,7 @@ public:
     size_t nbytes() const { return size() * dtype_size(dtype_); }
     size_t itemsize() const { return dtype_size(dtype_); }
     DevicePtr data() const { return ptr_; }
+    bool owns_memory() const { return owns_memory_; }
 
     // Data transfer
     void copy_from_host(const void* src);
@@ -54,7 +55,17 @@ public:
     // Fill operations
     void fill_zeros();
 
+    // Zero-copy view (narrow) - creates a view into existing memory
+    // offset_elements: offset from start in number of elements
+    // new_shape: shape of the view (total elements must fit within source)
+    // Returns a non-owning GPUArray pointing to source memory + offset
+    static GPUArray narrow(const GPUArray& source, size_t offset_elements,
+                           const std::vector<size_t>& new_shape);
+
 private:
+    // Private constructor for creating views (no allocation)
+    GPUArray(const std::vector<size_t>& shape, DataType dtype, DevicePtr ptr, bool owns);
+
     std::vector<size_t> shape_;
     DataType dtype_;
     DevicePtr ptr_;
