@@ -1834,19 +1834,23 @@ class CausalTransformerModel:
             graph_ready = False
 
             # Helper to update position buffer (outside graph capture/replay)
+            # Use copy_from_numpy to avoid GPU allocation every call
+            _pos_np = np.array([0], dtype=np.int32)  # Reusable numpy buffer
+
             def _update_position_buf(pos: int) -> None:
                 """Write position to GPU buffer for _ptr kernels."""
-                pos_np = np.array([pos], dtype=np.int32)
-                pos_gpu = from_numpy(pos_np)
-                copy_to(pos_gpu, _decode_buffers.position_buf)
+                _pos_np[0] = pos
+                _decode_buffers.position_buf._get_native().copy_from_numpy(_pos_np)
 
             # Helper to update random_val buffer (outside graph capture/replay)
+            # Use copy_from_numpy to avoid GPU allocation every call
             import random
+            _rand_np = np.array([0.0], dtype=np.float32)  # Reusable numpy buffer
+
             def _update_random_val_buf() -> None:
                 """Write random value to GPU buffer for sampling kernel."""
-                rand_np = np.array([random.random()], dtype=np.float32)
-                rand_gpu = from_numpy(rand_np)
-                copy_to(rand_gpu, _decode_buffers.random_val)
+                _rand_np[0] = random.random()
+                _decode_buffers.random_val._get_native().copy_from_numpy(_rand_np)
 
             # Check if we can include sampling in Graph (top_k > 0 required)
             include_sampling_in_graph = gpu_sampling and top_k > 0
