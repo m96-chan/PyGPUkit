@@ -619,12 +619,16 @@ class DecodeBuffers:
     gate_view: GPUArray | None = None  # view of gate_up_out[0:intermediate_size]
     up_view: GPUArray | None = None  # view of gate_up_out[intermediate_size:]
 
+    # Logits buffer for CUDA Graph (lm_head projection output)
+    logits: GPUArray | None = None  # [1, vocab_size]
+
     @classmethod
     def allocate(
         cls,
         config: TransformerConfig,
         dtype: str = "float16",
         use_qk_norm: bool = False,
+        vocab_size: int | None = None,
     ) -> DecodeBuffers:
         """Allocate all decode buffers.
 
@@ -632,6 +636,7 @@ class DecodeBuffers:
             config: Model configuration
             dtype: Data type for buffers
             use_qk_norm: Whether to allocate QK norm buffers (Qwen3)
+            vocab_size: Vocabulary size for logits buffer (optional, for CUDA Graph)
         """
         assert config.num_kv_heads is not None
         assert config.intermediate_size is not None
@@ -689,6 +694,11 @@ class DecodeBuffers:
         gate_view = gate_up_out.narrow(0, config.intermediate_size)
         up_view = gate_up_out.narrow(config.intermediate_size, config.intermediate_size)
 
+        # Logits buffer for CUDA Graph (optional)
+        logits_buf = None
+        if vocab_size is not None:
+            logits_buf = zeros((1, vocab_size), dtype=dtype)
+
         return cls(
             hidden=hidden,
             q=q,
@@ -720,6 +730,7 @@ class DecodeBuffers:
             v_view=v_view,
             gate_view=gate_view,
             up_view=up_view,
+            logits=logits_buf,
         )
 
 
@@ -1700,7 +1711,12 @@ class CausalTransformerModel:
         # Allocate decode buffers (zero allocations during decode)
         # ============================================================
         use_qk_norm = self.spec is not None and self.spec.use_qk_norm
-        _decode_buffers = DecodeBuffers.allocate(self.config, dtype=dtype, use_qk_norm=use_qk_norm)
+        # Get vocab_size from lm_head or embed_tokens
+        lm_head = self._lm_head if self._lm_head is not None else self.embed_tokens
+        vocab_size = lm_head.shape[0]
+        _decode_buffers = DecodeBuffers.allocate(
+            self.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
+        )
 
         # Allocate prefill buffers (for reduced allocations during prefill)
         # NOTE: Full zero-allocation prefill requires kernel-level changes
@@ -1826,24 +1842,24 @@ class CausalTransformerModel:
                 try:
                     graph.begin_capture()
                     _inline_decode_step(next_token, position, context_len)
+                    # Include get_logits in graph (matmul to pre-allocated buffer)
+                    matmul(_decode_buffers.hidden, self._lm_head_t_cache, out=_decode_buffers.logits)
                     graph.end_capture()
                 finally:
                     gc.enable()
                 graph_ready = True
-                hidden = _decode_buffers.hidden
+                logits = _decode_buffers.logits
                 print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes")
             elif use_graph and graph_ready:
                 # Subsequent steps: update position buffer, then replay
                 # Position is read from GPU buffer by _ptr kernels
                 _update_position_buf(position)
                 graph.replay()
-                hidden = _decode_buffers.hidden
+                logits = _decode_buffers.logits
             else:
                 # No graph: use legacy decode step with allocations
                 hidden = self._decode_step_fixed_cache(next_token, position, context_len)
-
-            # Get next token
-            logits = self.get_logits(hidden)  # [1, vocab_size]
+                logits = self.get_logits(hidden)  # [1, vocab_size]
 
             if gpu_sampling:
                 # logits shape is [1, vocab_size], sample_token_gpu handles this
