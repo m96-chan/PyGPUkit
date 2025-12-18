@@ -6,6 +6,18 @@ from pygpukit.core.dtypes import DataType, float32, float64, int32, int64
 from pygpukit.core.factory import empty, from_numpy, ones, zeros
 from pygpukit.core.stream import Stream, StreamManager, default_stream
 
+# Import CUDA Event for GPU-side timing
+try:
+    from pygpukit._pygpukit_native import (
+        CudaEvent,
+        event_elapsed_ms,
+        event_elapsed_us,
+    )
+except ImportError:
+    CudaEvent = None  # type: ignore[misc, assignment]
+    event_elapsed_ms = None  # type: ignore[assignment]
+    event_elapsed_us = None  # type: ignore[assignment]
+
 __all__ = [
     "GPUArray",
     "DeviceInfo",
@@ -23,4 +35,7 @@ __all__ = [
     "Stream",
     "StreamManager",
     "default_stream",
+    "CudaEvent",
+    "event_elapsed_ms",
+    "event_elapsed_us",
 ]

@@ -71,6 +71,7 @@ pybind11_add_module(_pygpukit_native
     core/memory.cu
     core/stream.cpp
     core/stream.cu
+    core/event.cpp
     core/cuda_graph.cu
     # JIT
     jit/compiler.cpp

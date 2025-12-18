@@ -369,3 +369,50 @@ class GPUArray:
 
         # Wrap the view
         return GPUArray._wrap_native(view_native)
+
+    def view(self, new_shape: tuple[int, ...]) -> GPUArray:
+        """Create a zero-copy view with a different shape (same total elements).
+
+        This is a reshape operation that does not copy data. The new shape
+        must have the same total number of elements as the original.
+
+        Args:
+            new_shape: The desired shape for the view.
+
+        Returns:
+            A non-owning GPUArray view with the new shape.
+
+        Raises:
+            ValueError: If new_shape has different total elements than original.
+            RuntimeError: If native backend is not available.
+
+        Example:
+            # Reshape [1, 4096] to [1, 32, 128] for multi-head attention
+            q = q_flat.view((1, num_heads, head_dim))
+        """
+        if not has_native_module():
+            raise RuntimeError("view() requires native backend")
+
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        # Validate element count
+        new_size = 1
+        for dim in new_shape:
+            new_size *= dim
+
+        if new_size != self.size:
+            raise ValueError(
+                f"Cannot view array of size {self.size} as shape {new_shape} "
+                f"(size {new_size})"
+            )
+
+        # Get source native array
+        src_native = self._get_native()
+
+        # Use narrow with offset=0 to create view with new shape
+        view_native = native.GPUArray.narrow(src_native, 0, list(new_shape))
+
+        # Wrap the view
+        return GPUArray._wrap_native(view_native)

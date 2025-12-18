@@ -1252,20 +1252,20 @@ class Attention:
         k_2d = qkv.narrow(self.q_dim, self.k_dim)  # [1, k_dim]
         v_2d = qkv.narrow(self.q_dim + self.k_dim, self.v_dim)  # [1, v_dim]
 
-        # Reshape for multi-head: [1, num_heads, head_dim]
-        q = reshape_copy(q_2d, (1, self.num_heads, self.head_dim))
-        k = reshape_copy(k_2d, (1, self.num_kv_heads, self.head_dim))
-        v = reshape_copy(v_2d, (1, self.num_kv_heads, self.head_dim))
+        # Zero-copy reshape for multi-head: [1, num_heads, head_dim]
+        q = q_2d.view((1, self.num_heads, self.head_dim))
+        k = k_2d.view((1, self.num_kv_heads, self.head_dim))
+        v = v_2d.view((1, self.num_kv_heads, self.head_dim))
 
-        # QK Norm (Qwen3 style)
+        # QK Norm (Qwen3 style) with zero-copy views
         if self.q_norm is not None:
-            q_2d = reshape_copy(q, (self.num_heads, self.head_dim))
-            q_2d = self.q_norm(q_2d)
-            q = reshape_copy(q_2d, (1, self.num_heads, self.head_dim))
+            q_flat = q.view((self.num_heads, self.head_dim))
+            q_normed = self.q_norm(q_flat)
+            q = q_normed.view((1, self.num_heads, self.head_dim))
         if self.k_norm is not None:
-            k_2d = reshape_copy(k, (self.num_kv_heads, self.head_dim))
-            k_2d = self.k_norm(k_2d)
-            k = reshape_copy(k_2d, (1, self.num_kv_heads, self.head_dim))
+            k_flat = k.view((self.num_kv_heads, self.head_dim))
+            k_normed = self.k_norm(k_flat)
+            k = k_normed.view((1, self.num_kv_heads, self.head_dim))
 
         # Apply RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
@@ -1284,8 +1284,9 @@ class Attention:
         kv_cache_update_gqa(v, self._v_cache, self.num_heads, position)
 
         # Prepare for SDPA
-        # Transpose Q: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
-        q_t = transpose_3d_021(q)
+        # Zero-copy view Q: [1, num_heads, head_dim] -> [num_heads, 1, head_dim]
+        # (swapping dim 0 size=1 with dim 1 is a no-op in memory)
+        q_t = q.view((self.num_heads, 1, self.head_dim))
 
         # Cache is already in SDPA-ready format: [num_heads, max_seq_len, head_dim]
         # No transpose or GQA expansion needed!
@@ -1299,9 +1300,8 @@ class Attention:
         # SDPA with fixed cache - only attend to context_len tokens
         sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
 
-        # Reshape output: [num_heads, 1, head_dim] -> [1, hidden_size]
-        attn_output = transpose_3d_021(attn_out)
-        attn_output = reshape_copy(attn_output, (1, self.num_heads * self.head_dim))
+        # Zero-copy reshape output: [num_heads, 1, head_dim] -> [1, hidden_size]
+        attn_output = attn_out.view((1, self.num_heads * self.head_dim))
 
         return self.o_proj(attn_output)
 

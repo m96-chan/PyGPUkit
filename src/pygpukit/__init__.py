@@ -74,6 +74,14 @@ try:
 except ImportError:
     CudaGraph = None
 
+# Import CUDA Event for GPU-side timing
+try:
+    from pygpukit._pygpukit_native import CudaEvent, event_elapsed_ms, event_elapsed_us
+except ImportError:
+    CudaEvent = None
+    event_elapsed_ms = None
+    event_elapsed_us = None
+
 __all__ = [
     # Version
     "__version__",
@@ -144,4 +152,8 @@ __all__ = [
     "llm",
     # CUDA Graph
     "CudaGraph",
+    # CUDA Event
+    "CudaEvent",
+    "event_elapsed_ms",
+    "event_elapsed_us",
 ]

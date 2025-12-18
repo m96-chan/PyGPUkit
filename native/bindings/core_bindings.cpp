@@ -5,6 +5,7 @@
 #include "../core/device.hpp"
 #include "../core/memory.hpp"
 #include "../core/stream.hpp"
+#include "../core/event.hpp"
 #include "../core/cuda_graph.hpp"
 
 namespace py = pybind11;
@@ -205,6 +206,43 @@ void init_core_bindings(py::module_& m) {
             return std::string("Stream(priority=") +
                    (self.priority() == StreamPriority::High ? "High" : "Low") + ")";
         });
+
+    // CudaEvent class for GPU-side timing
+    py::class_<CudaEvent>(m, "CudaEvent")
+        .def(py::init<bool>(), py::arg("blocking_sync") = false,
+             "Create a CUDA event for GPU-side timing.\n\n"
+             "Args:\n"
+             "    blocking_sync: If True, synchronize() will block CPU. Default False.\n\n"
+             "Usage for timing:\n"
+             "    start = CudaEvent()\n"
+             "    stop = CudaEvent()\n"
+             "    start.record()\n"
+             "    # ... GPU operations ...\n"
+             "    stop.record()\n"
+             "    stop.synchronize()\n"
+             "    elapsed_ms = event_elapsed_ms(start, stop)")
+        .def("record", py::overload_cast<const Stream&>(&CudaEvent::record),
+             py::arg("stream"),
+             "Record event in the specified stream.")
+        .def("record", py::overload_cast<>(&CudaEvent::record),
+             "Record event in the default stream.")
+        .def("synchronize", &CudaEvent::synchronize,
+             "Wait for the event to complete.")
+        .def("query", &CudaEvent::query,
+             "Check if the event has completed (non-blocking).")
+        .def("__repr__", [](const CudaEvent& self) {
+            return std::string("CudaEvent()");
+        });
+
+    // Event timing functions
+    m.def("event_elapsed_ms", &event_elapsed_ms,
+          py::arg("start"), py::arg("stop"),
+          "Get elapsed time between two events in milliseconds.\n"
+          "Both events must have been recorded and stop must be synchronized.");
+    m.def("event_elapsed_us", &event_elapsed_us,
+          py::arg("start"), py::arg("stop"),
+          "Get elapsed time between two events in microseconds.\n"
+          "Both events must have been recorded and stop must be synchronized.");
 
     // CudaGraph class for optimized decode
     py::class_<CudaGraph>(m, "CudaGraph")
