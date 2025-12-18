@@ -2747,6 +2747,195 @@ class CausalTransformerModel:
 
         return accepted_tokens, new_pos, stats
 
+    # =========================================================================
+    # Jacobi Decoding
+    # =========================================================================
+
+    def _init_jacobi_guess(
+        self,
+        last_token: int,
+        position: int,
+        context_len: int,
+        n_tokens: int,
+        strategy: Literal["repeat", "ngram", "greedy"],
+    ) -> list[int]:
+        """Initialize guess tokens for Jacobi decoding.
+
+        Args:
+            last_token: The last accepted token
+            position: Current position in sequence
+            context_len: Current context length
+            n_tokens: Number of tokens to guess
+            strategy: Initialization strategy
+                - "repeat": Repeat last_token n times
+                - "ngram": Use n-gram cache (falls back to repeat if no match)
+                - "greedy": Run greedy decode to get initial guess
+
+        Returns:
+            List of n_tokens guessed token IDs
+        """
+        if strategy == "repeat":
+            return [last_token] * n_tokens
+
+        elif strategy == "ngram":
+            # N-gram cache lookup (simple implementation)
+            # Check if we have this token in recent history
+            if hasattr(self, "_ngram_cache") and last_token in self._ngram_cache:
+                cached = self._ngram_cache[last_token]
+                if len(cached) >= n_tokens:
+                    return cached[:n_tokens]
+            # Fallback to repeat
+            return [last_token] * n_tokens
+
+        elif strategy == "greedy":
+            # Run greedy sequential decode to get initial guess
+            # This is expensive but gives best initial guess
+            kv_snapshot = self.snapshot_kv_cache()
+            guess = []
+            pos = position
+            ctx = context_len
+            current = last_token
+
+            for _ in range(n_tokens):
+                hidden = self._decode_step_fixed_cache(current, pos, ctx)
+                logits = self.get_logits(hidden)
+                next_token = int(np.argmax(logits.to_numpy()[-1]))
+                guess.append(next_token)
+                current = next_token
+                pos += 1
+                ctx += 1
+
+            # Restore KV cache
+            self.restore_kv_cache(kv_snapshot)
+            return guess
+
+        else:
+            raise ValueError(f"Unknown init strategy: {strategy}")
+
+    def decode_step_jacobi(
+        self,
+        token_id: int,
+        position: int,
+        context_len: int,
+        n_tokens: int = 8,
+        max_iter: int = 3,
+        init_strategy: Literal["repeat", "ngram", "greedy"] = "repeat",
+    ) -> tuple[list[int], int, dict]:
+        """Jacobi decoding step - parallel iterative decoding without draft model.
+
+        Algorithm:
+        1. Initialize N future positions with a guess
+        2. Batch forward pass on all N positions
+        3. Update each position with argmax(logits)
+        4. Repeat until convergence or max_iter
+        5. Accept converged tokens
+
+        Args:
+            token_id: Current token ID (the last accepted token)
+            position: Position in sequence (position of token_id)
+            context_len: Total context length
+            n_tokens: Number of tokens to decode in parallel (default: 8)
+            max_iter: Maximum iterations for convergence (default: 3)
+            init_strategy: How to initialize guess tokens
+                - "repeat": Repeat last token (fast, simple)
+                - "ngram": Use n-gram cache if available
+                - "greedy": Run greedy decode first (slow but accurate)
+
+        Returns:
+            Tuple of:
+            - accepted_tokens: List of accepted token IDs
+            - new_position: Updated position after accepting tokens
+            - stats: Dict with 'iterations', 'converged', 'accepted_count'
+        """
+        # Snapshot KV cache before iterations
+        kv_snapshot = self.snapshot_kv_cache()
+
+        # Initialize guess
+        guess = self._init_jacobi_guess(
+            token_id, position, context_len, n_tokens, init_strategy
+        )
+
+        iterations_used = 0
+        converged = False
+
+        # Track which positions have stabilized (same value for 2 consecutive iterations)
+        prev_guess = None
+
+        for iteration in range(max_iter):
+            iterations_used = iteration + 1
+
+            # Restore KV to clean state before each iteration
+            self.restore_kv_cache(kv_snapshot)
+
+            # Batch forward: input [last_token, guess[0], ..., guess[n-2]]
+            # produces logits for [guess[0], guess[1], ..., guess[n-1]]
+            input_tokens = [token_id] + guess[:-1]
+            verify_ctx = position + len(input_tokens)
+
+            hidden = self._decode_step_fixed_cache_batch(
+                input_tokens, position, verify_ctx
+            )
+            logits = self.get_logits(hidden)
+            logits_np = logits.to_numpy()  # [n_tokens, vocab_size]
+
+            # Update guess with argmax
+            new_guess = [int(np.argmax(logits_np[i])) for i in range(n_tokens)]
+
+            # Check full convergence
+            if new_guess == guess:
+                converged = True
+                break
+
+            prev_guess = guess
+            guess = new_guess
+
+        # Find longest converged prefix
+        # Position i is "stable" if it hasn't changed in the last iteration
+        # AND all positions before it are also stable
+        if converged:
+            # All tokens converged
+            accepted_tokens = guess
+        else:
+            # Find the longest prefix where tokens match between last two iterations
+            # This indicates those positions have stabilized
+            accepted_tokens = []
+            if prev_guess is not None:
+                for i in range(n_tokens):
+                    if guess[i] == prev_guess[i]:
+                        accepted_tokens.append(guess[i])
+                    else:
+                        break
+            # If no convergence at all, take just the first token (safest)
+            if len(accepted_tokens) == 0:
+                # First position always sees correct context, so it's reliable
+                accepted_tokens = [guess[0]]
+
+        # Restore KV and re-run to properly update cache
+        self.restore_kv_cache(kv_snapshot)
+
+        new_pos = position
+        new_ctx = context_len
+        prev_token = token_id
+
+        for acc_token in accepted_tokens:
+            self._decode_step_fixed_cache(prev_token, new_pos, new_ctx)
+            prev_token = acc_token
+            new_pos += 1
+            new_ctx += 1
+
+        # Update n-gram cache for future use
+        if not hasattr(self, "_ngram_cache"):
+            self._ngram_cache: dict[int, list[int]] = {}
+        self._ngram_cache[token_id] = accepted_tokens.copy()
+
+        stats = {
+            "iterations": iterations_used,
+            "converged": converged,
+            "accepted_count": len(accepted_tokens),
+        }
+
+        return accepted_tokens, new_pos, stats
+
 
 # =============================================================================
 # Type Aliases
