@@ -99,6 +99,8 @@ pybind11_add_module(_pygpukit_native
 # This enables single-binary distribution that works with just GPU drivers
 target_link_libraries(_pygpukit_native PRIVATE
     CUDA::cuda_driver
+    CUDA::cublas
+    CUDA::cublasLt
 )
 
 # IMPORTANT: Do NOT enable CUDA_SEPARABLE_COMPILATION
