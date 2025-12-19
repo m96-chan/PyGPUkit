@@ -20,6 +20,9 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 from pygpukit.core.array import GPUArray
+from pygpukit.core.dtypes import bfloat16 as dt_bfloat16
+from pygpukit.core.dtypes import float16 as dt_float16
+from pygpukit.core.dtypes import float32 as dt_float32
 from pygpukit.core.factory import from_numpy, zeros
 from pygpukit.ops.basic import (
     add,
@@ -28,6 +31,7 @@ from pygpukit.ops.basic import (
     concat_axis0,
     copy_to,
     embedding_lookup,
+    embedding_lookup_batch,
     embedding_lookup_ptr,
     gelu,
     kv_cache_prefill_gqa,
@@ -47,6 +51,8 @@ from pygpukit.ops.basic import (
     sdpa_causal_fixed_cache,
     sdpa_causal_fixed_cache_ptr,
     silu,
+    slice_rows_range_ptr,
+    split_qkv_batch,
     transpose,
     transpose_3d_021,
 )
@@ -264,12 +270,58 @@ QWEN3_SPEC = ModelSpec(
 )
 
 
+# Qwen2 spec - like LLaMA but with QKV biases
+QWEN2_SPEC = ModelSpec(
+    name="qwen2",
+    # Embeddings
+    embed_tokens="model.embed_tokens.weight",
+    position_embed=None,
+    lm_head="lm_head.weight",
+    final_norm="model.norm.weight",
+    final_norm_bias=None,
+    # Attention
+    attn_norm="model.layers.{layer}.input_layernorm.weight",
+    attn_norm_bias=None,
+    q_proj="model.layers.{layer}.self_attn.q_proj.weight",
+    k_proj="model.layers.{layer}.self_attn.k_proj.weight",
+    v_proj="model.layers.{layer}.self_attn.v_proj.weight",
+    o_proj="model.layers.{layer}.self_attn.o_proj.weight",
+    q_bias="model.layers.{layer}.self_attn.q_proj.bias",
+    k_bias="model.layers.{layer}.self_attn.k_proj.bias",
+    v_bias="model.layers.{layer}.self_attn.v_proj.bias",
+    o_bias=None,
+    q_norm=None,
+    k_norm=None,
+    # MLP (SwiGLU)
+    mlp_norm="model.layers.{layer}.post_attention_layernorm.weight",
+    mlp_norm_bias=None,
+    fc1=None,
+    fc1_bias=None,
+    fc2=None,
+    fc2_bias=None,
+    gate_proj="model.layers.{layer}.mlp.gate_proj.weight",
+    up_proj="model.layers.{layer}.mlp.up_proj.weight",
+    down_proj="model.layers.{layer}.mlp.down_proj.weight",
+    # Architecture
+    norm_type="rmsnorm",
+    activation="silu",
+    use_rope=True,
+    use_qk_norm=False,
+    use_position_embed=False,
+    qkv_combined=False,
+    weight_transpose=False,
+    default_norm_eps=1e-6,
+    default_rope_theta=1000000.0,
+    hf_model_type="qwen2",
+)
+
+
 # Registry for model detection
 MODEL_SPECS: dict[str, ModelSpec] = {
     "gpt2": GPT2_SPEC,
     "llama": LLAMA_SPEC,
     "qwen3": QWEN3_SPEC,
-    "qwen2": LLAMA_SPEC,  # Qwen2 uses same structure as LLaMA
+    "qwen2": QWEN2_SPEC,
 }
 
 
@@ -288,7 +340,13 @@ def detect_model_spec(tensor_names: list[str]) -> ModelSpec:
     # Check for Qwen3-specific QK norm
     if any("q_norm" in name for name in tensor_names):
         return QWEN3_SPEC
-    # Check for LLaMA-style structure
+    # Check for Qwen2-style structure (has QKV biases)
+    if (
+        "model.embed_tokens.weight" in tensor_names
+        and "model.layers.0.self_attn.q_proj.bias" in tensor_names
+    ):
+        return QWEN2_SPEC
+    # Check for LLaMA-style structure (no QKV biases)
     if "model.embed_tokens.weight" in tensor_names:
         return LLAMA_SPEC
     # Check for GPT-2 structure
@@ -682,6 +740,11 @@ class DecodeBuffers:
     q_flat_batch: GPUArray | None = None  # [max_batch * num_heads, head_dim]
     k_flat_batch: GPUArray | None = None  # [max_batch * num_kv_heads, head_dim]
 
+    # Batch CUDA Graph buffers (for graph capture/replay)
+    token_ids_batch_buf: GPUArray | None = None  # [max_batch] int32 - batch token IDs
+    start_position_batch_buf: GPUArray | None = None  # [1] int32 - start position
+    # context_len_buf is already defined above and reused for batch
+
     @classmethod
     def allocate(
         cls,
@@ -793,31 +856,17 @@ class DecodeBuffers:
             hidden_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
             residual_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
             norm_out_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
-            qkv_proj_out_batch = zeros(
-                (max_batch_size, q_dim + k_dim + v_dim), dtype=dtype
-            )
-            q_batch = zeros(
-                (max_batch_size, config.num_heads, config.head_dim), dtype=dtype
-            )
-            k_batch = zeros(
-                (max_batch_size, config.num_kv_heads, config.head_dim), dtype=dtype
-            )
-            v_batch = zeros(
-                (max_batch_size, config.num_kv_heads, config.head_dim), dtype=dtype
-            )
-            q_t_batch = zeros(
-                (config.num_heads, max_batch_size, config.head_dim), dtype=dtype
-            )
-            attn_out_batch = zeros(
-                (config.num_heads, max_batch_size, config.head_dim), dtype=dtype
-            )
+            qkv_proj_out_batch = zeros((max_batch_size, q_dim + k_dim + v_dim), dtype=dtype)
+            q_batch = zeros((max_batch_size, config.num_heads, config.head_dim), dtype=dtype)
+            k_batch = zeros((max_batch_size, config.num_kv_heads, config.head_dim), dtype=dtype)
+            v_batch = zeros((max_batch_size, config.num_kv_heads, config.head_dim), dtype=dtype)
+            q_t_batch = zeros((config.num_heads, max_batch_size, config.head_dim), dtype=dtype)
+            attn_out_batch = zeros((config.num_heads, max_batch_size, config.head_dim), dtype=dtype)
             attn_out_t_batch = zeros(
                 (max_batch_size, config.num_heads, config.head_dim), dtype=dtype
             )
             o_proj_out_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
-            gate_up_out_batch = zeros(
-                (max_batch_size, 2 * config.intermediate_size), dtype=dtype
-            )
+            gate_up_out_batch = zeros((max_batch_size, 2 * config.intermediate_size), dtype=dtype)
             mlp_down_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
             cos_batch = zeros((max_batch_size, config.head_dim), dtype=dtype)
             sin_batch = zeros((max_batch_size, config.head_dim), dtype=dtype)
@@ -832,6 +881,13 @@ class DecodeBuffers:
                 k_flat_batch = zeros(
                     (max_batch_size * config.num_kv_heads, config.head_dim), dtype=dtype
                 )
+
+        # Batch CUDA Graph buffers (allocated if max_batch_size > 0)
+        token_ids_batch_buf = None
+        start_position_batch_buf = None
+        if max_batch_size > 0:
+            token_ids_batch_buf = zeros((max_batch_size,), dtype="int32")
+            start_position_batch_buf = zeros((1,), dtype="int32")
 
         return cls(
             hidden=hidden,
@@ -889,6 +945,8 @@ class DecodeBuffers:
             logits_batch=logits_batch,
             q_flat_batch=q_flat_batch,
             k_flat_batch=k_flat_batch,
+            token_ids_batch_buf=token_ids_batch_buf,
+            start_position_batch_buf=start_position_batch_buf,
         )
 
 
@@ -1353,10 +1411,10 @@ class Attention:
             assert self._cos is not None and self._sin is not None
             # Match cos/sin dtype to q/k dtype for native kernel support
             q_dtype = q.dtype
-            if q_dtype == "float16":
+            if q_dtype == dt_float16:
                 cos = from_numpy(self._cos[position_ids].astype(np.float16))
                 sin = from_numpy(self._sin[position_ids].astype(np.float16))
-            elif q_dtype == "bfloat16":
+            elif q_dtype == dt_bfloat16:
                 # NumPy doesn't support bfloat16, so use float32 -> convert on GPU
                 cos = from_numpy(self._cos[position_ids].astype(np.float32))
                 sin = from_numpy(self._sin[position_ids].astype(np.float32))
@@ -1373,7 +1431,7 @@ class Attention:
                 cos = from_numpy(self._cos[position_ids].astype(np.float32))
                 sin = from_numpy(self._sin[position_ids].astype(np.float32))
             # Apply RoPE in-place (FP32 and FP16 have native kernel support)
-            if q_dtype in ("float32", "float16"):
+            if q_dtype in (dt_float32, dt_float16):
                 rope_inplace(q, k, cos, sin)
 
         # GPU KV Cache - keep KV tensors on GPU to avoid CPU-GPU transfers
@@ -1444,6 +1502,14 @@ class Attention:
         q_2d = qkv.narrow(0, self.q_dim)  # [1, q_dim]
         k_2d = qkv.narrow(self.q_dim, self.k_dim)  # [1, k_dim]
         v_2d = qkv.narrow(self.q_dim + self.k_dim, self.v_dim)  # [1, v_dim]
+
+        # Apply biases separately (fused projection has no bias)
+        if self.q_proj.bias is not None:
+            bias_add_inplace(q_2d, self.q_proj.bias)
+        if self.k_proj.bias is not None:
+            bias_add_inplace(k_2d, self.k_proj.bias)
+        if self.v_proj.bias is not None:
+            bias_add_inplace(v_2d, self.v_proj.bias)
 
         # Zero-copy reshape for multi-head: [1, num_heads, head_dim]
         q = q_2d.view((1, self.num_heads, self.head_dim))
@@ -1534,9 +1600,20 @@ class Attention:
         # strided access for 2D arrays. Split QKV via numpy slicing.
         # TODO: Add a native batch_narrow kernel for better performance.
         qkv_np = qkv.to_numpy()  # [seq_len, total_qkv]
-        q_np = qkv_np[:, :self.q_dim]  # [seq_len, q_dim]
-        k_np = qkv_np[:, self.q_dim:self.q_dim + self.k_dim]  # [seq_len, k_dim]
-        v_np = qkv_np[:, self.q_dim + self.k_dim:]  # [seq_len, v_dim]
+        q_np = qkv_np[:, : self.q_dim]  # [seq_len, q_dim]
+        k_np = qkv_np[:, self.q_dim : self.q_dim + self.k_dim]  # [seq_len, k_dim]
+        v_np = qkv_np[:, self.q_dim + self.k_dim :]  # [seq_len, v_dim]
+
+        # Apply biases (fused projection has no bias)
+        if self.q_proj.bias is not None:
+            q_bias = self.q_proj.bias.to_numpy()
+            q_np = q_np + q_bias
+        if self.k_proj.bias is not None:
+            k_bias = self.k_proj.bias.to_numpy()
+            k_np = k_np + k_bias
+        if self.v_proj.bias is not None:
+            v_bias = self.v_proj.bias.to_numpy()
+            v_np = v_np + v_bias
 
         q_2d = from_numpy(q_np.astype(qkv_np.dtype))
         k_2d = from_numpy(k_np.astype(qkv_np.dtype))
@@ -1578,9 +1655,7 @@ class Attention:
         q_t = transpose_3d_021(q)
 
         # Allocate output buffer
-        attn_out = from_numpy(
-            np.zeros((self.num_heads, seq_len, self.head_dim), dtype=np.float16)
-        )
+        attn_out = from_numpy(np.zeros((self.num_heads, seq_len, self.head_dim), dtype=np.float16))
 
         # SDPA with causal masking - context_len should equal start_position + seq_len
         sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
@@ -1590,6 +1665,111 @@ class Attention:
         attn_output = reshape_copy(attn_output, (seq_len, self.num_heads * self.head_dim))
 
         return self.o_proj(attn_output)
+
+    def forward_fixed_cache_batch_zero_alloc(
+        self,
+        x: GPUArray,
+        start_position: int,
+        context_len: int,
+        buffers: DecodeBuffers,
+        rope_cos_gpu: GPUArray | None,
+        rope_sin_gpu: GPUArray | None,
+        start_pos_buf: GPUArray,
+    ) -> GPUArray:
+        """Zero-allocation forward pass for batch decode using fixed-length KV cache.
+
+        This version uses pre-allocated buffers for all operations, making it
+        compatible with CUDA Graph capture. No memory allocations occur.
+
+        Args:
+            x: Input tensor [seq_len, hidden_size] - multiple tokens
+            start_position: Starting position for the batch (first token's position)
+            context_len: Total context length after adding this batch
+            buffers: Pre-allocated DecodeBuffers with batch buffers
+            rope_cos_gpu: GPU RoPE cosine table [max_seq_len, head_dim] or None
+            rope_sin_gpu: GPU RoPE sine table [max_seq_len, head_dim] or None
+            start_pos_buf: GPU buffer [1] int32 containing start_position
+
+        Returns:
+            Output tensor [seq_len, hidden_size] (uses buffers.o_proj_out_batch)
+        """
+        assert self._k_cache is not None, "Call init_fixed_cache first"
+        seq_len = x.shape[0]
+
+        # QKV projection into pre-allocated buffer
+        # qkv_proj_out_batch: [max_batch, q_dim + k_dim + v_dim]
+        qkv_out = buffers.qkv_proj_out_batch.slice_rows(seq_len)
+        self.qkv_proj(x, out=qkv_out)
+
+        # Split QKV into separate Q, K, V tensors (zero-alloc kernel)
+        # Output directly to 3D buffers [seq_len, num_heads, head_dim]
+        # For 3D buffers, use view since graph capture has fixed seq_len == max_batch
+        q_out = buffers.q_batch.view((seq_len, self.num_heads, self.head_dim))
+        k_out = buffers.k_batch.view((seq_len, self.num_kv_heads, self.head_dim))
+        v_out = buffers.v_batch.view((seq_len, self.num_kv_heads, self.head_dim))
+        split_qkv_batch(qkv_out, q_out, k_out, v_out, self.q_dim, self.k_dim, self.v_dim)
+
+        # Apply biases (fused projection has no bias)
+        # Note: bias_add_inplace works on 2D, so we need to use the 2D view
+        if self.q_proj.bias is not None:
+            q_out_2d = q_out.view((seq_len, self.q_dim))
+            bias_add_inplace(q_out_2d, self.q_proj.bias)
+        if self.k_proj.bias is not None:
+            k_out_2d = k_out.view((seq_len, self.k_dim))
+            bias_add_inplace(k_out_2d, self.k_proj.bias)
+        if self.v_proj.bias is not None:
+            v_out_2d = v_out.view((seq_len, self.v_dim))
+            bias_add_inplace(v_out_2d, self.v_proj.bias)
+
+        # QK Norm (Qwen3 style) - applied to flattened Q/K
+        if self.q_norm is not None and buffers.q_flat_batch is not None:
+            # Flatten [seq_len, num_heads, head_dim] -> [seq_len * num_heads, head_dim]
+            q_flat = buffers.q_flat_batch.slice_rows(seq_len * self.num_heads)
+            copy_to(q_out.view((seq_len * self.num_heads, self.head_dim)), q_flat)
+            rmsnorm(q_flat, self.q_norm.weight, self.q_norm.eps, out=q_flat)
+            # Copy back to q_out
+            copy_to(q_flat.view((seq_len, self.num_heads, self.head_dim)), q_out)
+
+        if self.k_norm is not None and buffers.k_flat_batch is not None:
+            k_flat = buffers.k_flat_batch.slice_rows(seq_len * self.num_kv_heads)
+            copy_to(k_out.view((seq_len * self.num_kv_heads, self.head_dim)), k_flat)
+            rmsnorm(k_flat, self.k_norm.weight, self.k_norm.eps, out=k_flat)
+            copy_to(k_flat.view((seq_len, self.num_kv_heads, self.head_dim)), k_out)
+
+        # RoPE: Copy cos/sin from GPU table using start_pos_buf (zero-alloc)
+        if self.config.use_rope and rope_cos_gpu is not None and rope_sin_gpu is not None:
+            cos_out = buffers.cos_batch.slice_rows(seq_len)
+            sin_out = buffers.sin_batch.slice_rows(seq_len)
+            slice_rows_range_ptr(rope_cos_gpu, cos_out, start_pos_buf, seq_len)
+            slice_rows_range_ptr(rope_sin_gpu, sin_out, start_pos_buf, seq_len)
+            rope_inplace(q_out, k_out, cos_out, sin_out)
+
+        # Update KV cache with batch (use prefill kernel)
+        kv_cache_prefill_gqa(k_out, self._k_cache, self.num_heads, start_position)
+        kv_cache_prefill_gqa(v_out, self._v_cache, self.num_heads, start_position)
+
+        # Transpose Q for SDPA: [seq_len, num_heads, head_dim] -> [num_heads, seq_len, head_dim]
+        # For graph capture, buffers are sized exactly for batch_size == seq_len
+        # Use view to create shape [num_heads, seq_len, head_dim] from the flat buffer
+        q_t_out = buffers.q_t_batch.view((self.num_heads, seq_len, self.head_dim))
+        transpose_3d_021(q_out, out=q_t_out)
+
+        # SDPA with causal masking into pre-allocated buffer
+        attn_out = buffers.attn_out_batch.view((self.num_heads, seq_len, self.head_dim))
+        sdpa_causal_fixed_cache(q_t_out, self._k_cache, self._v_cache, attn_out, context_len)
+
+        # Transpose output: [num_heads, seq_len, head_dim] -> [seq_len, num_heads, head_dim]
+        attn_out_t = buffers.attn_out_t_batch.view((seq_len, self.num_heads, self.head_dim))
+        transpose_3d_021(attn_out, out=attn_out_t)
+
+        # Reshape [seq_len, num_heads, head_dim] -> [seq_len, hidden_size] (view)
+        attn_out_2d = attn_out_t.view((seq_len, self.num_heads * self.head_dim))
+
+        # O projection into pre-allocated buffer
+        o_out = buffers.o_proj_out_batch.slice_rows(seq_len)
+        self.o_proj(attn_out_2d, out=o_out)
+
+        return o_out
 
 
 # =============================================================================
@@ -2095,7 +2275,11 @@ class CausalTransformerModel:
                     )
                     copy_to(buffers.hidden, buffers.residual)
                     model_self._attention_forward_zero_alloc(
-                        block.attn, buffers.norm_out, pos, ctx_len, buffers,
+                        block.attn,
+                        buffers.norm_out,
+                        pos,
+                        ctx_len,
+                        buffers,
                         use_position_ptr=True,  # Read position from GPU buffer
                     )
                     add_inplace(buffers.hidden, buffers.residual)
@@ -2131,6 +2315,7 @@ class CausalTransformerModel:
             # Helper to update random_val buffer (outside graph capture/replay)
             # Use copy_from_numpy to avoid GPU allocation every call
             import random
+
             _rand_np = np.array([0.0], dtype=np.float32)  # Reusable numpy buffer
 
             def _update_random_val_buf() -> None:
@@ -2158,7 +2343,8 @@ class CausalTransformerModel:
                     _inline_decode_step(next_token, position, context_len)
                     # Include get_logits in graph (matmul to pre-allocated buffer)
                     matmul(
-                        _decode_buffers.hidden, self._lm_head_t_cache,
+                        _decode_buffers.hidden,
+                        self._lm_head_t_cache,
                         out=_decode_buffers.logits,
                     )
                     # Include sampling in graph (if top_k > 0)
@@ -2175,8 +2361,7 @@ class CausalTransformerModel:
                     gc.enable()
                 graph_ready = True
                 sampling_str = "in graph" if include_sampling_in_graph else "outside"
-                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes "
-                      f"(sampling={sampling_str})")
+                print(f"  [CUDA Graph] Captured {graph.num_nodes} nodes (sampling={sampling_str})")
 
                 # Get result
                 if include_sampling_in_graph:
@@ -2310,6 +2495,14 @@ class CausalTransformerModel:
         # This is 4x faster for M=1 with cuBLASLt due to reduced kernel launch overhead
         attn.qkv_proj(x, out=buffers.qkv_proj_out)
 
+        # Apply biases (fused projection has no bias)
+        if attn.q_proj.bias is not None:
+            bias_add_inplace(buffers.q_view, attn.q_proj.bias)
+        if attn.k_proj.bias is not None:
+            bias_add_inplace(buffers.k_view, attn.k_proj.bias)
+        if attn.v_proj.bias is not None:
+            bias_add_inplace(buffers.v_view, attn.v_proj.bias)
+
         # Reshape narrow views to 3D using pre-allocated buffers
         # q_view, k_view, v_view are pre-created zero-copy views of qkv_proj_out
         reshape_copy(buffers.q_view, (1, attn.num_heads, attn.head_dim), out=buffers.q)
@@ -2361,8 +2554,12 @@ class CausalTransformerModel:
             # Use pointer-based SDPA for CUDA Graph replay
             assert max_kv_len is not None, "max_kv_len required for CUDA Graph mode"
             sdpa_causal_fixed_cache_ptr(
-                buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out,
-                buffers.context_len_buf, max_kv_len
+                buffers.q_t,
+                attn._k_cache,
+                attn._v_cache,
+                buffers.attn_out,
+                buffers.context_len_buf,
+                max_kv_len,
             )
         else:
             sdpa_causal_fixed_cache(
@@ -2404,6 +2601,49 @@ class CausalTransformerModel:
             gelu_out = gelu(fc1_out)
             fc2_out = mlp.fc2(gelu_out)
             copy_to(fc2_out, buffers.hidden)
+
+    def _mlp_forward_batch_zero_alloc(
+        self,
+        mlp: MLP,
+        x: GPUArray,
+        buffers: DecodeBuffers,
+        out: GPUArray,
+    ) -> None:
+        """Batch MLP forward pass with zero allocations (SwiGLU).
+
+        Uses fused gate_up projection for efficiency.
+
+        Args:
+            mlp: MLP module
+            x: Input tensor [seq_len, hidden_size]
+            buffers: Pre-allocated decode buffers
+            out: Output buffer [seq_len, hidden_size] to write result
+        """
+        seq_len = x.shape[0]
+
+        if mlp.activation == "silu":
+            # Fused gate_up projection
+            gate_up_out = buffers.gate_up_out_batch.slice_rows(seq_len)
+            mlp.gate_up_proj(x, out=gate_up_out)
+
+            # Split into gate and up using narrow
+            intermediate_size = mlp.intermediate_size
+            gate = gate_up_out.narrow(0, intermediate_size)  # [seq_len, intermediate_size]
+            up = gate_up_out.narrow(intermediate_size, intermediate_size)
+
+            # SiLU in-place on gate
+            silu(gate, out=gate)
+
+            # Multiply gate * up in-place
+            mul_inplace(gate, up)
+
+            # Down projection to output buffer
+            mlp.down_proj(gate, out=out)
+        else:
+            # GELU path - still has allocations (rarely used)
+            fc1_out = mlp.fc1(x)
+            gelu_out = gelu(fc1_out)
+            mlp.fc2(gelu_out, out=out)
 
     def _prefill_with_buffers(
         self,
@@ -2709,9 +2949,7 @@ class CausalTransformerModel:
         """
         # Dispatch to optimized single-token path for M=1
         if len(token_ids) == 1:
-            return self._decode_step_fixed_cache(
-                token_ids[0], start_position, context_len
-            )
+            return self._decode_step_fixed_cache(token_ids[0], start_position, context_len)
 
         # M > 1: Batch decode path
         # Get token embeddings for batch
@@ -2727,9 +2965,7 @@ class CausalTransformerModel:
             hidden = block.attn_norm(hidden)
 
             # Attention with fixed cache (batch)
-            hidden = block.attn.forward_fixed_cache_batch(
-                hidden, start_position, context_len
-            )
+            hidden = block.attn.forward_fixed_cache_batch(hidden, start_position, context_len)
             hidden = add(residual, hidden)
 
             # MLP
@@ -2772,8 +3008,7 @@ class CausalTransformerModel:
 
         if buffers.max_batch_size == 0:
             raise RuntimeError(
-                "Batch buffers not allocated. "
-                "Call DecodeBuffers.allocate(..., max_batch_size=8)"
+                "Batch buffers not allocated. Call DecodeBuffers.allocate(..., max_batch_size=8)"
             )
         if seq_len > buffers.max_batch_size:
             raise ValueError(
@@ -2794,8 +3029,12 @@ class CausalTransformerModel:
         # Use slice_rows for actual seq_len (logical batch size)
         # slice_rows creates a zero-copy view of the first N rows
         hidden = buffers.hidden_batch.slice_rows(seq_len)
-        residual_buf = buffers.residual_batch.slice_rows(seq_len) if buffers.residual_batch else None
-        norm_out_buf = buffers.norm_out_batch.slice_rows(seq_len) if buffers.norm_out_batch else None
+        residual_buf = (
+            buffers.residual_batch.slice_rows(seq_len) if buffers.residual_batch else None
+        )
+        norm_out_buf = (
+            buffers.norm_out_batch.slice_rows(seq_len) if buffers.norm_out_batch else None
+        )
 
         # Transformer blocks
         for block in self.blocks:
@@ -3008,9 +3247,7 @@ class CausalTransformerModel:
         # Context length should be: start_position + number of tokens being processed
         verify_ctx = position + len(verify_input)
 
-        hidden_batch = self._decode_step_fixed_cache_batch(
-            verify_input, position, verify_ctx
-        )
+        hidden_batch = self._decode_step_fixed_cache_batch(verify_input, position, verify_ctx)
         verify_logits = self.get_logits(hidden_batch)
         verify_logits_np = verify_logits.to_numpy()  # [K, vocab_size]
 
@@ -3055,8 +3292,11 @@ class CausalTransformerModel:
         stats = {
             "draft_count": len(draft_tokens),
             "accepted_count": len(
-                [t for i, t in enumerate(accepted_tokens)
-                 if i < len(draft_tokens) and t == draft_tokens[i]]
+                [
+                    t
+                    for i, t in enumerate(accepted_tokens)
+                    if i < len(draft_tokens) and t == draft_tokens[i]
+                ]
             ),
         }
 
@@ -3106,9 +3346,7 @@ class CausalTransformerModel:
             pos = confirmed_pos + i
             ctx = confirmed_pos + i + 1
             # Forward through early layers only
-            hidden = self._draft_forward_early_layers(
-                current_token, pos, ctx, draft_layers
-            )
+            hidden = self._draft_forward_early_layers(current_token, pos, ctx, draft_layers)
             logits = self._draft_get_logits(hidden)
             logits_np = logits.to_numpy()[-1]
             next_token = int(np.argmax(logits_np))
@@ -3122,9 +3360,7 @@ class CausalTransformerModel:
         verify_input = [token_id] + draft_tokens[:-1]
         verify_ctx = confirmed_pos + len(verify_input)
 
-        hidden_batch = self._decode_step_fixed_cache_batch(
-            verify_input, confirmed_pos, verify_ctx
-        )
+        hidden_batch = self._decode_step_fixed_cache_batch(verify_input, confirmed_pos, verify_ctx)
         verify_logits = self.get_logits(hidden_batch)
         verify_logits_np = verify_logits.to_numpy()
 
@@ -3160,8 +3396,11 @@ class CausalTransformerModel:
         stats = {
             "draft_count": len(draft_tokens),
             "accepted_count": len(
-                [t for i, t in enumerate(accepted_tokens)
-                 if i < len(draft_tokens) and t == draft_tokens[i]]
+                [
+                    t
+                    for i, t in enumerate(accepted_tokens)
+                    if i < len(draft_tokens) and t == draft_tokens[i]
+                ]
             ),
         }
 
@@ -3282,29 +3521,33 @@ class CausalTransformerModel:
             # Transformer blocks
             for block in self.blocks:
                 rmsnorm(
-                    buffers.hidden, block.attn_norm.weight, block.attn_norm.eps,
-                    out=buffers.norm_out
+                    buffers.hidden,
+                    block.attn_norm.weight,
+                    block.attn_norm.eps,
+                    out=buffers.norm_out,
                 )
                 copy_to(buffers.hidden, buffers.residual)
                 self._attention_forward_zero_alloc(
-                    block.attn, buffers.norm_out, 0, max_seq_len, buffers,
+                    block.attn,
+                    buffers.norm_out,
+                    0,
+                    max_seq_len,
+                    buffers,
                     use_position_ptr=True,
                     use_context_len_ptr=True,
-                    max_kv_len=max_seq_len
+                    max_kv_len=max_seq_len,
                 )
                 add_inplace(buffers.hidden, buffers.residual)
                 copy_to(buffers.hidden, buffers.residual)
                 rmsnorm(
-                    buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps,
-                    out=buffers.norm_out
+                    buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=buffers.norm_out
                 )
                 self._mlp_forward_zero_alloc(block.mlp, buffers.norm_out, buffers)
                 add_inplace(buffers.hidden, buffers.residual)
 
             # Final norm
             rmsnorm(
-                buffers.hidden, self.final_norm.weight, self.final_norm.eps,
-                out=buffers.norm_out
+                buffers.hidden, self.final_norm.weight, self.final_norm.eps, out=buffers.norm_out
             )
             copy_to(buffers.norm_out, buffers.hidden)
 
@@ -3318,9 +3561,7 @@ class CausalTransformerModel:
         self._decode_graph_ready = True
         print(f"  [CUDA Graph] Captured {self._decode_graph.num_nodes} nodes for decode")
 
-    def _decode_step_graph_replay(
-        self, token_id: int, position: int, context_len: int
-    ) -> GPUArray:
+    def _decode_step_graph_replay(self, token_id: int, position: int, context_len: int) -> GPUArray:
         """Execute decode step using CUDA Graph replay.
 
         Updates GPU buffers and replays the captured graph.
@@ -3334,8 +3575,9 @@ class CausalTransformerModel:
         Returns:
             Logits buffer [1, vocab_size]
         """
-        assert hasattr(self, "_decode_graph_ready") and self._decode_graph_ready, \
+        assert hasattr(self, "_decode_graph_ready") and self._decode_graph_ready, (
             "Call init_decode_graph() first"
+        )
 
         buffers = self._decode_buffers
 
@@ -3349,8 +3591,7 @@ class CausalTransformerModel:
             buffers.context_len_buf._get_native().copy_from_numpy(self._ctx_np)
         except RuntimeError as e:
             raise RuntimeError(
-                f"H2D copy failed: tok={token_id}, pos={position}, ctx={context_len}. "
-                f"Error: {e}"
+                f"H2D copy failed: tok={token_id}, pos={position}, ctx={context_len}. Error: {e}"
             )
 
         # Device synchronize to ensure H2D copies are visible to the graph
@@ -3358,6 +3599,7 @@ class CausalTransformerModel:
         # on its own non-blocking capture stream, which may not see memory written
         # by the default stream without explicit device-level synchronization
         from pygpukit.core.backend import get_backend
+
         get_backend().synchronize()
 
         # Replay graph
@@ -3375,6 +3617,284 @@ class CausalTransformerModel:
             )
 
         return buffers.logits
+
+    # =========================================================================
+    # Batch CUDA Graph (seq_len > 1 only)
+    # =========================================================================
+    # CUDA Graph is applied only to batch decode where launch overhead is non-negligible.
+    # M=1 decode remains non-graph because compute dominates.
+    # This separation is intentional and performance-driven.
+
+    def init_decode_graph_batch(
+        self,
+        batch_size: int,
+        max_seq_len: int = 512,
+    ) -> None:
+        """Initialize CUDA Graph for batch decode (seq_len > 1).
+
+        Captures a graph for batch verification decode. The graph is replayed
+        with different token IDs and positions without recapturing.
+
+        IMPORTANT: This is separate from M=1 CUDA Graph. M=1 uses non-graph path.
+
+        Args:
+            batch_size: Fixed batch size to capture (must match during replay)
+            max_seq_len: Maximum sequence length for RoPE pre-computation
+        """
+        import gc
+
+        from pygpukit._pygpukit_native import CudaGraph
+
+        dtype = str(self.embed_tokens.dtype)
+        use_qk_norm = self.spec is not None and self.spec.use_qk_norm
+        lm_head = self._lm_head if self._lm_head is not None else self.embed_tokens
+        vocab_size = lm_head.shape[0]
+
+        # Allocate batch decode buffers if not already done
+        if not hasattr(self, "_batch_decode_buffers") or self._batch_decode_buffers is None:
+            self._batch_decode_buffers = DecodeBuffers.allocate(
+                self.config,
+                dtype=dtype,
+                use_qk_norm=use_qk_norm,
+                vocab_size=vocab_size,
+                max_batch_size=batch_size,
+            )
+
+        buffers = self._batch_decode_buffers
+
+        if buffers.max_batch_size < batch_size:
+            raise ValueError(
+                f"Buffers max_batch_size ({buffers.max_batch_size}) < requested batch_size ({batch_size})"
+            )
+
+        # Pre-compute RoPE tables on GPU if not already done
+        if self.config.use_rope and not hasattr(self, "_rope_cos_gpu"):
+            cos_np, sin_np = precompute_freqs_cis(
+                self.config.head_dim, max_seq_len, self.config.rope_theta
+            )
+            np_dtype = np.float16 if dtype == "float16" else np.float32
+            self._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
+            self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+
+        # Cache transposed lm_head for graph
+        if not hasattr(self, "_lm_head_t_cache"):
+            lm_head_np = lm_head.to_numpy()
+            self._lm_head_t_cache = from_numpy(lm_head_np.T.copy())
+
+        # Numpy buffers for CPU-side updates
+        self._batch_token_ids_np = np.zeros(batch_size, dtype=np.int32)
+        self._batch_start_pos_np = np.array([0], dtype=np.int32)
+        self._batch_ctx_len_np = np.array([0], dtype=np.int32)
+
+        # Store graph parameters
+        self._batch_graph_size = batch_size
+        self._batch_graph_max_seq_len = max_seq_len
+
+        # Warmup before capture
+        print(f"  [Batch CUDA Graph] Warming up with batch_size={batch_size}...")
+        self._batch_ctx_len_np[0] = max_seq_len
+        buffers.context_len_buf._get_native().copy_from_numpy(self._batch_ctx_len_np)
+        for _ in range(3):
+            self._decode_step_batch_for_graph(list(range(batch_size)), 0, batch_size, buffers)
+        from pygpukit.core import default_stream
+
+        default_stream().synchronize()
+
+        # Capture the batch decode graph
+        print("  [Batch CUDA Graph] Capturing graph...")
+        self._batch_decode_graph = CudaGraph()
+
+        # Write initial values to GPU buffers
+        self._batch_token_ids_np[:] = list(range(batch_size))
+        buffers.token_ids_batch_buf._get_native().copy_from_numpy(self._batch_token_ids_np)
+        self._batch_start_pos_np[0] = 0
+        buffers.start_position_batch_buf._get_native().copy_from_numpy(self._batch_start_pos_np)
+        self._batch_ctx_len_np[0] = max_seq_len
+        buffers.context_len_buf._get_native().copy_from_numpy(self._batch_ctx_len_np)
+
+        gc.disable()
+        try:
+            self._batch_decode_graph.begin_capture()
+
+            # Batch embedding lookup from GPU buffer
+            embedding_lookup_batch(
+                self.embed_tokens,
+                buffers.hidden_batch,
+                buffers.token_ids_batch_buf,
+                batch_size,
+            )
+
+            # Use full max_batch_size views for graph (fixed size)
+            hidden = buffers.hidden_batch.slice_rows(batch_size)
+            residual_buf = buffers.residual_batch.slice_rows(batch_size)
+            norm_out_buf = buffers.norm_out_batch.slice_rows(batch_size)
+            mlp_out_buf = buffers.mlp_down_batch.slice_rows(batch_size)
+
+            # Get RoPE tables (may be None if not using RoPE)
+            rope_cos_gpu = getattr(self, "_rope_cos_gpu", None)
+            rope_sin_gpu = getattr(self, "_rope_sin_gpu", None)
+            start_pos_buf = buffers.start_position_batch_buf
+
+            # Transformer blocks - capture forward pass with zero-alloc
+            for block in self.blocks:
+                # Pre-norm
+                rmsnorm(hidden, block.attn_norm.weight, block.attn_norm.eps, out=norm_out_buf)
+                copy_to(hidden, residual_buf)
+
+                # Attention (zero-alloc path for CUDA Graph)
+                attn_out = block.attn.forward_fixed_cache_batch_zero_alloc(
+                    norm_out_buf, 0, max_seq_len, buffers, rope_cos_gpu, rope_sin_gpu, start_pos_buf
+                )
+
+                # Residual
+                add_inplace(residual_buf, attn_out)
+                copy_to(residual_buf, hidden)
+
+                # MLP norm
+                rmsnorm(hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=norm_out_buf)
+                copy_to(hidden, residual_buf)
+
+                # MLP (zero-alloc path for CUDA Graph)
+                self._mlp_forward_batch_zero_alloc(block.mlp, norm_out_buf, buffers, mlp_out_buf)
+
+                # Residual
+                add_inplace(residual_buf, mlp_out_buf)
+                copy_to(residual_buf, hidden)
+
+            # Final norm
+            rmsnorm(hidden, self.final_norm.weight, self.final_norm.eps, out=norm_out_buf)
+
+            # LM head projection to logits
+            matmul(norm_out_buf, self._lm_head_t_cache, out=buffers.logits_batch)
+
+            self._batch_decode_graph.end_capture()
+        finally:
+            gc.enable()
+
+        self._batch_decode_graph_ready = True
+        print(f"  [Batch CUDA Graph] Captured {self._batch_decode_graph.num_nodes} nodes")
+
+    def _decode_step_batch_for_graph(
+        self,
+        token_ids: list[int],
+        start_position: int,
+        context_len: int,
+        buffers: DecodeBuffers,
+    ) -> GPUArray:
+        """Batch decode step for graph capture warmup.
+
+        Uses zero-alloc attention and MLP to match graph capture code path.
+        """
+        seq_len = len(token_ids)
+
+        # Copy token IDs to GPU buffer
+        self._batch_token_ids_np[:seq_len] = token_ids
+        buffers.token_ids_batch_buf._get_native().copy_from_numpy(self._batch_token_ids_np)
+
+        # Update start position buffer
+        self._batch_start_pos_np[0] = start_position
+        buffers.start_position_batch_buf._get_native().copy_from_numpy(self._batch_start_pos_np)
+
+        # Batch embedding lookup from GPU buffer
+        embedding_lookup_batch(
+            self.embed_tokens,
+            buffers.hidden_batch,
+            buffers.token_ids_batch_buf,
+            seq_len,
+        )
+
+        # Use sliced views
+        hidden = buffers.hidden_batch.slice_rows(seq_len)
+        residual_buf = buffers.residual_batch.slice_rows(seq_len)
+        norm_out_buf = buffers.norm_out_batch.slice_rows(seq_len)
+        mlp_out_buf = buffers.mlp_down_batch.slice_rows(seq_len)
+
+        # Get RoPE tables (may be None if not using RoPE)
+        rope_cos_gpu = getattr(self, "_rope_cos_gpu", None)
+        rope_sin_gpu = getattr(self, "_rope_sin_gpu", None)
+        start_pos_buf = buffers.start_position_batch_buf
+
+        # Transformer blocks with zero-alloc
+        for block in self.blocks:
+            rmsnorm(hidden, block.attn_norm.weight, block.attn_norm.eps, out=norm_out_buf)
+            copy_to(hidden, residual_buf)
+
+            # Zero-alloc attention
+            attn_out = block.attn.forward_fixed_cache_batch_zero_alloc(
+                norm_out_buf,
+                start_position,
+                context_len,
+                buffers,
+                rope_cos_gpu,
+                rope_sin_gpu,
+                start_pos_buf,
+            )
+
+            add_inplace(residual_buf, attn_out)
+            copy_to(residual_buf, hidden)
+
+            rmsnorm(hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=norm_out_buf)
+            copy_to(hidden, residual_buf)
+
+            # Zero-alloc MLP
+            self._mlp_forward_batch_zero_alloc(block.mlp, norm_out_buf, buffers, mlp_out_buf)
+
+            add_inplace(residual_buf, mlp_out_buf)
+            copy_to(residual_buf, hidden)
+
+        rmsnorm(hidden, self.final_norm.weight, self.final_norm.eps, out=norm_out_buf)
+        return norm_out_buf
+
+    def _decode_step_batch_graph_replay(
+        self,
+        token_ids: list[int],
+        start_position: int,
+        context_len: int,
+    ) -> GPUArray:
+        """Execute batch decode step using CUDA Graph replay.
+
+        Updates GPU buffers and replays the captured batch graph.
+
+        Args:
+            token_ids: Batch of token IDs (must match captured batch_size)
+            start_position: Starting position in sequence
+            context_len: Total context length
+
+        Returns:
+            Logits buffer [batch_size, vocab_size]
+        """
+        assert hasattr(self, "_batch_decode_graph_ready") and self._batch_decode_graph_ready, (
+            "Call init_decode_graph_batch() first"
+        )
+
+        batch_size = len(token_ids)
+        if batch_size != self._batch_graph_size:
+            raise ValueError(
+                f"Batch size mismatch: got {batch_size}, expected {self._batch_graph_size}"
+            )
+
+        buffers = self._batch_decode_buffers
+
+        # Update GPU buffers
+        self._batch_token_ids_np[:batch_size] = token_ids
+        buffers.token_ids_batch_buf._get_native().copy_from_numpy(self._batch_token_ids_np)
+        self._batch_start_pos_np[0] = start_position
+        buffers.start_position_batch_buf._get_native().copy_from_numpy(self._batch_start_pos_np)
+        self._batch_ctx_len_np[0] = context_len
+        buffers.context_len_buf._get_native().copy_from_numpy(self._batch_ctx_len_np)
+
+        # Device synchronize to ensure H2D copies are visible to the graph
+        from pygpukit.core.backend import get_backend
+
+        get_backend().synchronize()
+
+        # Replay graph
+        self._batch_decode_graph.replay()
+
+        # Synchronize graph's stream
+        self._batch_decode_graph.synchronize()
+
+        return buffers.logits_batch.slice_rows(batch_size)
 
     # =========================================================================
     # Jacobi Decoding
@@ -3480,9 +4000,7 @@ class CausalTransformerModel:
         kv_snapshot = self.snapshot_kv_cache()
 
         # Initialize guess
-        guess = self._init_jacobi_guess(
-            token_id, position, context_len, n_tokens, init_strategy
-        )
+        guess = self._init_jacobi_guess(token_id, position, context_len, n_tokens, init_strategy)
 
         iterations_used = 0
         converged = False
@@ -3501,9 +4019,7 @@ class CausalTransformerModel:
             input_tokens = [token_id] + guess[:-1]
             verify_ctx = position + len(input_tokens)
 
-            hidden = self._decode_step_fixed_cache_batch(
-                input_tokens, position, verify_ctx
-            )
+            hidden = self._decode_step_fixed_cache_batch(input_tokens, position, verify_ctx)
             logits = self.get_logits(hidden)
             logits_np = logits.to_numpy()  # [n_tokens, vocab_size]
 
@@ -3663,9 +4179,7 @@ class CausalTransformerModel:
         confirmed_pos = self.get_lookahead_confirmed_pos()
 
         # Initialize guess (may use lookahead positions for greedy)
-        guess = self._init_jacobi_guess_lookahead(
-            token_id, n_tokens, init_strategy
-        )
+        guess = self._init_jacobi_guess_lookahead(token_id, n_tokens, init_strategy)
 
         iterations_used = 0
         converged = False
@@ -3684,9 +4198,7 @@ class CausalTransformerModel:
             start_pos = confirmed_pos
             ctx_len = confirmed_pos + len(input_tokens)
 
-            hidden = self._decode_step_fixed_cache_batch(
-                input_tokens, start_pos, ctx_len
-            )
+            hidden = self._decode_step_fixed_cache_batch(input_tokens, start_pos, ctx_len)
             logits = self.get_logits(hidden)
             logits_np = logits.to_numpy()  # [n_tokens, vocab_size]
 
@@ -4229,6 +4741,7 @@ def load_model_from_safetensors(
 
     # Detect num_heads and num_kv_heads from projection shapes
     q_info = st.tensor_info(required_name(spec.q_proj, 0))
+    q_dim = q_info.shape[0]
     head_dim = 64  # Default
 
     # Try to get head_dim from q_norm if present (Qwen3)
@@ -4237,8 +4750,20 @@ def load_model_from_safetensors(
         if q_norm_name in st.tensor_names:
             q_norm_info = st.tensor_info(q_norm_name)
             head_dim = q_norm_info.shape[0]
+    else:
+        # For models without q_norm, detect head_dim from tensor shapes
+        # Common head_dim values: 64, 128, 256
+        # Use hidden_size to infer: head_dim = hidden_size / num_heads
+        # Try common values and check if they divide q_dim evenly
+        for hd in [128, 64, 256]:
+            if q_dim % hd == 0 and hidden_size % hd == 0:
+                # Verify: q_dim / hd should be reasonable num_heads (4-128)
+                potential_num_heads = q_dim // hd
+                if 4 <= potential_num_heads <= 128:
+                    head_dim = hd
+                    break
 
-    num_heads = q_info.shape[0] // head_dim
+    num_heads = q_dim // head_dim
 
     # For GQA models, detect num_kv_heads
     num_kv_heads = num_heads
@@ -4261,6 +4786,29 @@ def load_model_from_safetensors(
     if head_dim != hidden_size // num_heads:
         explicit_head_dim = head_dim
 
+    # Try to read rope_theta and norm_eps from config.json if available
+    rope_theta = spec.default_rope_theta
+    norm_eps = spec.default_norm_eps
+    try:
+        import json
+        from pathlib import Path
+
+        model_path_obj = Path(model_path)
+        if model_path_obj.name.endswith(".index.json"):
+            config_path = model_path_obj.parent / "config.json"
+        else:
+            config_path = model_path_obj.parent / "config.json"
+
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                hf_config = json.load(f)
+            if "rope_theta" in hf_config:
+                rope_theta = float(hf_config["rope_theta"])
+            if "rms_norm_eps" in hf_config:
+                norm_eps = float(hf_config["rms_norm_eps"])
+    except Exception:
+        pass  # Use defaults if config.json not readable
+
     transformer_config = TransformerConfig(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
@@ -4273,8 +4821,8 @@ def load_model_from_safetensors(
         activation=spec.activation,
         use_rope=spec.use_rope,
         causal=True,
-        norm_eps=spec.default_norm_eps,
-        rope_theta=spec.default_rope_theta,
+        norm_eps=norm_eps,
+        rope_theta=rope_theta,
     )
 
     # Load embeddings
