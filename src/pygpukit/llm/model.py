@@ -2793,6 +2793,106 @@ class CausalTransformerModel:
 
         return accepted_tokens, new_pos, stats
 
+    def decode_step_self_speculative_lookahead(
+        self,
+        token_id: int,
+        max_draft_tokens: int = 4,
+        draft_layers: int = 8,
+    ) -> tuple[list[int], dict]:
+        """Self-speculative decode step with GPU-side lookahead KV (no CPU copies).
+
+        Uses lookahead KV cache management to avoid CPU-GPU transfers.
+
+        IMPORTANT: Before calling this method:
+        1. Run prefill and store KV using kv_cache_prefill_gqa()
+        2. Call set_lookahead_confirmed_pos(prefill_len) to mark prefill KV as committed
+
+        Algorithm:
+        1. Generate draft tokens using early layers (writes to speculative positions)
+        2. Reset lookahead, verify with full model in batch
+        3. Accept tokens until first disagreement
+        4. Re-run for accepted tokens to ensure correct KV
+        5. Commit accepted tokens
+
+        Args:
+            token_id: Current token ID (the last accepted token)
+            max_draft_tokens: Maximum number of draft tokens to generate
+            draft_layers: Number of early layers to use as draft
+
+        Returns:
+            Tuple of:
+            - accepted_tokens: List of accepted token IDs
+            - stats: Dict with 'draft_count', 'accepted_count' for analysis
+        """
+        confirmed_pos = self.get_lookahead_confirmed_pos()
+
+        # === Step 1: Generate draft tokens using early layers ===
+        # Reset lookahead before draft phase
+        self.reset_lookahead_all()
+
+        draft_tokens = []
+        current_token = token_id
+
+        for i in range(max_draft_tokens):
+            pos = confirmed_pos + i
+            ctx = confirmed_pos + i + 1
+            # Forward through early layers only
+            hidden = self._draft_forward_early_layers(
+                current_token, pos, ctx, draft_layers
+            )
+            logits = self._draft_get_logits(hidden)
+            logits_np = logits.to_numpy()[-1]
+            next_token = int(np.argmax(logits_np))
+
+            draft_tokens.append(next_token)
+            current_token = next_token
+
+        # === Step 2: Reset and verify with full model in batch ===
+        self.reset_lookahead_all()
+
+        verify_input = [token_id] + draft_tokens[:-1]
+        verify_ctx = confirmed_pos + len(verify_input)
+
+        hidden_batch = self._decode_step_fixed_cache_batch(
+            verify_input, confirmed_pos, verify_ctx
+        )
+        verify_logits = self.get_logits(hidden_batch)
+        verify_logits_np = verify_logits.to_numpy()
+
+        # === Step 3: Accept/Reject tokens ===
+        accepted_tokens = []
+        for i, draft_token in enumerate(draft_tokens):
+            target_token = int(np.argmax(verify_logits_np[i]))
+
+            if target_token == draft_token:
+                accepted_tokens.append(draft_token)
+            else:
+                accepted_tokens.append(target_token)
+                break
+
+        # === Step 4: Re-run for accepted tokens if partial accept ===
+        if len(accepted_tokens) < max_draft_tokens:
+            self.reset_lookahead_all()
+            current = token_id
+            for i, acc_token in enumerate(accepted_tokens):
+                pos = confirmed_pos + i
+                ctx = confirmed_pos + i + 1
+                self._decode_step_fixed_cache(current, pos, ctx)
+                current = acc_token
+
+        # === Step 5: Commit accepted tokens ===
+        self.commit_lookahead_all(len(accepted_tokens))
+
+        stats = {
+            "draft_count": len(draft_tokens),
+            "accepted_count": len(
+                [t for i, t in enumerate(accepted_tokens)
+                 if i < len(draft_tokens) and t == draft_tokens[i]]
+            ),
+        }
+
+        return accepted_tokens, stats
+
     # =========================================================================
     # Lookahead KV Cache Management (GPU-side, no CPU copies)
     # =========================================================================
