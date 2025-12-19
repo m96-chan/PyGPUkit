@@ -138,6 +138,13 @@ void sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, GPUArr
 void sdpa_causal_fixed_cache(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
                               GPUArray& out, int context_len, float scale = 0.0f);
 
+// SDPA with pointer-based context_len (for CUDA Graph replay with dynamic context)
+// context_len_buf: GPU int32 buffer containing actual context length
+// max_kv_len: Maximum context length (for shared memory allocation at graph capture)
+void sdpa_causal_fixed_cache_ptr(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                                   GPUArray& out, const GPUArray& context_len_buf,
+                                   int max_kv_len, float scale = 0.0f);
+
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
 // ============================================================================

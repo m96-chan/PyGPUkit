@@ -1306,6 +1306,49 @@ def sdpa_causal_fixed_cache(
     native.sdpa_causal_fixed_cache(q_native, k_native, v_native, out_native, context_len, scale)
 
 
+def sdpa_causal_fixed_cache_ptr(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    out: GPUArray,
+    context_len_buf: GPUArray,
+    max_kv_len: int,
+    scale: float = 0.0,
+) -> None:
+    """SDPA with pointer-based context_len for CUDA Graph replay.
+
+    This variant reads context_len from a GPU buffer at runtime, enabling
+    CUDA Graph replay with dynamic context lengths without re-capture.
+
+    Args:
+        Q: Query tensor of shape [n_heads, q_len, head_dim].
+        K: Key cache of shape [n_heads, max_seq_len, head_dim].
+        V: Value cache of shape [n_heads, max_seq_len, head_dim].
+        out: Pre-allocated output buffer [n_heads, q_len, head_dim].
+        context_len_buf: GPU int32 buffer containing actual context_len [1].
+        max_kv_len: Maximum context length (for shared memory allocation
+                    during graph capture). Must be <= K.shape[1].
+        scale: Scaling factor (typically 1/sqrt(head_dim)).
+               If <= 0, computed automatically from head_dim.
+
+    Note:
+        For CUDA Graph: capture with max_kv_len, then update context_len_buf
+        before each replay to change the effective context length.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    q_native = Q._get_native()
+    k_native = K._get_native()
+    v_native = V._get_native()
+    out_native = out._get_native()
+    ctx_buf_native = context_len_buf._get_native()
+
+    native.sdpa_causal_fixed_cache_ptr(
+        q_native, k_native, v_native, out_native, ctx_buf_native, max_kv_len, scale
+    )
+
+
 def rope_inplace(
     q: GPUArray,
     k: GPUArray,

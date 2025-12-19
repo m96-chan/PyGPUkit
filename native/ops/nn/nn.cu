@@ -575,9 +575,12 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
     const int block_size = 256;
     const int grid_size = (total_work + block_size - 1) / block_size;
 
+    // Use capture stream if available (for CUDA Graph support)
+    cudaStream_t stream = internal::get_capture_stream();
+
     switch (q.dtype()) {
         case DataType::Float32:
-            nn::rope_f32_kernel<<<grid_size, block_size>>>(
+            nn::rope_f32_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<float*>(q.data()),
                 static_cast<float*>(k.data()),
                 static_cast<const float*>(cos.data()),
@@ -585,7 +588,7 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
                 seq_len, n_heads_q, n_heads_k, head_dim);
             break;
         case DataType::Float16:
-            nn::rope_f16_kernel<<<grid_size, block_size>>>(
+            nn::rope_f16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__half*>(q.data()),
                 static_cast<__half*>(k.data()),
                 static_cast<const __half*>(cos.data()),
@@ -593,7 +596,7 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
                 seq_len, n_heads_q, n_heads_k, head_dim);
             break;
         case DataType::BFloat16:
-            nn::rope_bf16_kernel<<<grid_size, block_size>>>(
+            nn::rope_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__nv_bfloat16*>(q.data()),
                 static_cast<__nv_bfloat16*>(k.data()),
                 static_cast<const __nv_bfloat16*>(cos.data()),
@@ -999,6 +1002,93 @@ void sdpa_causal_fixed_cache(
 
     sdpa_causal_dispatch(Q, K, V, out, scale, context_len);
     sync_and_check("sdpa kernel failed");
+}
+
+// SDPA with fixed-length KV cache using pointer-based context_len (for CUDA Graph)
+// context_len_buf: GPU buffer containing actual context_len (read at runtime)
+// max_kv_len: Maximum KV length (for shared memory allocation during graph capture)
+void sdpa_causal_fixed_cache_ptr(
+    const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+    GPUArray& out, const GPUArray& context_len_buf, int max_kv_len, float scale
+) {
+    if (Q.ndim() != 3 || K.ndim() != 3 || V.ndim() != 3 || out.ndim() != 3) {
+        throw std::runtime_error("sdpa expects 3D inputs [n_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype() || Q.dtype() != out.dtype()) {
+        throw std::runtime_error("sdpa: dtype mismatch");
+    }
+    if (context_len_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("sdpa: context_len_buf must be int32");
+    }
+
+    int n_heads = Q.shape()[0];
+    int q_len = Q.shape()[1];
+    int head_dim = Q.shape()[2];
+    int kv_stride = static_cast<int>(K.shape()[1]);
+
+    if (K.shape()[0] != n_heads || V.shape()[0] != n_heads) {
+        throw std::runtime_error("sdpa: n_heads mismatch");
+    }
+    if (K.shape()[2] != head_dim || V.shape()[2] != head_dim) {
+        throw std::runtime_error("sdpa: head_dim mismatch");
+    }
+    if (K.shape()[1] != V.shape()[1]) {
+        throw std::runtime_error("sdpa: K and V seq_len mismatch");
+    }
+    if (out.shape()[0] != n_heads || out.shape()[1] != q_len || out.shape()[2] != head_dim) {
+        throw std::runtime_error("sdpa: output shape mismatch");
+    }
+    if (max_kv_len <= 0 || max_kv_len > kv_stride) {
+        throw std::runtime_error("sdpa: invalid max_kv_len");
+    }
+
+    // Compute scale if not provided
+    if (scale <= 0.0f) {
+        scale = 1.0f / sqrtf((float)head_dim);
+    }
+
+    // Grid: one block per (head, query_position) pair
+    dim3 grid(n_heads, q_len);
+    int block_size = 128;
+
+    // Allocate shared memory for max_kv_len (allows dynamic context_len at runtime)
+    size_t shared_mem_size = max_kv_len * sizeof(float);
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (Q.dtype()) {
+        case DataType::Float32:
+            nn::sdpa_causal_f32_kernel_ptr<<<grid, block_size, shared_mem_size, stream>>>(
+                static_cast<const float*>(Q.data()),
+                static_cast<const float*>(K.data()),
+                static_cast<const float*>(V.data()),
+                static_cast<float*>(out.data()),
+                static_cast<const int*>(context_len_buf.data()),
+                n_heads, q_len, kv_stride, head_dim, scale);
+            break;
+        case DataType::Float16:
+            nn::sdpa_causal_f16_kernel_ptr<<<grid, block_size, shared_mem_size, stream>>>(
+                static_cast<const __half*>(Q.data()),
+                static_cast<const __half*>(K.data()),
+                static_cast<const __half*>(V.data()),
+                static_cast<__half*>(out.data()),
+                static_cast<const int*>(context_len_buf.data()),
+                n_heads, q_len, kv_stride, head_dim, scale);
+            break;
+        case DataType::BFloat16:
+            nn::sdpa_causal_bf16_kernel_ptr<<<grid, block_size, shared_mem_size, stream>>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                static_cast<const int*>(context_len_buf.data()),
+                n_heads, q_len, kv_stride, head_dim, scale);
+            break;
+        default:
+            throw std::runtime_error("sdpa: unsupported dtype");
+    }
+
+    sync_and_check("sdpa_causal_fixed_cache_ptr kernel failed");
 }
 
 // ============================================================================

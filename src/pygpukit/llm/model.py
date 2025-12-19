@@ -45,6 +45,7 @@ from pygpukit.ops.basic import (
     sample_topk_to_buf_ptr,
     sdpa_causal,
     sdpa_causal_fixed_cache,
+    sdpa_causal_fixed_cache_ptr,
     silu,
     transpose,
     transpose_3d_021,
@@ -630,6 +631,12 @@ class DecodeBuffers:
     sampled_token: GPUArray | None = None  # [1] int32 - sampled token ID
     random_val: GPUArray | None = None  # [1] float32 - random value for sampling
 
+    # Input token ID buffer for CUDA Graph replay
+    token_id_buf: GPUArray | None = None  # [1] int32 - input token ID
+
+    # Context length buffer for CUDA Graph replay (for SDPA)
+    context_len_buf: GPUArray | None = None  # [1] int32 - context length
+
     @classmethod
     def allocate(
         cls,
@@ -706,10 +713,14 @@ class DecodeBuffers:
         logits_buf = None
         sampled_token_buf = None
         random_val_buf = None
+        token_id_buf = None
+        context_len_buf = None
         if vocab_size is not None:
             logits_buf = zeros((1, vocab_size), dtype=dtype)
             sampled_token_buf = zeros((1,), dtype="int32")
             random_val_buf = zeros((1,), dtype="float32")
+            token_id_buf = zeros((1,), dtype="int32")
+            context_len_buf = zeros((1,), dtype="int32")
 
         return cls(
             hidden=hidden,
@@ -745,6 +756,8 @@ class DecodeBuffers:
             logits=logits_buf,
             sampled_token=sampled_token_buf,
             random_val=random_val_buf,
+            token_id_buf=token_id_buf,
+            context_len_buf=context_len_buf,
         )
 
 
@@ -2147,6 +2160,8 @@ class CausalTransformerModel:
         context_len: int,
         buffers: DecodeBuffers,
         use_position_ptr: bool = False,
+        use_context_len_ptr: bool = False,
+        max_kv_len: int | None = None,
     ) -> None:
         """Attention forward pass with zero allocations.
 
@@ -2155,6 +2170,10 @@ class CausalTransformerModel:
         Args:
             use_position_ptr: If True, read position from buffers.position_buf
                               (for CUDA Graph replay without recapture).
+            use_context_len_ptr: If True, read context_len from buffers.context_len_buf
+                                 (for CUDA Graph replay without recapture).
+            max_kv_len: Maximum KV length for CUDA Graph shared memory allocation.
+                        Required if use_context_len_ptr=True.
         """
         # Fused QKV projection (1 matmul replaces 3, then zero-copy narrow views)
         # This is 4x faster for M=1 with cuBLASLt due to reduced kernel launch overhead
@@ -2207,9 +2226,17 @@ class CausalTransformerModel:
         transpose_3d_021(q, out=buffers.q_t)
 
         # SDPA with fixed cache
-        sdpa_causal_fixed_cache(
-            buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len
-        )
+        if use_context_len_ptr and buffers.context_len_buf is not None:
+            # Use pointer-based SDPA for CUDA Graph replay
+            assert max_kv_len is not None, "max_kv_len required for CUDA Graph mode"
+            sdpa_causal_fixed_cache_ptr(
+                buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out,
+                buffers.context_len_buf, max_kv_len
+            )
+        else:
+            sdpa_causal_fixed_cache(
+                buffers.q_t, attn._k_cache, attn._v_cache, buffers.attn_out, context_len
+            )
 
         # Transpose output: [num_heads, 1, head_dim] -> [1, num_heads, head_dim]
         transpose_3d_021(buffers.attn_out, out=buffers.q)  # Reuse q buffer for transposed output
@@ -2608,11 +2635,19 @@ class CausalTransformerModel:
 
         Args:
             snapshot: List of (k_cache_np, v_cache_np) tuples from snapshot_kv_cache().
+
+        Note:
+            This method copies data into existing arrays rather than replacing them.
+            This is critical for CUDA Graph compatibility - the graph captures pointer
+            addresses, so we must preserve the existing arrays.
         """
         for i, block in enumerate(self.blocks):
             k_np, v_np = snapshot[i]
-            block.attn._k_cache = from_numpy(k_np.astype(np.float16))
-            block.attn._v_cache = from_numpy(v_np.astype(np.float16))
+            # Copy data into existing arrays (preserves pointers for CUDA Graph)
+            k_np_typed = k_np.astype(np.float16)
+            v_np_typed = v_np.astype(np.float16)
+            block.attn._k_cache._get_native().copy_from_numpy(k_np_typed)
+            block.attn._v_cache._get_native().copy_from_numpy(v_np_typed)
 
     def _draft_forward_early_layers(
         self,
@@ -2873,11 +2908,16 @@ class CausalTransformerModel:
         # === Step 4: Re-run for accepted tokens if partial accept ===
         if len(accepted_tokens) < max_draft_tokens:
             self.reset_lookahead_all()
+            # Use CUDA Graph if available
+            use_graph = hasattr(self, "_decode_graph_ready") and self._decode_graph_ready
             current = token_id
             for i, acc_token in enumerate(accepted_tokens):
                 pos = confirmed_pos + i
                 ctx = confirmed_pos + i + 1
-                self._decode_step_fixed_cache(current, pos, ctx)
+                if use_graph:
+                    self._decode_step_graph_replay(current, pos, ctx)
+                else:
+                    self._decode_step_fixed_cache(current, pos, ctx)
                 current = acc_token
 
         # === Step 5: Commit accepted tokens ===
@@ -2928,6 +2968,179 @@ class CausalTransformerModel:
     def get_lookahead_confirmed_pos(self) -> int:
         """Get current confirmed position (from first layer)."""
         return self.blocks[0].attn.get_confirmed_pos()
+
+    # =========================================================================
+    # CUDA Graph for Decode (seq_len=1)
+    # =========================================================================
+
+    def init_decode_graph(self, max_seq_len: int = 512) -> None:
+        """Initialize CUDA Graph for single-token decode.
+
+        Pre-allocates buffers, pre-computes RoPE, initializes KV cache,
+        and captures the decode graph for replay.
+
+        IMPORTANT: Call this AFTER prefill and KV cache initialization.
+
+        Args:
+            max_seq_len: Maximum sequence length for KV cache.
+        """
+        import gc
+
+        from pygpukit._pygpukit_native import CudaGraph
+
+        dtype = str(self.embed_tokens.dtype)
+        use_qk_norm = self.spec is not None and self.spec.use_qk_norm
+        lm_head = self._lm_head if self._lm_head is not None else self.embed_tokens
+        vocab_size = lm_head.shape[0]
+
+        # Allocate decode buffers with CUDA Graph support
+        self._decode_buffers = DecodeBuffers.allocate(
+            self.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
+        )
+
+        # Pre-compute RoPE tables on GPU if not already done
+        if self.config.use_rope and not hasattr(self, "_rope_cos_gpu"):
+            cos_np, sin_np = precompute_freqs_cis(
+                self.config.head_dim, max_seq_len, self.config.rope_theta
+            )
+            np_dtype = np.float16 if dtype == "float16" else np.float32
+            self._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
+            self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+
+        # Cache transposed lm_head for graph (if not already done)
+        if not hasattr(self, "_lm_head_t_cache"):
+            lm_head_np = lm_head.to_numpy()
+            self._lm_head_t_cache = from_numpy(lm_head_np.T.copy())
+
+        # Numpy buffers for CPU-side updates (reusable, no allocation)
+        self._pos_np = np.array([0], dtype=np.int32)
+        self._tok_np = np.array([0], dtype=np.int32)
+        self._ctx_np = np.array([0], dtype=np.int32)
+
+        # Store max_seq_len for graph replay
+        self._graph_max_seq_len = max_seq_len
+
+        # Warmup before capture (with pointer-based SDPA)
+        buffers = self._decode_buffers
+        self._ctx_np[0] = 1
+        buffers.context_len_buf._get_native().copy_from_numpy(self._ctx_np)
+        for _ in range(3):
+            self._decode_step_zero_alloc(0, 0, 1, buffers)
+
+        # Capture the decode graph
+        self._decode_graph = CudaGraph()
+
+        # Write initial values to GPU buffers
+        self._pos_np[0] = 0
+        buffers.position_buf._get_native().copy_from_numpy(self._pos_np)
+        self._tok_np[0] = 0
+        buffers.token_id_buf._get_native().copy_from_numpy(self._tok_np)
+        self._ctx_np[0] = max_seq_len  # Capture with max for shared memory
+        buffers.context_len_buf._get_native().copy_from_numpy(self._ctx_np)
+
+        gc.disable()
+        try:
+            self._decode_graph.begin_capture()
+
+            # Embedding lookup from token_id_buf
+            embedding_lookup_ptr(self.embed_tokens, buffers.hidden, buffers.token_id_buf)
+
+            # Transformer blocks
+            for block in self.blocks:
+                rmsnorm(
+                    buffers.hidden, block.attn_norm.weight, block.attn_norm.eps,
+                    out=buffers.norm_out
+                )
+                copy_to(buffers.hidden, buffers.residual)
+                self._attention_forward_zero_alloc(
+                    block.attn, buffers.norm_out, 0, max_seq_len, buffers,
+                    use_position_ptr=True,
+                    use_context_len_ptr=True,
+                    max_kv_len=max_seq_len
+                )
+                add_inplace(buffers.hidden, buffers.residual)
+                copy_to(buffers.hidden, buffers.residual)
+                rmsnorm(
+                    buffers.hidden, block.mlp_norm.weight, block.mlp_norm.eps,
+                    out=buffers.norm_out
+                )
+                self._mlp_forward_zero_alloc(block.mlp, buffers.norm_out, buffers)
+                add_inplace(buffers.hidden, buffers.residual)
+
+            # Final norm
+            rmsnorm(
+                buffers.hidden, self.final_norm.weight, self.final_norm.eps,
+                out=buffers.norm_out
+            )
+            copy_to(buffers.norm_out, buffers.hidden)
+
+            # LM head projection to logits
+            matmul(buffers.hidden, self._lm_head_t_cache, out=buffers.logits)
+
+            self._decode_graph.end_capture()
+        finally:
+            gc.enable()
+
+        self._decode_graph_ready = True
+        print(f"  [CUDA Graph] Captured {self._decode_graph.num_nodes} nodes for decode")
+
+    def _decode_step_graph_replay(
+        self, token_id: int, position: int, context_len: int
+    ) -> GPUArray:
+        """Execute decode step using CUDA Graph replay.
+
+        Updates GPU buffers and replays the captured graph.
+        Returns logits buffer.
+
+        Args:
+            token_id: Input token ID
+            position: Position in sequence
+            context_len: Total context length (for KV cache attention)
+
+        Returns:
+            Logits buffer [1, vocab_size]
+        """
+        assert hasattr(self, "_decode_graph_ready") and self._decode_graph_ready, \
+            "Call init_decode_graph() first"
+
+        buffers = self._decode_buffers
+
+        # Update GPU buffers (outside graph)
+        try:
+            self._tok_np[0] = token_id
+            buffers.token_id_buf._get_native().copy_from_numpy(self._tok_np)
+            self._pos_np[0] = position
+            buffers.position_buf._get_native().copy_from_numpy(self._pos_np)
+            self._ctx_np[0] = context_len
+            buffers.context_len_buf._get_native().copy_from_numpy(self._ctx_np)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"H2D copy failed: tok={token_id}, pos={position}, ctx={context_len}. "
+                f"Error: {e}"
+            )
+
+        # Device synchronize to ensure H2D copies are visible to the graph
+        # Using device sync (not just default stream sync) because the graph runs
+        # on its own non-blocking capture stream, which may not see memory written
+        # by the default stream without explicit device-level synchronization
+        from pygpukit.core.backend import get_backend
+        get_backend().synchronize()
+
+        # Replay graph
+        self._decode_graph.replay()
+
+        # Synchronize graph's stream to ensure replay completes before reading results
+        # IMPORTANT: Must use graph.synchronize(), not default_stream().synchronize()
+        # because the graph runs on its own capture stream, not the default stream
+        try:
+            self._decode_graph.synchronize()
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Graph replay sync failed: tok={token_id}, pos={position}, ctx={context_len}. "
+                f"Error: {e}"
+            )
+
+        return buffers.logits
 
     # =========================================================================
     # Jacobi Decoding
@@ -3277,11 +3490,16 @@ class CausalTransformerModel:
         if len(accepted_tokens) < n_tokens:
             # KV may have extra speculative entries - need to overwrite with correct values
             # Run sequential for accepted tokens only
+            # Use CUDA Graph if available
+            use_graph = hasattr(self, "_decode_graph_ready") and self._decode_graph_ready
             current = token_id
             for i, acc_token in enumerate(accepted_tokens):
                 pos = confirmed_pos + i
                 ctx = confirmed_pos + i + 1
-                self._decode_step_fixed_cache(current, pos, ctx)
+                if use_graph:
+                    self._decode_step_graph_replay(current, pos, ctx)
+                else:
+                    self._decode_step_fixed_cache(current, pos, ctx)
                 current = acc_token
         # If all converged, KV is already correct from last batch forward
 

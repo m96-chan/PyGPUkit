@@ -213,6 +213,13 @@ void init_ops_bindings(py::module_& m) {
           "SDPA with fixed-length KV cache support.\n"
           "K/V are pre-allocated to max_seq_len, context_len specifies actual valid tokens.");
 
+    m.def("sdpa_causal_fixed_cache_ptr", &ops::sdpa_causal_fixed_cache_ptr,
+          py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("out"),
+          py::arg("context_len_buf"), py::arg("max_kv_len"), py::arg("scale") = 0.0f,
+          "SDPA with pointer-based context_len for CUDA Graph support.\n"
+          "context_len_buf: GPU int32 buffer containing actual context_len.\n"
+          "max_kv_len: Max context length (for shared memory allocation at graph capture).");
+
     // ========================================================================
     // Tensor Manipulation Operations
     // ========================================================================
