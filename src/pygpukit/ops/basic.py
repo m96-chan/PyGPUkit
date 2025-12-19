@@ -1441,6 +1441,51 @@ def _rope_inplace_native(
     native.rope_inplace(q_native, k_native, cos_native, sin_native)
 
 
+def split_qkv_batch(
+    qkv: GPUArray,
+    q_out: GPUArray,
+    k_out: GPUArray,
+    v_out: GPUArray,
+    q_dim: int,
+    k_dim: int,
+    v_dim: int,
+) -> None:
+    """Split fused QKV projection output into separate Q, K, V tensors.
+
+    This is a zero-allocation operation designed for CUDA Graph compatibility.
+    Output buffers must be pre-allocated.
+
+    Args:
+        qkv: Fused QKV tensor [seq_len, q_dim + k_dim + v_dim].
+        q_out: Pre-allocated Q output buffer [seq_len, q_dim] or [seq_len, n_heads, head_dim].
+        k_out: Pre-allocated K output buffer [seq_len, k_dim] or [seq_len, n_kv_heads, head_dim].
+        v_out: Pre-allocated V output buffer [seq_len, v_dim] or [seq_len, n_kv_heads, head_dim].
+        q_dim: Size of Q projection (num_heads * head_dim).
+        k_dim: Size of K projection (num_kv_heads * head_dim).
+        v_dim: Size of V projection (num_kv_heads * head_dim).
+
+    Note:
+        The output buffers can be 2D [seq_len, dim] or 3D [seq_len, heads, head_dim]
+        as long as the total size matches. The kernel writes linearly.
+    """
+    from pygpukit.core.backend import get_backend, get_native_module
+
+    backend = get_backend()
+    if not backend.is_available():
+        raise RuntimeError("split_qkv_batch requires GPU backend")
+
+    native = get_native_module()
+    native.split_qkv_batch(
+        qkv._get_native(),
+        q_out._get_native(),
+        k_out._get_native(),
+        v_out._get_native(),
+        q_dim,
+        k_dim,
+        v_dim,
+    )
+
+
 # ============================================================================
 # Tensor Manipulation Operations
 # ============================================================================

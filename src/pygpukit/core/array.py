@@ -416,3 +416,51 @@ class GPUArray:
 
         # Wrap the view
         return GPUArray._wrap_native(view_native)
+
+    def slice_rows(self, num_rows: int) -> GPUArray:
+        """Create a zero-copy view of the first N rows (batch dimension).
+
+        For a 2D array [batch, features], returns a view of shape [num_rows, features].
+        This is useful for working with pre-allocated buffers that may be larger
+        than the actual batch size being processed.
+
+        Args:
+            num_rows: Number of rows to include in the view.
+
+        Returns:
+            A non-owning GPUArray view with shape [num_rows, features].
+
+        Raises:
+            ValueError: If num_rows exceeds the batch dimension.
+            RuntimeError: If native backend is not available.
+
+        Example:
+            # Pre-allocated buffer for max_batch_size=8
+            buffer = zeros((8, 4096), dtype="float16")
+            # Get view for actual batch of 2
+            batch_view = buffer.slice_rows(2)  # shape [2, 4096]
+        """
+        if not has_native_module():
+            raise RuntimeError("slice_rows() requires native backend")
+
+        if self.ndim != 2:
+            raise ValueError(
+                f"slice_rows() requires 2D array, got {self.ndim}D"
+            )
+
+        if num_rows > self.shape[0]:
+            raise ValueError(
+                f"num_rows ({num_rows}) exceeds batch dimension ({self.shape[0]})"
+            )
+
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        src_native = self._get_native()
+        new_shape = [num_rows, self.shape[1]]
+
+        # Use narrow with offset=0 to get first num_rows rows
+        view_native = native.GPUArray.narrow(src_native, 0, new_shape)
+
+        return GPUArray._wrap_native(view_native)

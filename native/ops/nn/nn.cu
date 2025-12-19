@@ -611,6 +611,70 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
 }
 
 // ============================================================================
+// Split QKV Batch
+// Splits fused QKV projection output [seq_len, q_dim + k_dim + v_dim]
+// into separate Q, K, V tensors for batch decode
+// ============================================================================
+
+void split_qkv_batch(
+    const GPUArray& qkv,
+    GPUArray& q_out,
+    GPUArray& k_out,
+    GPUArray& v_out,
+    int q_dim,
+    int k_dim,
+    int v_dim
+) {
+    if (qkv.ndim() != 2) {
+        throw std::runtime_error("split_qkv_batch: qkv must be 2D [seq_len, total_dim]");
+    }
+
+    int seq_len = static_cast<int>(qkv.shape()[0]);
+    int total_dim = q_dim + k_dim + v_dim;
+
+    if (static_cast<int>(qkv.shape()[1]) != total_dim) {
+        throw std::runtime_error("split_qkv_batch: qkv dim mismatch");
+    }
+
+    int total_elements = seq_len * total_dim;
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (qkv.dtype()) {
+        case DataType::Float16:
+            nn::split_qkv_batch_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(qkv.data()),
+                static_cast<__half*>(q_out.data()),
+                static_cast<__half*>(k_out.data()),
+                static_cast<__half*>(v_out.data()),
+                seq_len, q_dim, k_dim, v_dim);
+            break;
+        case DataType::Float32:
+            nn::split_qkv_batch_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(qkv.data()),
+                static_cast<float*>(q_out.data()),
+                static_cast<float*>(k_out.data()),
+                static_cast<float*>(v_out.data()),
+                seq_len, q_dim, k_dim, v_dim);
+            break;
+        case DataType::BFloat16:
+            nn::split_qkv_batch_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(qkv.data()),
+                static_cast<__nv_bfloat16*>(q_out.data()),
+                static_cast<__nv_bfloat16*>(k_out.data()),
+                static_cast<__nv_bfloat16*>(v_out.data()),
+                seq_len, q_dim, k_dim, v_dim);
+            break;
+        default:
+            throw std::runtime_error("split_qkv_batch: unsupported dtype");
+    }
+
+    sync_and_check("split_qkv_batch kernel failed");
+}
+
+// ============================================================================
 // SiLU (Swish) Activation: x * sigmoid(x)
 // ============================================================================
 

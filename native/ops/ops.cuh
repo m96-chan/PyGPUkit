@@ -122,6 +122,22 @@ void silu(const GPUArray& input, GPUArray& out);
 // cos, sin: [seq_len, head_dim]
 void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
 
+// Split fused QKV projection output into separate Q, K, V tensors
+// qkv: [seq_len, q_dim + k_dim + v_dim]
+// q_out: [seq_len, q_dim] (can be pre-allocated buffer)
+// k_out: [seq_len, k_dim]
+// v_out: [seq_len, v_dim]
+// Note: Output buffers must be pre-allocated for CUDA Graph compatibility
+void split_qkv_batch(
+    const GPUArray& qkv,
+    GPUArray& q_out,
+    GPUArray& k_out,
+    GPUArray& v_out,
+    int q_dim,
+    int k_dim,
+    int v_dim
+);
+
 // Scaled Dot-Product Attention with Causal Mask
 // Q: [n_heads, q_len, head_dim]
 // K: [n_heads, kv_len, head_dim]

@@ -637,6 +637,51 @@ class DecodeBuffers:
     # Context length buffer for CUDA Graph replay (for SDPA)
     context_len_buf: GPUArray | None = None  # [1] int32 - context length
 
+    # =========================================================================
+    # Batch Decode Buffers (for zero-allocation batch verify, max_batch tokens)
+    # =========================================================================
+    # These buffers support seq_len > 1 decode (e.g., speculative verification)
+    # All allocated for max_batch_size (default 8) but used with logical batch size
+    max_batch_size: int = 0  # 0 means batch buffers not allocated
+
+    # Batch input/output
+    hidden_batch: GPUArray | None = None  # [max_batch, hidden_size]
+    residual_batch: GPUArray | None = None  # [max_batch, hidden_size]
+    norm_out_batch: GPUArray | None = None  # [max_batch, hidden_size]
+
+    # Batch QKV projection
+    qkv_proj_out_batch: GPUArray | None = None  # [max_batch, q_dim + k_dim + v_dim]
+
+    # Batch Q/K/V after split (3D for attention)
+    q_batch: GPUArray | None = None  # [max_batch, num_heads, head_dim]
+    k_batch: GPUArray | None = None  # [max_batch, num_kv_heads, head_dim]
+    v_batch: GPUArray | None = None  # [max_batch, num_kv_heads, head_dim]
+
+    # Batch Q transposed for SDPA
+    q_t_batch: GPUArray | None = None  # [num_heads, max_batch, head_dim]
+
+    # Batch attention output
+    attn_out_batch: GPUArray | None = None  # [num_heads, max_batch, head_dim]
+    attn_out_t_batch: GPUArray | None = None  # [max_batch, num_heads, head_dim]
+
+    # Batch O projection output
+    o_proj_out_batch: GPUArray | None = None  # [max_batch, hidden_size]
+
+    # Batch MLP
+    gate_up_out_batch: GPUArray | None = None  # [max_batch, 2 * intermediate_size]
+    mlp_down_batch: GPUArray | None = None  # [max_batch, hidden_size]
+
+    # Batch RoPE
+    cos_batch: GPUArray | None = None  # [max_batch, head_dim]
+    sin_batch: GPUArray | None = None  # [max_batch, head_dim]
+
+    # Batch logits (for verify)
+    logits_batch: GPUArray | None = None  # [max_batch, vocab_size]
+
+    # Batch QK norm (Qwen3)
+    q_flat_batch: GPUArray | None = None  # [max_batch * num_heads, head_dim]
+    k_flat_batch: GPUArray | None = None  # [max_batch * num_kv_heads, head_dim]
+
     @classmethod
     def allocate(
         cls,
@@ -644,6 +689,7 @@ class DecodeBuffers:
         dtype: str = "float16",
         use_qk_norm: bool = False,
         vocab_size: int | None = None,
+        max_batch_size: int = 0,
     ) -> DecodeBuffers:
         """Allocate all decode buffers.
 
@@ -652,6 +698,7 @@ class DecodeBuffers:
             dtype: Data type for buffers
             use_qk_norm: Whether to allocate QK norm buffers (Qwen3)
             vocab_size: Vocabulary size for logits buffer (optional, for CUDA Graph)
+            max_batch_size: Maximum batch size for batch decode (0 = no batch buffers)
         """
         assert config.num_kv_heads is not None
         assert config.intermediate_size is not None
@@ -722,6 +769,70 @@ class DecodeBuffers:
             token_id_buf = zeros((1,), dtype="int32")
             context_len_buf = zeros((1,), dtype="int32")
 
+        # Batch decode buffers (optional, for zero-allocation batch verify)
+        hidden_batch = None
+        residual_batch = None
+        norm_out_batch = None
+        qkv_proj_out_batch = None
+        q_batch = None
+        k_batch = None
+        v_batch = None
+        q_t_batch = None
+        attn_out_batch = None
+        attn_out_t_batch = None
+        o_proj_out_batch = None
+        gate_up_out_batch = None
+        mlp_down_batch = None
+        cos_batch = None
+        sin_batch = None
+        logits_batch = None
+        q_flat_batch = None
+        k_flat_batch = None
+
+        if max_batch_size > 0:
+            hidden_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
+            residual_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
+            norm_out_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
+            qkv_proj_out_batch = zeros(
+                (max_batch_size, q_dim + k_dim + v_dim), dtype=dtype
+            )
+            q_batch = zeros(
+                (max_batch_size, config.num_heads, config.head_dim), dtype=dtype
+            )
+            k_batch = zeros(
+                (max_batch_size, config.num_kv_heads, config.head_dim), dtype=dtype
+            )
+            v_batch = zeros(
+                (max_batch_size, config.num_kv_heads, config.head_dim), dtype=dtype
+            )
+            q_t_batch = zeros(
+                (config.num_heads, max_batch_size, config.head_dim), dtype=dtype
+            )
+            attn_out_batch = zeros(
+                (config.num_heads, max_batch_size, config.head_dim), dtype=dtype
+            )
+            attn_out_t_batch = zeros(
+                (max_batch_size, config.num_heads, config.head_dim), dtype=dtype
+            )
+            o_proj_out_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
+            gate_up_out_batch = zeros(
+                (max_batch_size, 2 * config.intermediate_size), dtype=dtype
+            )
+            mlp_down_batch = zeros((max_batch_size, config.hidden_size), dtype=dtype)
+            cos_batch = zeros((max_batch_size, config.head_dim), dtype=dtype)
+            sin_batch = zeros((max_batch_size, config.head_dim), dtype=dtype)
+
+            if vocab_size is not None:
+                logits_batch = zeros((max_batch_size, vocab_size), dtype=dtype)
+
+            if use_qk_norm:
+                q_flat_batch = zeros(
+                    (max_batch_size * config.num_heads, config.head_dim), dtype=dtype
+                )
+                k_flat_batch = zeros(
+                    (max_batch_size * config.num_kv_heads, config.head_dim), dtype=dtype
+                )
+
         return cls(
             hidden=hidden,
             q=q,
@@ -758,6 +869,26 @@ class DecodeBuffers:
             random_val=random_val_buf,
             token_id_buf=token_id_buf,
             context_len_buf=context_len_buf,
+            # Batch decode buffers
+            max_batch_size=max_batch_size,
+            hidden_batch=hidden_batch,
+            residual_batch=residual_batch,
+            norm_out_batch=norm_out_batch,
+            qkv_proj_out_batch=qkv_proj_out_batch,
+            q_batch=q_batch,
+            k_batch=k_batch,
+            v_batch=v_batch,
+            q_t_batch=q_t_batch,
+            attn_out_batch=attn_out_batch,
+            attn_out_t_batch=attn_out_t_batch,
+            o_proj_out_batch=o_proj_out_batch,
+            gate_up_out_batch=gate_up_out_batch,
+            mlp_down_batch=mlp_down_batch,
+            cos_batch=cos_batch,
+            sin_batch=sin_batch,
+            logits_batch=logits_batch,
+            q_flat_batch=q_flat_batch,
+            k_flat_batch=k_flat_batch,
         )
 
 
@@ -2611,6 +2742,109 @@ class CausalTransformerModel:
         hidden = self.final_norm(hidden)
 
         return hidden
+
+    def _decode_step_fixed_cache_batch_zero_alloc(
+        self,
+        token_ids: list[int],
+        start_position: int,
+        context_len: int,
+        buffers: DecodeBuffers,
+    ) -> GPUArray:
+        """Batch decode step using pre-allocated buffers (zero-allocation).
+
+        This function is designed to be CUDA Graph capture compatible.
+        All intermediate buffers are pre-allocated in DecodeBuffers.
+
+        Args:
+            token_ids: List of token IDs to decode [seq_len tokens]
+            start_position: Starting position in sequence (first token's position)
+            context_len: Total context length after adding this batch
+            buffers: Pre-allocated batch decode buffers
+
+        Returns:
+            Hidden states [seq_len, hidden_size] (view into buffers.hidden_batch)
+
+        Note:
+            Requires buffers.max_batch_size > 0 and len(token_ids) <= max_batch_size.
+            TODO: CUDA Graph capture can be added once this path is validated.
+        """
+        seq_len = len(token_ids)
+
+        if buffers.max_batch_size == 0:
+            raise RuntimeError(
+                "Batch buffers not allocated. "
+                "Call DecodeBuffers.allocate(..., max_batch_size=8)"
+            )
+        if seq_len > buffers.max_batch_size:
+            raise ValueError(
+                f"seq_len ({seq_len}) exceeds max_batch_size ({buffers.max_batch_size})"
+            )
+
+        # Get embeddings (still uses numpy - small one-time cost)
+        if not hasattr(self, "_embed_np_cache"):
+            self._embed_np_cache = self.embed_tokens.to_numpy()
+        hidden_np = self._embed_np_cache[token_ids]  # [seq_len, hidden_size]
+
+        # Copy to batch hidden buffer
+        assert buffers.hidden_batch is not None
+        buffers.hidden_batch._get_native().copy_from_numpy(
+            hidden_np.astype(self._embed_np_cache.dtype)
+        )
+
+        # Use slice_rows for actual seq_len (logical batch size)
+        # slice_rows creates a zero-copy view of the first N rows
+        hidden = buffers.hidden_batch.slice_rows(seq_len)
+        residual_buf = buffers.residual_batch.slice_rows(seq_len) if buffers.residual_batch else None
+        norm_out_buf = buffers.norm_out_batch.slice_rows(seq_len) if buffers.norm_out_batch else None
+
+        # Transformer blocks
+        for block in self.blocks:
+            # Pre-norm: attn_norm(hidden) -> norm_out
+            if norm_out_buf is not None:
+                rmsnorm(hidden, block.attn_norm.weight, block.attn_norm.eps, out=norm_out_buf)
+            else:
+                norm_out_buf = block.attn_norm(hidden)
+
+            # Save residual
+            if residual_buf is not None:
+                copy_to(hidden, residual_buf)
+            else:
+                residual_buf = hidden
+
+            # Attention with fixed cache (batch) - uses existing path for now
+            # TODO: Add forward_fixed_cache_batch_zero_alloc to Attention class
+            attn_out = block.attn.forward_fixed_cache_batch(
+                norm_out_buf, start_position, context_len
+            )
+
+            # Residual connection: hidden = residual + attn_out
+            add_inplace(residual_buf, attn_out)
+            hidden = residual_buf
+
+            # MLP norm
+            if norm_out_buf is not None:
+                rmsnorm(hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=norm_out_buf)
+            else:
+                norm_out_buf = block.mlp_norm(hidden)
+
+            # Save residual for MLP
+            if residual_buf is not hidden:
+                copy_to(hidden, residual_buf)
+
+            # MLP - uses existing path for now
+            # TODO: Add zero-alloc MLP path
+            mlp_out = block.mlp(norm_out_buf)
+
+            # Residual connection
+            add_inplace(residual_buf, mlp_out)
+            hidden = residual_buf
+
+        # Final norm
+        if norm_out_buf is not None:
+            rmsnorm(hidden, self.final_norm.weight, self.final_norm.eps, out=norm_out_buf)
+            return norm_out_buf
+        else:
+            return self.final_norm(hidden)
 
     # =========================================================================
     # Self-Speculative Decoding

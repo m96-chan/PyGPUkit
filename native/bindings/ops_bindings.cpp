@@ -191,6 +191,13 @@ void init_ops_bindings(py::module_& m) {
           "k: [seq_len, n_heads_k, head_dim]\n"
           "cos, sin: [seq_len, head_dim]");
 
+    // Split fused QKV projection output into separate Q, K, V tensors
+    m.def("split_qkv_batch", &ops::split_qkv_batch,
+          py::arg("qkv"), py::arg("q_out"), py::arg("k_out"), py::arg("v_out"),
+          py::arg("q_dim"), py::arg("k_dim"), py::arg("v_dim"),
+          "Split fused QKV projection [seq_len, q_dim+k_dim+v_dim] into Q, K, V.\n"
+          "Output buffers must be pre-allocated for CUDA Graph compatibility.");
+
     // Scaled Dot-Product Attention with Causal Mask
     m.def("sdpa_causal", py::overload_cast<const GPUArray&, const GPUArray&, const GPUArray&, float>(&ops::sdpa_causal),
           py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("scale") = 0.0f,

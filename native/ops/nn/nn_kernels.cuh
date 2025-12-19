@@ -2901,6 +2901,138 @@ __global__ void mul_inplace_f64_kernel(
     }
 }
 
+// ============================================================================
+// Split QKV Batch Kernels
+// Splits fused QKV projection output [seq_len, q_dim + k_dim + v_dim]
+// into separate Q, K, V tensors for batch decode
+// ============================================================================
+
+template<typename T>
+__global__ void split_qkv_batch_kernel(
+    const T* __restrict__ qkv,      // [seq_len, q_dim + k_dim + v_dim]
+    T* __restrict__ q,              // [seq_len, q_dim]
+    T* __restrict__ k,              // [seq_len, k_dim]
+    T* __restrict__ v,              // [seq_len, v_dim]
+    int seq_len,
+    int q_dim,
+    int k_dim,
+    int v_dim
+) {
+    // Each thread handles one element
+    int total_qkv = q_dim + k_dim + v_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = seq_len * total_qkv;
+
+    if (idx >= total_elements) return;
+
+    int row = idx / total_qkv;
+    int col = idx % total_qkv;
+
+    T val = qkv[idx];
+
+    if (col < q_dim) {
+        // Q region
+        q[row * q_dim + col] = val;
+    } else if (col < q_dim + k_dim) {
+        // K region
+        k[row * k_dim + (col - q_dim)] = val;
+    } else {
+        // V region
+        v[row * v_dim + (col - q_dim - k_dim)] = val;
+    }
+}
+
+// Explicit instantiations
+__global__ void split_qkv_batch_f16_kernel(
+    const __half* __restrict__ qkv,
+    __half* __restrict__ q,
+    __half* __restrict__ k,
+    __half* __restrict__ v,
+    int seq_len,
+    int q_dim,
+    int k_dim,
+    int v_dim
+) {
+    int total_qkv = q_dim + k_dim + v_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = seq_len * total_qkv;
+
+    if (idx >= total_elements) return;
+
+    int row = idx / total_qkv;
+    int col = idx % total_qkv;
+
+    __half val = qkv[idx];
+
+    if (col < q_dim) {
+        q[row * q_dim + col] = val;
+    } else if (col < q_dim + k_dim) {
+        k[row * k_dim + (col - q_dim)] = val;
+    } else {
+        v[row * v_dim + (col - q_dim - k_dim)] = val;
+    }
+}
+
+__global__ void split_qkv_batch_f32_kernel(
+    const float* __restrict__ qkv,
+    float* __restrict__ q,
+    float* __restrict__ k,
+    float* __restrict__ v,
+    int seq_len,
+    int q_dim,
+    int k_dim,
+    int v_dim
+) {
+    int total_qkv = q_dim + k_dim + v_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = seq_len * total_qkv;
+
+    if (idx >= total_elements) return;
+
+    int row = idx / total_qkv;
+    int col = idx % total_qkv;
+
+    float val = qkv[idx];
+
+    if (col < q_dim) {
+        q[row * q_dim + col] = val;
+    } else if (col < q_dim + k_dim) {
+        k[row * k_dim + (col - q_dim)] = val;
+    } else {
+        v[row * v_dim + (col - q_dim - k_dim)] = val;
+    }
+}
+
+__global__ void split_qkv_batch_bf16_kernel(
+    const __nv_bfloat16* __restrict__ qkv,
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    __nv_bfloat16* __restrict__ v,
+    int seq_len,
+    int q_dim,
+    int k_dim,
+    int v_dim
+) {
+    int total_qkv = q_dim + k_dim + v_dim;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = seq_len * total_qkv;
+
+    if (idx >= total_elements) return;
+
+    int row = idx / total_qkv;
+    int col = idx % total_qkv;
+
+    __nv_bfloat16 val = qkv[idx];
+
+    if (col < q_dim) {
+        q[row * q_dim + col] = val;
+    } else if (col < q_dim + k_dim) {
+        k[row * k_dim + (col - q_dim)] = val;
+    } else {
+        v[row * v_dim + (col - q_dim - k_dim)] = val;
+    }
+}
+
 } // namespace nn
 } // namespace ops
 } // namespace pygpukit
