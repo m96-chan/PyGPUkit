@@ -260,13 +260,32 @@ Block sizes: `(16, 16)` or `(32, 8)` - do NOT increase to 32×32 unless profiler
 
 #### LLM Inference (Qwen3-8B, RTX 3090 Ti, FP16)
 
+**Single Token Decode (M=1):**
+
 | Mode | Tokens/sec | ms/token |
 |------|-----------|----------|
 | Non-graph decode | 1.84 | 544 |
 | CUDA Graph decode | 2.19 | 457 |
 | Speedup | **1.19x** | - |
 
-**Note:** Large models (8B+) are GPU compute-bound; CUDA Graph benefit is modest.
+**Batch Decode (v0.2.11):**
+
+| Batch Size | Per Token (us) | Throughput | Speedup |
+|------------|---------------|------------|---------|
+| 1 | 381,303 | 2.6 tok/s | 1.00x |
+| 2 | 205,030 | 4.9 tok/s | 1.86x |
+| 4 | 108,521 | 9.2 tok/s | 3.51x |
+| 8 | 55,845 | 17.9 tok/s | **6.83x** |
+
+**E2E Batch Verification (32 tokens):**
+
+| Method | Time (ms) | tok/s | Speedup |
+|--------|----------|-------|---------|
+| Sequential | 14,541 | 2.13 | 1.00x |
+| Batch Verify (batch=4) | 4,082 | 7.59 | 3.56x |
+| Batch Verify (batch=8) | 2,147 | 14.44 | **6.77x** |
+
+**Note:** Large models (8B+) are GPU compute-bound; CUDA Graph benefit is modest. Batch decode shows near-linear scaling.
 
 ### CMake Flags
 
