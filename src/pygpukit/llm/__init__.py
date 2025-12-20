@@ -548,6 +548,15 @@ from pygpukit.llm.config import (  # noqa: E402
     detect_model_spec,
 )
 
+# Decode strategies (refactored v0.2.11)
+from pygpukit.llm.decode import (  # noqa: E402
+    DecodeBatch,
+    DecodeJacobi,
+    DecodeM1,
+    DecodeSpeculative,
+    DecodeStrategy,
+)
+
 # Layers (refactored v0.2.11)
 from pygpukit.llm.layers import (  # noqa: E402
     MLP,
@@ -648,4 +657,10 @@ __all__ = [
     "repack_model_weights",
     # Sampling (v0.2.11)
     "sample_token",
+    # Decode strategies (v0.2.11)
+    "DecodeStrategy",
+    "DecodeM1",
+    "DecodeBatch",
+    "DecodeSpeculative",
+    "DecodeJacobi",
 ]
