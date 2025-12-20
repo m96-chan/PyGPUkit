@@ -1441,6 +1441,33 @@ def _rope_inplace_native(
     native.rope_inplace(q_native, k_native, cos_native, sin_native)
 
 
+def rope_inplace_f32table(
+    q: GPUArray,
+    k: GPUArray,
+    cos: GPUArray,
+    sin: GPUArray,
+) -> None:
+    """Apply RoPE with FP32 cos/sin tables (higher precision for bf16/f16).
+
+    Uses FP32 cos/sin tables for higher precision computation, avoiding
+    the need to convert tables to bf16/f16.
+
+    Args:
+        q: Query tensor [seq_len, n_heads_q, head_dim] (bf16 or f16, modified in-place).
+        k: Key tensor [seq_len, n_heads_k, head_dim] (bf16 or f16, modified in-place).
+        cos: Precomputed cosine [seq_len, head_dim] (f32).
+        sin: Precomputed sine [seq_len, head_dim] (f32).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    q_native = q._get_native()
+    k_native = k._get_native()
+    cos_native = cos._get_native()
+    sin_native = sin._get_native()
+    native.rope_inplace_f32table(q_native, k_native, cos_native, sin_native)
+
+
 def split_qkv_batch(
     qkv: GPUArray,
     q_out: GPUArray,

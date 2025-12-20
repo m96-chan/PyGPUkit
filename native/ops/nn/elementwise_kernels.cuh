@@ -192,6 +192,7 @@ __global__ void rope_f16_kernel(
 }
 
 // BF16 RoPE kernel (compute in FP32 for precision, store in BF16)
+// cos/sin are also BF16
 __global__ void rope_bf16_kernel(
     __nv_bfloat16* __restrict__ q,
     __nv_bfloat16* __restrict__ k,
@@ -244,6 +245,120 @@ __global__ void rope_bf16_kernel(
 
         k[base + d] = __float2bfloat16(k0 * c - k1 * sn);
         k[base + d + half_dim] = __float2bfloat16(k1 * c + k0 * sn);
+    }
+}
+
+// BF16 RoPE kernel with FP32 cos/sin tables (higher precision, no intermediate allocation)
+// Q/K are BF16, cos/sin are FP32 - compute in FP32, write back BF16
+__global__ void rope_bf16_f32table_kernel(
+    __nv_bfloat16* __restrict__ q,
+    __nv_bfloat16* __restrict__ k,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = __bfloat162float(q[base + d]);
+        float q1 = __bfloat162float(q[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = cos[cos_idx];
+        float sn = sin[cos_idx];
+
+        q[base + d] = __float2bfloat16_rn(q0 * c - q1 * sn);
+        q[base + d + half_dim] = __float2bfloat16_rn(q1 * c + q0 * sn);
+    }
+
+    // Process K tensor
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = __bfloat162float(k[base + d]);
+        float k1 = __bfloat162float(k[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = cos[cos_idx];
+        float sn = sin[cos_idx];
+
+        k[base + d] = __float2bfloat16_rn(k0 * c - k1 * sn);
+        k[base + d + half_dim] = __float2bfloat16_rn(k1 * c + k0 * sn);
+    }
+}
+
+// FP16 RoPE kernel with FP32 cos/sin tables (higher precision, no intermediate allocation)
+// Q/K are FP16, cos/sin are FP32 - compute in FP32, write back FP16
+__global__ void rope_f16_f32table_kernel(
+    __half* __restrict__ q,
+    __half* __restrict__ k,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    int seq_len,
+    int n_heads_q,
+    int n_heads_k,
+    int head_dim
+) {
+    int half_dim = head_dim / 2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+
+    // Process Q tensor
+    if (idx < total_q) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_q;
+        int s = remaining / n_heads_q;
+
+        int base = s * n_heads_q * head_dim + h * head_dim;
+        float q0 = __half2float(q[base + d]);
+        float q1 = __half2float(q[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = cos[cos_idx];
+        float sn = sin[cos_idx];
+
+        q[base + d] = __float2half(q0 * c - q1 * sn);
+        q[base + d + half_dim] = __float2half(q1 * c + q0 * sn);
+    }
+
+    // Process K tensor
+    if (idx < total_k) {
+        int d = idx % half_dim;
+        int remaining = idx / half_dim;
+        int h = remaining % n_heads_k;
+        int s = remaining / n_heads_k;
+
+        int base = s * n_heads_k * head_dim + h * head_dim;
+        float k0 = __half2float(k[base + d]);
+        float k1 = __half2float(k[base + d + half_dim]);
+
+        int cos_idx = s * head_dim + d;
+        float c = cos[cos_idx];
+        float sn = sin[cos_idx];
+
+        k[base + d] = __float2half(k0 * c - k1 * sn);
+        k[base + d + half_dim] = __float2half(k1 * c + k0 * sn);
     }
 }
 

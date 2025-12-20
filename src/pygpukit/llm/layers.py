@@ -19,7 +19,6 @@ import numpy as np
 from pygpukit.core.array import GPUArray
 from pygpukit.core.dtypes import bfloat16 as dt_bfloat16
 from pygpukit.core.dtypes import float16 as dt_float16
-from pygpukit.core.dtypes import float32 as dt_float32
 from pygpukit.core.factory import from_numpy
 from pygpukit.ops.basic import (
     add,
@@ -382,27 +381,16 @@ class Attention:
         # Apply RoPE on GPU
         if self.config.use_rope:
             assert self._cos is not None and self._sin is not None
-            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+            from pygpukit.ops.basic import rope_inplace_f32table
 
             q_dtype = q.dtype
-            if q_dtype == dt_float16:
-                # Cast on GPU for precision
-                cos_f32 = from_numpy(self._cos[position_ids].astype(np.float32))
-                sin_f32 = from_numpy(self._sin[position_ids].astype(np.float32))
-                cos = cast_f32_to_f16(cos_f32)
-                sin = cast_f32_to_f16(sin_f32)
-            elif q_dtype == dt_bfloat16:
-                # Cast on GPU using __float2bfloat16_rn
-                cos_f32 = from_numpy(self._cos[position_ids].astype(np.float32))
-                sin_f32 = from_numpy(self._sin[position_ids].astype(np.float32))
-                cos = cast_f32_to_bf16(cos_f32)
-                sin = cast_f32_to_bf16(sin_f32)
-                rope_inplace(q, k, cos, sin)
+            cos_f32 = from_numpy(self._cos[position_ids].astype(np.float32))
+            sin_f32 = from_numpy(self._sin[position_ids].astype(np.float32))
+            if q_dtype in (dt_float16, dt_bfloat16):
+                # Use f32 tables directly for higher precision (no intermediate alloc)
+                rope_inplace_f32table(q, k, cos_f32, sin_f32)
             else:
-                cos = from_numpy(self._cos[position_ids].astype(np.float32))
-                sin = from_numpy(self._sin[position_ids].astype(np.float32))
-            if q_dtype in (dt_float32, dt_float16):
-                rope_inplace(q, k, cos, sin)
+                rope_inplace(q, k, cos_f32, sin_f32)
 
         # GPU KV Cache
         if past_kv is not None:
@@ -495,26 +483,14 @@ class Attention:
 
         # Apply RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
-            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+            from pygpukit.ops.basic import rope_inplace_f32table
 
-            if q_dtype == dt_float16:
-                # Cast on GPU for precision
-                cos_f32 = from_numpy(self._cos[position : position + 1].astype(np.float32))
-                sin_f32 = from_numpy(self._sin[position : position + 1].astype(np.float32))
-                cos = cast_f32_to_f16(cos_f32)
-                sin = cast_f32_to_f16(sin_f32)
-                rope_inplace(q, k, cos, sin)
-            elif q_dtype == dt_bfloat16:
-                # Cast on GPU using __float2bfloat16_rn
-                cos_f32 = from_numpy(self._cos[position : position + 1].astype(np.float32))
-                sin_f32 = from_numpy(self._sin[position : position + 1].astype(np.float32))
-                cos = cast_f32_to_bf16(cos_f32)
-                sin = cast_f32_to_bf16(sin_f32)
-                rope_inplace(q, k, cos, sin)
+            cos_f32 = from_numpy(self._cos[position : position + 1].astype(np.float32))
+            sin_f32 = from_numpy(self._sin[position : position + 1].astype(np.float32))
+            if q_dtype in (dt_float16, dt_bfloat16):
+                rope_inplace_f32table(q, k, cos_f32, sin_f32)
             else:
-                cos = from_numpy(self._cos[position : position + 1].astype(np.float32))
-                sin = from_numpy(self._sin[position : position + 1].astype(np.float32))
-                rope_inplace(q, k, cos, sin)
+                rope_inplace(q, k, cos_f32, sin_f32)
 
         # Update KV cache
         kv_cache_update_gqa(k, self._k_cache, self.num_heads, position)
@@ -592,25 +568,15 @@ class Attention:
 
         # RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
-            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+            from pygpukit.ops.basic import rope_inplace_f32table
 
             end_pos = start_position + seq_len
-            if q_dtype == dt_float16:
-                # Cast on GPU for precision
-                cos_f32 = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
-                sin_f32 = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
-                cos = cast_f32_to_f16(cos_f32)
-                sin = cast_f32_to_f16(sin_f32)
-            elif q_dtype == dt_bfloat16:
-                # Cast on GPU using __float2bfloat16_rn
-                cos_f32 = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
-                sin_f32 = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
-                cos = cast_f32_to_bf16(cos_f32)
-                sin = cast_f32_to_bf16(sin_f32)
+            cos_f32 = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
+            sin_f32 = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
+            if q_dtype in (dt_float16, dt_bfloat16):
+                rope_inplace_f32table(q, k, cos_f32, sin_f32)
             else:
-                cos = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
-                sin = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
-            rope_inplace(q, k, cos, sin)
+                rope_inplace(q, k, cos_f32, sin_f32)
 
         # Update KV cache
         kv_cache_prefill_gqa(k, self._k_cache, self.num_heads, start_position)

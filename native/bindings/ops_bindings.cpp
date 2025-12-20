@@ -191,6 +191,14 @@ void init_ops_bindings(py::module_& m) {
           "k: [seq_len, n_heads_k, head_dim]\n"
           "cos, sin: [seq_len, head_dim]");
 
+    // RoPE with FP32 cos/sin tables (higher precision for bf16/f16)
+    m.def("rope_inplace_f32table", &ops::rope_inplace_f32table,
+          py::arg("q"), py::arg("k"), py::arg("cos"), py::arg("sin"),
+          "Apply RoPE with FP32 cos/sin tables (higher precision).\n"
+          "q: [seq_len, n_heads_q, head_dim] (bf16 or f16)\n"
+          "k: [seq_len, n_heads_k, head_dim] (bf16 or f16)\n"
+          "cos, sin: [seq_len, head_dim] (f32)");
+
     // Split fused QKV projection output into separate Q, K, V tensors
     m.def("split_qkv_batch", &ops::split_qkv_batch,
           py::arg("qkv"), py::arg("q_out"), py::arg("k_out"), py::arg("v_out"),

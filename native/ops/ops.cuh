@@ -122,6 +122,12 @@ void silu(const GPUArray& input, GPUArray& out);
 // cos, sin: [seq_len, head_dim]
 void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
 
+// RoPE with FP32 cos/sin tables (higher precision for bf16/f16 Q/K)
+// q: [seq_len, n_heads_q, head_dim] (bf16 or f16)
+// k: [seq_len, n_heads_k, head_dim] (bf16 or f16)
+// cos, sin: [seq_len, head_dim] (f32)
+void rope_inplace_f32table(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
+
 // Split fused QKV projection output into separate Q, K, V tensors
 // qkv: [seq_len, q_dim + k_dim + v_dim]
 // q_out: [seq_len, q_dim] (can be pre-allocated buffer)
