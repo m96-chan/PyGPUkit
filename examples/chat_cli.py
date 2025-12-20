@@ -37,6 +37,63 @@ os.environ.setdefault("PYGPUKIT_CUBLASLT_DEBUG", "0")
 import numpy as np
 
 
+def logits_to_f32(logits_gpu) -> np.ndarray:
+    """Convert logits GPU array to numpy float32.
+
+    Handles bf16 (stored as uint16) by converting to fp32.
+    """
+    logits_np = logits_gpu.to_numpy()
+    if logits_np.dtype == np.uint16:
+        # bf16 stored as uint16 - convert to fp32
+        return (logits_np.astype(np.uint32) << 16).view(np.float32)
+    return logits_np.astype(np.float32)
+
+
+class StreamingDecoder:
+    """O(1) streaming decoder for UTF-8 safe output.
+
+    Uses a sliding window to decode only the last WINDOW tokens,
+    making each add_token() call O(1) instead of O(n).
+    """
+
+    WINDOW = 8  # Sliding window size
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.tokens: list[int] = []
+        self.cached_prefix = ""  # Cached decode result for growing phase
+
+    def add_token(self, token_id: int) -> str:
+        """Add a token and return the new text portion.
+
+        Returns:
+            New text from this token (O(1) complexity).
+        """
+        self.tokens.append(token_id)
+
+        window = self.tokens[-self.WINDOW:]
+        text = self.tokenizer.decode(window)
+
+        if len(self.tokens) <= self.WINDOW:
+            # Growing phase - use cached prefix
+            new_text = text[len(self.cached_prefix):]
+            self.cached_prefix = text
+            return new_text
+        else:
+            # Sliding phase - decode window[:-1] to find new portion
+            prefix = self.tokenizer.decode(window[:-1])
+            return text[len(prefix):]
+
+    def flush(self) -> str:
+        """Flush any remaining buffered text (none with this approach)."""
+        return ""
+
+    def reset(self):
+        """Reset the decoder state."""
+        self.tokens.clear()
+        self.cached_prefix = ""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="PyGPUkit CLI Chat",
@@ -102,6 +159,13 @@ def main():
         default=1.1,
         help="Repetition penalty (default: 1.1, 1.0 = disabled)",
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["float16", "bfloat16", "float32"],
+        help="Model dtype (default: bfloat16 - fastest for bf16 models)",
+    )
     args = parser.parse_args()
 
     # Lazy imports for faster --help
@@ -123,12 +187,13 @@ def main():
     # Load Model
     # =========================================================================
     print(f"\nLoading model from: {args.model}")
+    print(f"  dtype: {args.dtype}")
     t0 = time.perf_counter()
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
     st = load_safetensors(args.model)
     spec = detect_model_spec(st.tensor_names)
-    model = load_model_from_safetensors(args.model, dtype="float16", spec=spec)
+    model = load_model_from_safetensors(args.model, dtype=args.dtype, spec=spec)
 
     load_time = time.perf_counter() - t0
     print(f"Model loaded in {load_time:.1f}s")
@@ -143,18 +208,19 @@ def main():
     # Initialize KV Cache
     # =========================================================================
     print(f"\nInitializing KV cache (max_seq_len={args.max_seq_len})...")
-    dtype = "float16"
 
     for block in model.blocks:
-        block.attn.init_fixed_cache(args.max_seq_len, dtype=dtype)
+        block.attn.init_fixed_cache(args.max_seq_len, dtype=args.dtype)
 
     # Precompute RoPE frequencies
     if config.use_rope:
         cos_np, sin_np = precompute_freqs_cis(
             config.head_dim, args.max_seq_len, config.rope_theta
         )
-        model._rope_cos_gpu = from_numpy(cos_np.astype(np.float16))
-        model._rope_sin_gpu = from_numpy(sin_np.astype(np.float16))
+        # Use float16 for RoPE regardless of model dtype (computed in fp32 for bf16)
+        rope_np_dtype = np.float16 if args.dtype == "float16" else np.float32
+        model._rope_cos_gpu = from_numpy(cos_np.astype(rope_np_dtype))
+        model._rope_sin_gpu = from_numpy(sin_np.astype(rope_np_dtype))
 
     default_stream().synchronize()
     print("Ready!")
@@ -289,7 +355,7 @@ def main():
         # Decode
         t_decode_start = time.perf_counter()
         logits = model.get_logits(hidden)
-        last_logits = logits.to_numpy()[-1]
+        last_logits = logits_to_f32(logits)[-1]
         next_token = sample_token(
             last_logits, args.temperature, args.top_k, args.top_p
         )
@@ -306,7 +372,7 @@ def main():
                 break
             hidden = model._decode_step_fixed_cache(next_token, position, context_len)
             logits = model.get_logits(hidden)
-            logits_np = logits.to_numpy()[-1]
+            logits_np = logits_to_f32(logits)[-1]
             next_token = sample_token(
                 logits_np, args.temperature, args.top_k, args.top_p
             )
@@ -320,9 +386,13 @@ def main():
             decode_time = time.perf_counter() - t_decode_start
             return "", prefill_time, decode_time
 
+        # Use streaming decoder for UTF-8 safe output
+        stream_decoder = StreamingDecoder(tokenizer)
+
         # Output first real token
-        first_token_str = tokenizer.decode([next_token])
-        print(first_token_str, end="", flush=True)
+        text_chunk = stream_decoder.add_token(next_token)
+        if text_chunk:
+            print(text_chunk, end="", flush=True)
         generated_ids.append(next_token)
         at_start = False
 
@@ -333,7 +403,7 @@ def main():
             hidden = model._decode_step_fixed_cache(next_token, position, context_len)
             logits = model.get_logits(hidden)
             logits_np = apply_repetition_penalty(
-                logits.to_numpy()[-1], generated_ids, rep_penalty
+                logits_to_f32(logits)[-1], generated_ids, rep_penalty
             )
             next_token = sample_token(
                 logits_np, args.temperature, args.top_k, args.top_p
@@ -346,8 +416,14 @@ def main():
             position += 1
             context_len += 1
 
-            token_str = tokenizer.decode([next_token])
-            print(token_str, end="", flush=True)
+            text_chunk = stream_decoder.add_token(next_token)
+            if text_chunk:
+                print(text_chunk, end="", flush=True)
+
+        # Flush any remaining buffered text
+        remaining = stream_decoder.flush()
+        if remaining:
+            print(remaining, end="", flush=True)
 
         default_stream().synchronize()
         decode_time = time.perf_counter() - t_decode_start
@@ -386,6 +462,7 @@ def main():
         # Chunked decode
         t_decode_start = time.perf_counter()
         generated_ids: list[int] = []
+        stream_decoder = StreamingDecoder(tokenizer)
         position = len(input_ids)
         context_len = position + 1
         batch_chunks = 0
@@ -394,7 +471,7 @@ def main():
 
         # Get first token from prefill
         logits = model.get_logits(hidden)
-        logits_np = logits.to_numpy()[-1]
+        logits_np = logits_to_f32(logits)[-1]
         next_token = sample_token(
             logits_np, args.temperature, args.top_k, args.top_p
         )
@@ -405,7 +482,7 @@ def main():
                 break
             hidden = model._decode_step_fixed_cache(next_token, position, context_len)
             logits = model.get_logits(hidden)
-            logits_np = logits.to_numpy()[-1]
+            logits_np = logits_to_f32(logits)[-1]
             next_token = sample_token(
                 logits_np, args.temperature, args.top_k, args.top_p
             )
@@ -436,7 +513,9 @@ def main():
 
                 # Generate first token of chunk
                 generated_ids.append(next_token)
-                print(tokenizer.decode([next_token]), end="", flush=True)
+                text_chunk = stream_decoder.add_token(next_token)
+                if text_chunk:
+                    print(text_chunk, end="", flush=True)
 
                 # Generate remaining tokens in chunk with M=1
                 for i in range(chunk_size - 1):
@@ -448,7 +527,7 @@ def main():
                     )
                     logits = model.get_logits(hidden)
                     logits_np = apply_repetition_penalty(
-                        logits.to_numpy()[-1], generated_ids, rep_penalty
+                        logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
                     next_tok = sample_token(
                         logits_np, args.temperature, args.top_k, args.top_p
@@ -460,7 +539,9 @@ def main():
 
                     chunk_tokens.append(next_tok)
                     generated_ids.append(next_tok)
-                    print(tokenizer.decode([next_tok]), end="", flush=True)
+                    text_chunk = stream_decoder.add_token(next_tok)
+                    if text_chunk:
+                        print(text_chunk, end="", flush=True)
 
                 # If we have a full chunk, verify with batch decode (optional, for demo)
                 if len(chunk_tokens) == batch_size:
@@ -474,7 +555,7 @@ def main():
                     )
                     logits = model.get_logits(hidden)
                     logits_np = apply_repetition_penalty(
-                        logits.to_numpy()[-1], generated_ids, rep_penalty
+                        logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
                     next_token = sample_token(
                         logits_np, args.temperature, args.top_k, args.top_p
@@ -489,7 +570,9 @@ def main():
                         break
 
                     generated_ids.append(next_token)
-                    print(tokenizer.decode([next_token]), end="", flush=True)
+                    text_chunk = stream_decoder.add_token(next_token)
+                    if text_chunk:
+                        print(text_chunk, end="", flush=True)
 
                     curr_pos = position + len(generated_ids) - 1
                     curr_ctx = curr_pos + 1
@@ -502,7 +585,7 @@ def main():
                     )
                     logits = model.get_logits(hidden)
                     logits_np = apply_repetition_penalty(
-                        logits.to_numpy()[-1], generated_ids, rep_penalty
+                        logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
                     next_token = sample_token(
                         logits_np, args.temperature, args.top_k, args.top_p
@@ -512,6 +595,11 @@ def main():
 
         default_stream().synchronize()
         decode_time = time.perf_counter() - t_decode_start
+
+        # Flush any remaining buffered text
+        remaining = stream_decoder.flush()
+        if remaining:
+            print(remaining, end="", flush=True)
 
         print()
         return (

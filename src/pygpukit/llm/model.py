@@ -23,7 +23,7 @@ from pygpukit.core.array import GPUArray
 from pygpukit.core.dtypes import bfloat16 as dt_bfloat16
 from pygpukit.core.dtypes import float16 as dt_float16
 from pygpukit.core.dtypes import float32 as dt_float32
-from pygpukit.core.factory import from_numpy, zeros
+from pygpukit.core.factory import empty, from_numpy, zeros
 from pygpukit.ops.basic import (
     add,
     add_inplace,
@@ -1296,12 +1296,17 @@ class Attention:
 
         Args:
             max_seq_len: Maximum sequence length to support.
-            dtype: Data type for cache (float16/bfloat16).
+            dtype: Data type for cache (float16/bfloat16/float32).
         """
         # Cache shape: [num_heads, max_seq_len, head_dim] (transposed, GQA-expanded)
         # This eliminates per-step transpose and GQA expansion
         cache_shape = (self.num_heads, max_seq_len, self.head_dim)
-        np_dtype = np.float16 if dtype == "float16" else np.float32
+        if dtype == "float16":
+            np_dtype = np.float16
+        elif dtype == "bfloat16":
+            np_dtype = np.uint16  # bf16 stored as uint16
+        else:
+            np_dtype = np.float32
         self._k_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
         self._v_cache = from_numpy(np.zeros(cache_shape, dtype=np_dtype))
         self._max_cache_len = max_seq_len
@@ -1415,17 +1420,17 @@ class Attention:
                 cos = from_numpy(self._cos[position_ids].astype(np.float16))
                 sin = from_numpy(self._sin[position_ids].astype(np.float16))
             elif q_dtype == dt_bfloat16:
-                # NumPy doesn't support bfloat16, so use float32 -> convert on GPU
-                cos = from_numpy(self._cos[position_ids].astype(np.float32))
-                sin = from_numpy(self._sin[position_ids].astype(np.float32))
-                # TODO: Add bfloat16 conversion when available
-                # For now, fall back to float32 computation
-                q_f32 = from_numpy(q.to_numpy().astype(np.float32))
-                k_f32 = from_numpy(k.to_numpy().astype(np.float32))
-                rope_inplace(q_f32, k_f32, cos, sin)
-                # Convert back - using float16 as proxy since bfloat16 not in numpy
-                q = from_numpy(q_f32.to_numpy().astype(np.float16))
-                k = from_numpy(k_f32.to_numpy().astype(np.float16))
+                # bf16: use native bf16 RoPE kernel (cos/sin as bf16)
+                cos_f32 = self._cos[position_ids]
+                sin_f32 = self._sin[position_ids]
+                # Convert fp32 → bf16 (round to nearest even)
+                cos_u32 = cos_f32.view(np.uint32)
+                sin_u32 = sin_f32.view(np.uint32)
+                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                cos = from_numpy(cos_bf16)
+                sin = from_numpy(sin_bf16)
+                rope_inplace(q, k, cos, sin)
             else:
                 # FP32 path
                 cos = from_numpy(self._cos[position_ids].astype(np.float32))
@@ -1526,16 +1531,30 @@ class Attention:
             k_normed = self.k_norm(k_flat)
             k = k_normed.view((1, self.num_kv_heads, self.head_dim))
 
+        # Track dtype for output buffer allocation
+        q_dtype = q.dtype
+
         # Apply RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
-            q_dtype_name = q.dtype.name
-            if q_dtype_name == "float16":
+            if q_dtype == dt_float16:
                 cos = from_numpy(self._cos[position : position + 1].astype(np.float16))
                 sin = from_numpy(self._sin[position : position + 1].astype(np.float16))
+                rope_inplace(q, k, cos, sin)
+            elif q_dtype == dt_bfloat16:
+                # bf16: use native bf16 RoPE kernel (cos/sin as bf16)
+                cos_f32 = self._cos[position : position + 1]
+                sin_f32 = self._sin[position : position + 1]
+                cos_u32 = cos_f32.view(np.uint32)
+                sin_u32 = sin_f32.view(np.uint32)
+                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                cos = from_numpy(cos_bf16)
+                sin = from_numpy(sin_bf16)
+                rope_inplace(q, k, cos, sin)
             else:
                 cos = from_numpy(self._cos[position : position + 1].astype(np.float32))
                 sin = from_numpy(self._sin[position : position + 1].astype(np.float32))
-            rope_inplace(q, k, cos, sin)
+                rope_inplace(q, k, cos, sin)
 
         # Update fixed KV cache at current position (GQA-expanded, transposed)
         # k, v: [1, num_kv_heads, head_dim] -> cache: [num_heads, max_seq_len, head_dim]
@@ -1552,7 +1571,13 @@ class Attention:
 
         # Allocate output buffer if needed
         if out is None:
-            attn_out = from_numpy(np.zeros((self.num_heads, 1, self.head_dim), dtype=np.float16))
+            if q_dtype == dt_float16:
+                out_np_dtype = np.float16
+            elif q_dtype == dt_bfloat16:
+                out_np_dtype = np.uint16
+            else:
+                out_np_dtype = np.float32
+            attn_out = from_numpy(np.zeros((self.num_heads, 1, self.head_dim), dtype=out_np_dtype))
         else:
             attn_out = out
 
@@ -4689,10 +4714,34 @@ def load_model_from_safetensors(
         # Explicit model type
         model = load_model_from_safetensors("/path/to/model.safetensors", spec=LLAMA_SPEC)
     """
-    from pygpukit.llm import load_safetensors
+    from pygpukit.llm import Dtype, load_safetensors
 
     st = load_safetensors(model_path)
-    target_dtype = np.float16 if dtype == "float16" else np.float32
+
+    # Try to import direct mmap-to-GPU transfer function
+    use_direct_transfer = False
+    try:
+        from pygpukit._pygpukit_native import memcpy_ptr_to_device
+
+        first_tensor = st.tensor_names[0]
+        st.tensor_data_ptr(first_tensor)
+        use_direct_transfer = True
+    except (ImportError, AttributeError):
+        pass
+
+    # Map dtype string to numpy dtype and native dtype
+    if dtype == "float16":
+        target_np_dtype = np.float16
+        target_dtype_id = Dtype.Float16
+        target_dt = dt_float16
+    elif dtype == "bfloat16":
+        target_np_dtype = np.uint16  # bf16 stored as uint16
+        target_dtype_id = Dtype.BFloat16
+        target_dt = dt_bfloat16
+    else:  # float32
+        target_np_dtype = np.float32
+        target_dtype_id = Dtype.Float32
+        target_dt = dt_float32
 
     # Detect model type if not specified
     if spec is None:
@@ -4700,20 +4749,43 @@ def load_model_from_safetensors(
 
     # Helper to load tensor with dtype conversion
     def load_tensor(name: str, do_transpose: bool = False) -> GPUArray:
-        data = st.tensor_bytes(name)
         info = st.tensor_info(name)
-        if info.dtype == 2:  # BFloat16
+
+        # Direct mmap-to-GPU transfer for matching dtypes (no conversion needed)
+        if use_direct_transfer and not do_transpose and info.dtype == target_dtype_id:
+            ptr, size_bytes = st.tensor_data_ptr(name)
+            gpu_arr = empty(info.shape, target_dt)
+            memcpy_ptr_to_device(gpu_arr._array, ptr, size_bytes)
+            return gpu_arr
+
+        # Fallback: load via numpy with dtype conversion
+        data = st.tensor_bytes(name)
+        src_dtype_id = info.dtype
+
+        if src_dtype_id == Dtype.BFloat16:
             arr = np.frombuffer(data, dtype=np.uint16).reshape(info.shape)
-            arr_f32 = np.empty(arr.shape, dtype=np.float32)
-            arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
-            arr = arr_f32
+            if target_dtype_id == Dtype.BFloat16:
+                arr = arr.copy()
+            else:
+                arr_f32 = np.empty(arr.shape, dtype=np.float32)
+                arr_f32.view(np.uint32)[:] = arr.astype(np.uint32) << 16
+                arr = arr_f32.astype(target_np_dtype)
         else:
-            dtype_map = {0: np.float32, 1: np.float16, 3: np.float64}
-            np_dtype = dtype_map.get(info.dtype, np.float32)
+            dtype_map = {Dtype.Float32: np.float32, Dtype.Float16: np.float16, 3: np.float64}
+            np_dtype = dtype_map.get(src_dtype_id, np.float32)
             arr = np.frombuffer(data, dtype=np_dtype).reshape(info.shape).copy()
+
+            if target_dtype_id == Dtype.BFloat16:
+                arr_f32 = arr.astype(np.float32)
+                uint32_view = arr_f32.view(np.uint32)
+                arr = ((uint32_view + 0x7FFF + ((uint32_view >> 16) & 1)) >> 16).astype(np.uint16)
+            else:
+                arr = arr.astype(target_np_dtype)
+
         if do_transpose and arr.ndim == 2:
-            arr = arr.T
-        return from_numpy(arr.astype(target_dtype))
+            arr = arr.T.copy()
+
+        return from_numpy(arr)
 
     def try_load(name: str | None, do_transpose: bool = False) -> GPUArray | None:
         if name is None or name not in st.tensor_names:
