@@ -150,13 +150,13 @@ def main():
     # Benchmark 2: DecodeBatch
     # =========================================================================
     print("\n" + "=" * 70)
-    print("Benchmark 2: DecodeBatch (batch=4 tokens at once)")
+    print("Benchmark 2: DecodeBatch (batch=8 tokens at once)")
     print("=" * 70)
 
     from pygpukit.llm import DecodeBatch
 
     try:
-        batch_size = 4
+        batch_size = 8
         batch = DecodeBatch(batch_size=batch_size)
         batch.bind(model)
 
