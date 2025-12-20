@@ -77,7 +77,7 @@ class DecodeBatch(DecodeStrategy):
         token_ids: list[int],
         start_position: int,
         context_len: int,
-        buffers: DecodeBuffers,
+        buffers: DecodeBuffers,  # noqa: ARG002
     ) -> GPUArray:
         """Execute batch decode step without CUDA Graph.
 
@@ -85,66 +85,15 @@ class DecodeBatch(DecodeStrategy):
             token_ids: List of token IDs to decode.
             start_position: Starting position in sequence.
             context_len: Total context length after this batch.
-            buffers: Pre-allocated decode buffers.
+            buffers: Pre-allocated decode buffers (unused, kept for API compat).
 
         Returns:
             Hidden states [seq_len, hidden_size].
         """
-        model = self.model
-        seq_len = len(token_ids)
-
-        # Get embeddings
-        if not hasattr(model, "_embed_np_cache"):
-            model._embed_np_cache = model.embed_tokens.to_numpy()
-        hidden_np = model._embed_np_cache[token_ids]
-
-        # Copy to batch hidden buffer
-        assert buffers.hidden_batch is not None
-        buffers.hidden_batch._get_native().copy_from_numpy(
-            hidden_np.astype(model._embed_np_cache.dtype)
+        # Use legacy batch decode which handles bfloat16 RoPE correctly
+        return self.model._decode_step_fixed_cache_batch(
+            token_ids, start_position, context_len
         )
-
-        # Use sliced views
-        hidden = buffers.hidden_batch.slice_rows(seq_len)
-        residual_buf = buffers.residual_batch.slice_rows(seq_len)
-        norm_out_buf = buffers.norm_out_batch.slice_rows(seq_len)
-        mlp_out_buf = buffers.mlp_down_batch.slice_rows(seq_len)
-
-        # Get RoPE tables
-        rope_cos_gpu = getattr(model, "_rope_cos_gpu", None)
-        rope_sin_gpu = getattr(model, "_rope_sin_gpu", None)
-        start_pos_buf = buffers.start_position_batch_buf
-
-        # Transformer blocks
-        for block in model.blocks:
-            rmsnorm(hidden, block.attn_norm.weight, block.attn_norm.eps, out=norm_out_buf)
-            copy_to(hidden, residual_buf)
-
-            # Zero-alloc attention
-            attn_out = block.attn.forward_fixed_cache_batch_zero_alloc(
-                norm_out_buf,
-                start_position,
-                context_len,
-                buffers,
-                rope_cos_gpu,
-                rope_sin_gpu,
-                start_pos_buf,
-            )
-
-            add_inplace(residual_buf, attn_out)
-            copy_to(residual_buf, hidden)
-
-            rmsnorm(hidden, block.mlp_norm.weight, block.mlp_norm.eps, out=norm_out_buf)
-            copy_to(hidden, residual_buf)
-
-            # Zero-alloc MLP
-            model._mlp_forward_batch_zero_alloc(block.mlp, norm_out_buf, buffers, mlp_out_buf)
-
-            add_inplace(residual_buf, mlp_out_buf)
-            copy_to(residual_buf, hidden)
-
-        rmsnorm(hidden, model.final_norm.weight, model.final_norm.eps, out=norm_out_buf)
-        return norm_out_buf
 
     def init_graph(self, max_seq_len: int = 512) -> None:
         """Initialize CUDA Graph for batch decode.
