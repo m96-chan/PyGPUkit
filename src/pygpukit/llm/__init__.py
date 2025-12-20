@@ -199,6 +199,20 @@ class SafeTensorsFile:
         """
         return self._inner.tensor_as_f32(name)
 
+    def tensor_data_ptr(self, name: str) -> tuple[int, int]:
+        """Get raw mmap pointer for direct GPU transfer.
+
+        Args:
+            name: Tensor name
+
+        Returns:
+            Tuple of (ptr, size_bytes) where ptr is the raw mmap address
+
+        Raises:
+            KeyError: If tensor name not found
+        """
+        return self._inner.tensor_data_ptr(name)
+
     def __len__(self) -> int:
         return self.num_tensors
 
@@ -324,6 +338,23 @@ class ShardedSafeTensorsFile:
             raise KeyError(f"Tensor '{name}' not found")
         shard_file = self._weight_map[name]
         return self._get_shard(shard_file).tensor_as_f32(name)
+
+    def tensor_data_ptr(self, name: str) -> tuple[int, int]:
+        """Get raw mmap pointer for direct GPU transfer.
+
+        Args:
+            name: Tensor name
+
+        Returns:
+            Tuple of (ptr, size_bytes) where ptr is the raw mmap address
+
+        Raises:
+            KeyError: If tensor name not found
+        """
+        if name not in self._weight_map:
+            raise KeyError(f"Tensor '{name}' not found")
+        shard_file = self._weight_map[name]
+        return self._get_shard(shard_file).tensor_data_ptr(name)
 
     def __len__(self) -> int:
         return self.num_tensors
@@ -491,48 +522,71 @@ class Tokenizer:
 
 
 # Chat template support (v0.2.10)
+# Buffers (refactored v0.2.11)
+from pygpukit.llm.buffers import (  # noqa: E402
+    DecodeBuffers,
+    PrefillBuffers,
+)
 from pygpukit.llm.chat import (  # noqa: E402
     ChatMessage,
     apply_chat_template,
     create_chat_prompt,
     format_chat_messages,
 )
-from pygpukit.llm.model import (  # noqa: E402
+
+# Config classes and ModelSpec (refactored v0.2.11)
+from pygpukit.llm.config import (  # noqa: E402
     GPT2_SPEC,
     LLAMA_SPEC,
-    MLP,
     MODEL_SPECS,
     QWEN3_SPEC,
-    # Components
-    Attention,
-    CausalSelfAttention,
-    # Core model
-    CausalTransformerModel,
-    # Legacy config classes (for reference)
     GPT2Config,
-    # Type aliases (GPT2Model = LlamaModel = CausalTransformerModel)
-    GPT2Model,
-    LayerNorm,
-    Linear,
-    LlamaAttention,
-    LlamaBlock,
     LlamaConfig,
-    LlamaMLP,
-    LlamaModel,
-    # ModelSpec (v0.2.9)
     ModelSpec,
-    Norm,
     Qwen3Config,
-    RMSNorm,
-    TransformerBlock,
     TransformerConfig,
     detect_model_spec,
+)
+
+# Layers (refactored v0.2.11)
+from pygpukit.llm.layers import (  # noqa: E402
+    MLP,
+    Attention,
+    Linear,
+    Norm,
+    TransformerBlock,
+    apply_rotary_pos_emb_numpy,
+    precompute_freqs_cis,
+    repack_linear,
+    repack_norm,
+    repack_weight,
+)
+
+# Loaders (refactored v0.2.11)
+from pygpukit.llm.loader import (  # noqa: E402
     load_gpt2_from_safetensors,
     load_llama_from_safetensors,
-    # Loaders
     load_model_from_safetensors,
     load_qwen3_from_safetensors,
+    repack_model_weights,
 )
+
+# Model (refactored v0.2.11)
+from pygpukit.llm.model import (  # noqa: E402
+    # Type aliases
+    CausalSelfAttention,
+    CausalTransformerModel,
+    GPT2Model,
+    LayerNorm,
+    LlamaAttention,
+    LlamaBlock,
+    LlamaMLP,
+    LlamaModel,
+    RMSNorm,
+)
+
+# Sampling (refactored v0.2.11)
+from pygpukit.llm.sampling import sample_token  # noqa: E402
 
 __all__ = [
     # SafeTensors
@@ -581,4 +635,17 @@ __all__ = [
     "apply_chat_template",
     "format_chat_messages",
     "create_chat_prompt",
+    # Buffers (v0.2.11)
+    "DecodeBuffers",
+    "PrefillBuffers",
+    # RoPE utilities (v0.2.11)
+    "apply_rotary_pos_emb_numpy",
+    "precompute_freqs_cis",
+    # Weight repacking (v0.2.11)
+    "repack_linear",
+    "repack_norm",
+    "repack_weight",
+    "repack_model_weights",
+    # Sampling (v0.2.11)
+    "sample_token",
 ]
