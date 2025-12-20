@@ -2,9 +2,9 @@
 """
 PyGPUkit - Simple CLI Chat
 
-A minimal turn-based chat interface using the fastest inference configuration:
-- M=1 decode: Non-graph zero-alloc path
-- Batch verify: Original allocating path (17.5 tok/s effective)
+A minimal turn-based chat interface using the Strategy pattern:
+- DecodeM1: Single token decode (baseline)
+- DecodeBatch: Batch decode for higher throughput
 
 Usage:
     python examples/chat_cli.py --model /path/to/model.safetensors.index.json --tokenizer /path/to/tokenizer.json
@@ -49,49 +49,147 @@ def logits_to_f32(logits_gpu) -> np.ndarray:
     return logits_np.astype(np.float32)
 
 
-class StreamingDecoder:
-    """O(1) streaming decoder for UTF-8 safe output.
+def _build_byte_decoder() -> dict[str, int]:
+    """Build the unicode-to-byte mapping used by GPT-2/Qwen style tokenizers.
 
-    Uses a sliding window to decode only the last WINDOW tokens,
-    making each add_token() call O(1) instead of O(n).
+    These tokenizers encode raw bytes as unicode characters to avoid control chars.
+    This function builds the reverse mapping to convert token strings back to bytes.
     """
+    # Characters that map directly to their byte values
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    # Other bytes are mapped to higher unicode code points
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return {chr(c): b for b, c in zip(bs, cs)}
 
-    WINDOW = 8  # Sliding window size
+
+# Global byte decoder for GPT-2/Qwen style tokenizers
+_BYTE_DECODER = _build_byte_decoder()
+
+
+def _token_str_to_bytes(token_str: str) -> bytes:
+    """Convert a GPT-2/Qwen style token string to raw bytes."""
+    result = []
+    for char in token_str:
+        if char in _BYTE_DECODER:
+            result.append(_BYTE_DECODER[char])
+        else:
+            # Fallback: encode as UTF-8
+            result.extend(char.encode("utf-8"))
+    return bytes(result)
+
+
+class StreamingDecoder:
+    """Streaming decoder for UTF-8 safe output.
+
+    Bypasses tokenizer.decode() and manually converts token strings to bytes,
+    then buffers incomplete UTF-8 sequences until they are complete.
+    """
 
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-        self.tokens: list[int] = []
-        self.cached_prefix = ""  # Cached decode result for growing phase
+        self.pending_bytes = b""  # Incomplete UTF-8 bytes waiting for more
+        self._cache: dict[int, bytes] = {}  # Cache: token_id -> bytes
+
+    def _get_token_bytes(self, token_id: int) -> bytes:
+        """Get bytes for a token ID, with caching."""
+        cached = self._cache.get(token_id)
+        if cached is not None:
+            return cached
+        token_str = self.tokenizer.id_to_token(token_id)
+        if token_str is None:
+            result = b""
+        else:
+            result = _token_str_to_bytes(token_str)
+        self._cache[token_id] = result
+        return result
 
     def add_token(self, token_id: int) -> str:
         """Add a token and return the new text portion.
 
         Returns:
-            New text from this token (O(1) complexity).
+            New complete UTF-8 text from this token.
         """
-        self.tokens.append(token_id)
+        new_bytes = self._get_token_bytes(token_id)
+        if not new_bytes:
+            return ""
 
-        window = self.tokens[-self.WINDOW:]
-        text = self.tokenizer.decode(window)
+        all_bytes = self.pending_bytes + new_bytes
 
-        if len(self.tokens) <= self.WINDOW:
-            # Growing phase - use cached prefix
-            new_text = text[len(self.cached_prefix):]
-            self.cached_prefix = text
-            return new_text
-        else:
-            # Sliding phase - decode window[:-1] to find new portion
-            prefix = self.tokenizer.decode(window[:-1])
-            return text[len(prefix):]
+        # Find the longest valid UTF-8 prefix
+        valid_end = 0
+        i = 0
+        while i < len(all_bytes):
+            byte = all_bytes[i]
+            if byte < 0x80:
+                # ASCII
+                valid_end = i + 1
+                i += 1
+            elif byte < 0xC0:
+                # Orphan continuation byte - skip it
+                i += 1
+            elif byte < 0xE0:
+                # 2-byte sequence
+                if i + 1 < len(all_bytes) and 0x80 <= all_bytes[i + 1] < 0xC0:
+                    valid_end = i + 2
+                    i += 2
+                else:
+                    break  # Incomplete - wait for more bytes
+            elif byte < 0xF0:
+                # 3-byte sequence
+                if (
+                    i + 2 < len(all_bytes)
+                    and 0x80 <= all_bytes[i + 1] < 0xC0
+                    and 0x80 <= all_bytes[i + 2] < 0xC0
+                ):
+                    valid_end = i + 3
+                    i += 3
+                else:
+                    break  # Incomplete - wait for more bytes
+            elif byte < 0xF8:
+                # 4-byte sequence
+                if (
+                    i + 3 < len(all_bytes)
+                    and 0x80 <= all_bytes[i + 1] < 0xC0
+                    and 0x80 <= all_bytes[i + 2] < 0xC0
+                    and 0x80 <= all_bytes[i + 3] < 0xC0
+                ):
+                    valid_end = i + 4
+                    i += 4
+                else:
+                    break  # Incomplete - wait for more bytes
+            else:
+                # Invalid start byte - skip it
+                i += 1
+
+        # Output complete bytes, keep incomplete ones pending
+        complete_bytes = all_bytes[:valid_end]
+        self.pending_bytes = all_bytes[valid_end:]
+
+        if complete_bytes:
+            return complete_bytes.decode("utf-8", errors="replace")
+        return ""
 
     def flush(self) -> str:
-        """Flush any remaining buffered text (none with this approach)."""
+        """Flush any remaining buffered bytes."""
+        if self.pending_bytes:
+            text = self.pending_bytes.decode("utf-8", errors="replace")
+            self.pending_bytes = b""
+            return text
         return ""
 
     def reset(self):
         """Reset the decoder state."""
-        self.tokens.clear()
-        self.cached_prefix = ""
+        self.pending_bytes = b""
 
 
 def main():
@@ -166,6 +264,11 @@ def main():
         choices=["float16", "bfloat16", "float32"],
         help="Model dtype (default: bfloat16 - fastest for bf16 models)",
     )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Enable CUDA Graph for faster decode (reduces kernel launch overhead)",
+    )
     args = parser.parse_args()
 
     # Lazy imports for faster --help
@@ -175,11 +278,13 @@ def main():
     from pygpukit.core import default_stream, from_numpy
     from pygpukit.llm import (
         ChatMessage,
+        DecodeM1,
         detect_model_spec,
         format_chat_messages,
         load_model_from_safetensors,
         load_safetensors,
     )
+    from pygpukit.llm.buffers import DecodeBuffers
     from pygpukit.llm.model import precompute_freqs_cis, sample_token
     from pygpukit.ops.basic import kv_cache_prefill_gqa
 
@@ -212,12 +317,36 @@ def main():
     for block in model.blocks:
         block.attn.init_fixed_cache(args.max_seq_len, dtype=args.dtype)
 
-    # Precompute RoPE frequencies
-    if config.use_rope:
+    # =========================================================================
+    # Initialize Decode Strategy
+    # =========================================================================
+    use_qk_norm = model.spec is not None and model.spec.use_qk_norm
+    lm_head = model._lm_head if model._lm_head is not None else model.embed_tokens
+    vocab_size = lm_head.shape[0]
+
+    decode_buffers = DecodeBuffers.allocate(
+        config, dtype=args.dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
+    )
+
+    m1 = DecodeM1()
+    m1.bind(model)
+
+    # Initialize CUDA Graph if requested (not supported for bfloat16)
+    use_cuda_graph = args.cuda_graph
+    if use_cuda_graph and args.dtype == "bfloat16":
+        print("\n[WARN] CUDA Graph not supported with bfloat16 (RoPE dtype issue)")
+        print("       Falling back to standard decode path")
+        use_cuda_graph = False
+
+    if use_cuda_graph:
+        print("\nInitializing CUDA Graph...")
+        m1.init_graph(max_seq_len=args.max_seq_len)
+        print(f"  CUDA Graph ready (max_seq_len={args.max_seq_len})")
+    elif config.use_rope:
+        # Precompute RoPE frequencies for non-CUDA-Graph path
         cos_np, sin_np = precompute_freqs_cis(
             config.head_dim, args.max_seq_len, config.rope_theta
         )
-        # Use float16 for RoPE regardless of model dtype (computed in fp32 for bf16)
         rope_np_dtype = np.float16 if args.dtype == "float16" else np.float32
         model._rope_cos_gpu = from_numpy(cos_np.astype(rope_np_dtype))
         model._rope_sin_gpu = from_numpy(sin_np.astype(rope_np_dtype))
@@ -330,6 +459,18 @@ def main():
     # =========================================================================
     batch_size = args.batch_size
 
+    def decode_one_token(token_id: int, position: int, context_len: int):
+        """Decode one token, using CUDA Graph if available.
+
+        Returns:
+            Logits array [1, vocab_size] or [vocab_size].
+        """
+        if use_cuda_graph and m1.has_graph():
+            return m1.step_graph(token_id, position, context_len)
+        else:
+            hidden = m1.step(token_id, position, context_len, decode_buffers)
+            return model.get_logits(hidden)
+
     def generate_m1(messages: list[ChatMessage]) -> tuple[str, float, float]:
         """Generate using M=1 decode path (baseline)."""
         prompt = format_chat_messages(messages, model_type=model_type)
@@ -370,8 +511,7 @@ def main():
         while should_skip_token(next_token, at_start, skip_count):
             if context_len >= args.max_seq_len:
                 break
-            hidden = model._decode_step_fixed_cache(next_token, position, context_len)
-            logits = model.get_logits(hidden)
+            logits = decode_one_token(next_token, position, context_len)
             logits_np = logits_to_f32(logits)[-1]
             next_token = sample_token(
                 logits_np, args.temperature, args.top_k, args.top_p
@@ -400,8 +540,7 @@ def main():
             if context_len >= args.max_seq_len:
                 break
 
-            hidden = model._decode_step_fixed_cache(next_token, position, context_len)
-            logits = model.get_logits(hidden)
+            logits = decode_one_token(next_token, position, context_len)
             logits_np = apply_repetition_penalty(
                 logits_to_f32(logits)[-1], generated_ids, rep_penalty
             )
@@ -480,8 +619,7 @@ def main():
         while should_skip_token(next_token, at_start, skip_count):
             if context_len >= args.max_seq_len:
                 break
-            hidden = model._decode_step_fixed_cache(next_token, position, context_len)
-            logits = model.get_logits(hidden)
+            logits = decode_one_token(next_token, position, context_len)
             logits_np = logits_to_f32(logits)[-1]
             next_token = sample_token(
                 logits_np, args.temperature, args.top_k, args.top_p
@@ -522,10 +660,7 @@ def main():
                     curr_pos = chunk_start + i
                     curr_ctx = curr_pos + 1
 
-                    hidden = model._decode_step_fixed_cache(
-                        chunk_tokens[-1], curr_pos, curr_ctx
-                    )
-                    logits = model.get_logits(hidden)
+                    logits = decode_one_token(chunk_tokens[-1], curr_pos, curr_ctx)
                     logits_np = apply_repetition_penalty(
                         logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
@@ -550,10 +685,7 @@ def main():
                 # Get next token for next iteration
                 if not is_end_token(next_tok):
                     curr_pos = chunk_start + len(chunk_tokens) - 1
-                    hidden = model._decode_step_fixed_cache(
-                        chunk_tokens[-1], curr_pos, curr_pos + 1
-                    )
-                    logits = model.get_logits(hidden)
+                    logits = decode_one_token(chunk_tokens[-1], curr_pos, curr_pos + 1)
                     logits_np = apply_repetition_penalty(
                         logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
@@ -580,10 +712,7 @@ def main():
                     if curr_ctx >= args.max_seq_len:
                         break
 
-                    hidden = model._decode_step_fixed_cache(
-                        next_token, curr_pos, curr_ctx
-                    )
-                    logits = model.get_logits(hidden)
+                    logits = decode_one_token(next_token, curr_pos, curr_ctx)
                     logits_np = apply_repetition_penalty(
                         logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
@@ -623,9 +752,12 @@ def main():
     print("\n" + "=" * 60)
     print(" PyGPUkit Chat")
     if batch_size > 1:
-        print(f" Mode: Chunked (chunk_size={batch_size})")
+        mode_str = f"Chunked (chunk_size={batch_size})"
+    elif use_cuda_graph:
+        mode_str = "M=1 + CUDA Graph"
     else:
-        print(" Mode: Standard (M=1)")
+        mode_str = "M=1 (standard)"
+    print(f" Mode: {mode_str}")
     print(" Commands: /clear (reset), /quit (exit)")
     print("=" * 60)
 
