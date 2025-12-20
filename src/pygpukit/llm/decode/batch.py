@@ -378,6 +378,7 @@ class DecodeBatch(DecodeStrategy):
         self._batch_decode_graph.replay()
         self._batch_decode_graph.synchronize()
 
+        assert buffers.logits_batch is not None, "logits_batch buffer not allocated"
         return buffers.logits_batch
 
     @property

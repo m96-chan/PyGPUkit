@@ -84,10 +84,12 @@ class DecodeM1(DecodeStrategy):
             # Save residual
             copy_to(buffers.hidden, buffers.residual)
 
-            # Attention with fixed cache (writes to buffers.hidden)
-            model._attention_forward_zero_alloc(
-                block.attn, buffers.norm_out, position, context_len, buffers
+            # Attention with fixed cache (handles RoPE internally with proper dtype)
+            # Use forward_fixed_cache which handles bfloat16 RoPE conversion properly
+            attn_out = block.attn.forward_fixed_cache(
+                buffers.norm_out, position, context_len, out=buffers.attn_out
             )
+            copy_to(attn_out, buffers.hidden)
 
             # Add residual: hidden = residual + hidden
             add_inplace(buffers.hidden, buffers.residual)
@@ -300,6 +302,7 @@ class DecodeM1(DecodeStrategy):
                 f"ctx={context_len}. Error: {e}"
             ) from e
 
+        assert buffers.logits is not None, "logits buffer not allocated"
         return buffers.logits
 
     @property
