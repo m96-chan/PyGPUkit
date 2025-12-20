@@ -151,20 +151,23 @@ class DecodeM1(DecodeStrategy):
 
         # Pre-compute RoPE tables on GPU if not already done
         if model.config.use_rope and not hasattr(model, "_rope_cos_gpu"):
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             cos_np, sin_np = precompute_freqs_cis(
                 model.config.head_dim, max_seq_len, model.config.rope_theta
             )
             if dtype == "float16":
-                model._rope_cos_gpu = from_numpy(cos_np.astype(np.float16))
-                model._rope_sin_gpu = from_numpy(sin_np.astype(np.float16))
+                # Cast on GPU for better precision
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                model._rope_cos_gpu = cast_f32_to_f16(cos_f32)
+                model._rope_sin_gpu = cast_f32_to_f16(sin_f32)
             elif dtype == "bfloat16":
-                # Convert float32 -> bfloat16 via bit manipulation (numpy doesn't support bf16)
-                cos_u32 = cos_np.view(np.uint32)
-                sin_u32 = sin_np.view(np.uint32)
-                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                model._rope_cos_gpu = from_numpy(cos_bf16)
-                model._rope_sin_gpu = from_numpy(sin_bf16)
+                # Cast on GPU using __float2bfloat16_rn (proper rounding)
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                model._rope_cos_gpu = cast_f32_to_bf16(cos_f32)
+                model._rope_sin_gpu = cast_f32_to_bf16(sin_f32)
             else:
                 model._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
                 model._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))

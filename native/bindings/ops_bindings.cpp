@@ -318,6 +318,18 @@ void init_ops_bindings(py::module_& m) {
           "Lookup embedding reading index from GPU buffer.\n"
           "token_id_buf: GPUArray[1] int32 containing token/position value");
 
+    m.def("embedding_lookup_batch", &ops::embedding_lookup_batch,
+          py::arg("embed_matrix"), py::arg("out"), py::arg("token_ids_buf"),
+          py::arg("batch_size"),
+          "Batch embedding lookup from GPU token ID array.\n"
+          "Looks up multiple rows: out[i, :] = embed_matrix[token_ids[i], :]");
+
+    m.def("slice_rows_range_ptr", &ops::slice_rows_range_ptr,
+          py::arg("table"), py::arg("out"), py::arg("start_pos_buf"),
+          py::arg("count"),
+          "Slice consecutive rows from table using GPU-stored start position.\n"
+          "Copies `count` rows: out[i, :] = table[start_pos + i, :]");
+
     // In-place addition (for CUDA Graph)
     m.def("add_inplace", &ops::add_inplace,
           py::arg("a"), py::arg("b"),
@@ -332,6 +344,30 @@ void init_ops_bindings(py::module_& m) {
     m.def("copy_to", &ops::copy_to,
           py::arg("src"), py::arg("dst"),
           "Copy src to dst on GPU");
+
+    // ========================================================================
+    // Dtype Cast Operations
+    // ========================================================================
+
+    m.def("cast_f32_to_bf16", py::overload_cast<const GPUArray&>(&ops::cast_f32_to_bf16),
+          py::arg("src"),
+          "Cast float32 to bfloat16 on GPU (round to nearest even)");
+
+    m.def("cast_f32_to_bf16_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::cast_f32_to_bf16),
+          py::arg("src"), py::arg("dst"),
+          "Cast float32 to bfloat16 on GPU (in-place version)");
+
+    m.def("cast_f32_to_f16", &ops::cast_f32_to_f16,
+          py::arg("src"),
+          "Cast float32 to float16 on GPU");
+
+    m.def("cast_bf16_to_f32", &ops::cast_bf16_to_f32,
+          py::arg("src"),
+          "Cast bfloat16 to float32 on GPU");
+
+    m.def("cast_f16_to_f32", &ops::cast_f16_to_f32,
+          py::arg("src"),
+          "Cast float16 to float32 on GPU");
 
     // ========================================================================
     // Quantization Operations (#85)

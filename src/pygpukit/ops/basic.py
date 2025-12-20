@@ -1486,6 +1486,44 @@ def split_qkv_batch(
     )
 
 
+def slice_rows_range_ptr(
+    table: GPUArray,
+    out: GPUArray,
+    start_pos_buf: GPUArray,
+    count: int,
+) -> None:
+    """Slice consecutive rows from table using GPU-stored start position.
+
+    This is a zero-allocation operation designed for CUDA Graph compatibility.
+    The start position is read from a GPU buffer, enabling graph replay with
+    different positions without H2D copies.
+
+    Args:
+        table: Source table of shape [num_rows, row_dim].
+        out: Pre-allocated output buffer of shape [count, row_dim].
+        start_pos_buf: GPU buffer containing start position [1] int32.
+        count: Number of consecutive rows to copy.
+
+    Example:
+        # During CUDA Graph capture
+        slice_rows_range_ptr(rope_cos_table, cos_batch, start_pos_buf, batch_size)
+        # Copies cos_batch[i, :] = rope_cos_table[start_pos + i, :]
+    """
+    from pygpukit.core.backend import get_backend, get_native_module
+
+    backend = get_backend()
+    if not backend.is_available():
+        raise RuntimeError("slice_rows_range_ptr requires GPU backend")
+
+    native = get_native_module()
+    native.slice_rows_range_ptr(
+        table._get_native(),
+        out._get_native(),
+        start_pos_buf._get_native(),
+        count,
+    )
+
+
 # ============================================================================
 # Tensor Manipulation Operations
 # ============================================================================
@@ -1897,6 +1935,32 @@ def embedding_lookup_ptr(
     native.embedding_lookup_ptr(embed_native, out_native, token_id_buf_native)
 
 
+def embedding_lookup_batch(
+    embed_matrix: GPUArray,
+    out: GPUArray,
+    token_ids_buf: GPUArray,
+    batch_size: int,
+) -> None:
+    """Batch embedding lookup from GPU token ID array.
+
+    For CUDA Graph batch decode: looks up multiple tokens at once.
+    out[i, :] = embed_matrix[token_ids[i], :]
+
+    Args:
+        embed_matrix: Embedding matrix [vocab_size, hidden_size]
+        out: Output buffer [batch_size, hidden_size] (pre-allocated)
+        token_ids_buf: GPU buffer containing token IDs [max_batch_size] int32
+        batch_size: Number of tokens to look up (actual batch size)
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    embed_native = embed_matrix._get_native()
+    out_native = out._get_native()
+    token_ids_buf_native = token_ids_buf._get_native()
+    native.embedding_lookup_batch(embed_native, out_native, token_ids_buf_native, batch_size)
+
+
 def add_inplace(a: GPUArray, b: GPUArray) -> None:
     """In-place addition: a += b.
 
@@ -1946,6 +2010,81 @@ def copy_to(src: GPUArray, dst: GPUArray) -> None:
     src_native = src._get_native()
     dst_native = dst._get_native()
     native.copy_to(src_native, dst_native)
+
+
+# =============================================================================
+# Dtype Cast Operations (GPU)
+# =============================================================================
+
+
+def cast_f32_to_bf16(src: GPUArray) -> GPUArray:
+    """Cast float32 to bfloat16 on GPU.
+
+    Uses __float2bfloat16_rn for round-to-nearest-even.
+
+    Args:
+        src: Source tensor (float32).
+
+    Returns:
+        New tensor in bfloat16.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    src_native = src._get_native()
+    result_native = native.cast_f32_to_bf16(src_native)
+    return GPUArray._wrap_native(result_native)
+
+
+def cast_f32_to_f16(src: GPUArray) -> GPUArray:
+    """Cast float32 to float16 on GPU.
+
+    Args:
+        src: Source tensor (float32).
+
+    Returns:
+        New tensor in float16.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    src_native = src._get_native()
+    result_native = native.cast_f32_to_f16(src_native)
+    return GPUArray._wrap_native(result_native)
+
+
+def cast_bf16_to_f32(src: GPUArray) -> GPUArray:
+    """Cast bfloat16 to float32 on GPU.
+
+    Args:
+        src: Source tensor (bfloat16).
+
+    Returns:
+        New tensor in float32.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    src_native = src._get_native()
+    result_native = native.cast_bf16_to_f32(src_native)
+    return GPUArray._wrap_native(result_native)
+
+
+def cast_f16_to_f32(src: GPUArray) -> GPUArray:
+    """Cast float16 to float32 on GPU.
+
+    Args:
+        src: Source tensor (float16).
+
+    Returns:
+        New tensor in float32.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    src_native = src._get_native()
+    result_native = native.cast_f16_to_f32(src_native)
+    return GPUArray._wrap_native(result_native)
 
 
 # =============================================================================

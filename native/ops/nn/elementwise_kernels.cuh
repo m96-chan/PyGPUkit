@@ -476,6 +476,58 @@ __global__ void split_qkv_batch_bf16_kernel(
     }
 }
 
+// ============================================================================
+// Dtype Cast Kernels
+// ============================================================================
+
+// Cast float32 to bfloat16 (round to nearest even)
+__global__ void cast_f32_to_bf16_kernel(
+    const float* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2bfloat16_rn(src[idx]);
+    }
+}
+
+// Cast float32 to float16 (round to nearest)
+__global__ void cast_f32_to_f16_kernel(
+    const float* __restrict__ src,
+    __half* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2half(src[idx]);
+    }
+}
+
+// Cast bfloat16 to float32
+__global__ void cast_bf16_to_f32_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    float* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __bfloat162float(src[idx]);
+    }
+}
+
+// Cast float16 to float32
+__global__ void cast_f16_to_f32_kernel(
+    const __half* __restrict__ src,
+    float* __restrict__ dst,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __half2float(src[idx]);
+    }
+}
+
 } // namespace nn
 } // namespace ops
 } // namespace pygpukit

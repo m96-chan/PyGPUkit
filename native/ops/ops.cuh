@@ -219,6 +219,12 @@ void kv_cache_prefill_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads
 // embed_matrix: [vocab_size, hidden_size], out: [1, hidden_size], token_id: row index
 void embedding_lookup(const GPUArray& embed_matrix, GPUArray& out, int token_id);
 void embedding_lookup_ptr(const GPUArray& embed_matrix, GPUArray& out, const GPUArray& token_id_buf);
+void embedding_lookup_batch(const GPUArray& embed_matrix, GPUArray& out, const GPUArray& token_ids_buf, int batch_size);
+
+// Slice consecutive rows from table using GPU-stored start position
+// Copies `count` rows starting from start_pos (read from GPU buffer)
+// out[i, :] = table[start_pos + i, :]
+void slice_rows_range_ptr(const GPUArray& table, GPUArray& out, const GPUArray& start_pos_buf, int count);
 
 // In-place addition: a += b
 void add_inplace(GPUArray& a, const GPUArray& b);
@@ -228,6 +234,23 @@ void mul_inplace(GPUArray& a, const GPUArray& b);
 
 // GPU-to-GPU copy
 void copy_to(const GPUArray& src, GPUArray& dst);
+
+// ============================================================================
+// Dtype Cast Operations
+// ============================================================================
+
+// Cast float32 to bfloat16 (round to nearest even)
+GPUArray cast_f32_to_bf16(const GPUArray& src);
+void cast_f32_to_bf16(const GPUArray& src, GPUArray& dst);
+
+// Cast float32 to float16
+GPUArray cast_f32_to_f16(const GPUArray& src);
+
+// Cast bfloat16 to float32
+GPUArray cast_bf16_to_f32(const GPUArray& src);
+
+// Cast float16 to float32
+GPUArray cast_f16_to_f32(const GPUArray& src);
 
 // ============================================================================
 // Quantization Operations (#85)

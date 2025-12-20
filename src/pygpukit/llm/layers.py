@@ -382,19 +382,21 @@ class Attention:
         # Apply RoPE on GPU
         if self.config.use_rope:
             assert self._cos is not None and self._sin is not None
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             q_dtype = q.dtype
             if q_dtype == dt_float16:
-                cos = from_numpy(self._cos[position_ids].astype(np.float16))
-                sin = from_numpy(self._sin[position_ids].astype(np.float16))
+                # Cast on GPU for precision
+                cos_f32 = from_numpy(self._cos[position_ids].astype(np.float32))
+                sin_f32 = from_numpy(self._sin[position_ids].astype(np.float32))
+                cos = cast_f32_to_f16(cos_f32)
+                sin = cast_f32_to_f16(sin_f32)
             elif q_dtype == dt_bfloat16:
-                cos_f32 = self._cos[position_ids]
-                sin_f32 = self._sin[position_ids]
-                cos_u32 = cos_f32.view(np.uint32)
-                sin_u32 = sin_f32.view(np.uint32)
-                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                cos = from_numpy(cos_bf16)
-                sin = from_numpy(sin_bf16)
+                # Cast on GPU using __float2bfloat16_rn
+                cos_f32 = from_numpy(self._cos[position_ids].astype(np.float32))
+                sin_f32 = from_numpy(self._sin[position_ids].astype(np.float32))
+                cos = cast_f32_to_bf16(cos_f32)
+                sin = cast_f32_to_bf16(sin_f32)
                 rope_inplace(q, k, cos, sin)
             else:
                 cos = from_numpy(self._cos[position_ids].astype(np.float32))
@@ -493,19 +495,21 @@ class Attention:
 
         # Apply RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             if q_dtype == dt_float16:
-                cos = from_numpy(self._cos[position : position + 1].astype(np.float16))
-                sin = from_numpy(self._sin[position : position + 1].astype(np.float16))
+                # Cast on GPU for precision
+                cos_f32 = from_numpy(self._cos[position : position + 1].astype(np.float32))
+                sin_f32 = from_numpy(self._sin[position : position + 1].astype(np.float32))
+                cos = cast_f32_to_f16(cos_f32)
+                sin = cast_f32_to_f16(sin_f32)
                 rope_inplace(q, k, cos, sin)
             elif q_dtype == dt_bfloat16:
-                cos_f32 = self._cos[position : position + 1]
-                sin_f32 = self._sin[position : position + 1]
-                cos_u32 = cos_f32.view(np.uint32)
-                sin_u32 = sin_f32.view(np.uint32)
-                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                cos = from_numpy(cos_bf16)
-                sin = from_numpy(sin_bf16)
+                # Cast on GPU using __float2bfloat16_rn
+                cos_f32 = from_numpy(self._cos[position : position + 1].astype(np.float32))
+                sin_f32 = from_numpy(self._sin[position : position + 1].astype(np.float32))
+                cos = cast_f32_to_bf16(cos_f32)
+                sin = cast_f32_to_bf16(sin_f32)
                 rope_inplace(q, k, cos, sin)
             else:
                 cos = from_numpy(self._cos[position : position + 1].astype(np.float32))
@@ -588,20 +592,21 @@ class Attention:
 
         # RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             end_pos = start_position + seq_len
             if q_dtype == dt_float16:
-                cos = from_numpy(self._cos[start_position:end_pos].astype(np.float16))
-                sin = from_numpy(self._sin[start_position:end_pos].astype(np.float16))
+                # Cast on GPU for precision
+                cos_f32 = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
+                sin_f32 = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
+                cos = cast_f32_to_f16(cos_f32)
+                sin = cast_f32_to_f16(sin_f32)
             elif q_dtype == dt_bfloat16:
-                # Convert float32 -> bfloat16 via bit manipulation
-                cos_f32 = self._cos[start_position:end_pos]
-                sin_f32 = self._sin[start_position:end_pos]
-                cos_u32 = cos_f32.view(np.uint32)
-                sin_u32 = sin_f32.view(np.uint32)
-                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
-                cos = from_numpy(cos_bf16)
-                sin = from_numpy(sin_bf16)
+                # Cast on GPU using __float2bfloat16_rn
+                cos_f32 = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
+                sin_f32 = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
+                cos = cast_f32_to_bf16(cos_f32)
+                sin = cast_f32_to_bf16(sin_f32)
             else:
                 cos = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
                 sin = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
