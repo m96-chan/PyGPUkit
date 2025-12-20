@@ -154,9 +154,20 @@ class DecodeM1(DecodeStrategy):
             cos_np, sin_np = precompute_freqs_cis(
                 model.config.head_dim, max_seq_len, model.config.rope_theta
             )
-            np_dtype = np.float16 if dtype == "float16" else np.float32
-            model._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
-            model._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+            if dtype == "float16":
+                model._rope_cos_gpu = from_numpy(cos_np.astype(np.float16))
+                model._rope_sin_gpu = from_numpy(sin_np.astype(np.float16))
+            elif dtype == "bfloat16":
+                # Convert float32 -> bfloat16 via bit manipulation (numpy doesn't support bf16)
+                cos_u32 = cos_np.view(np.uint32)
+                sin_u32 = sin_np.view(np.uint32)
+                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                model._rope_cos_gpu = from_numpy(cos_bf16)
+                model._rope_sin_gpu = from_numpy(sin_bf16)
+            else:
+                model._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
+                model._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
         # Cache transposed lm_head for graph (if not already done)
         if not hasattr(model, "_lm_head_t_cache"):
@@ -171,12 +182,13 @@ class DecodeM1(DecodeStrategy):
         # Store max_seq_len for graph replay
         self._graph_max_seq_len = max_seq_len
 
-        # Warmup before capture
+        # Warmup before capture - must use same code path as graph capture
+        # (use _decode_step_zero_alloc instead of step() to match graph kernels)
         buffers = self._decode_buffers
         self._ctx_np[0] = 1
         buffers.context_len_buf._get_native().copy_from_numpy(self._ctx_np)
         for _ in range(3):
-            self.step(0, 0, 1, buffers)
+            model._decode_step_zero_alloc(0, 0, 1, buffers)
 
         # Capture the decode graph
         self._decode_graph = CudaGraph()
