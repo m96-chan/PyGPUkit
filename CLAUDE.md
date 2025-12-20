@@ -285,7 +285,18 @@ Block sizes: `(16, 16)` or `(32, 8)` - do NOT increase to 32×32 unless profiler
 | Batch Verify (batch=4) | 4,082 | 7.59 | 3.56x |
 | Batch Verify (batch=8) | 2,147 | 14.44 | **6.77x** |
 
-**Note:** Large models (8B+) are GPU compute-bound; CUDA Graph benefit is modest. Batch decode shows near-linear scaling.
+**Decode Strategy Benchmark (v0.2.11):**
+
+Model: Qwen2.5-7B-Instruct (bfloat16), RTX 3090 Ti
+
+| Strategy | tok/s | Speedup | Notes |
+|----------|-------|---------|-------|
+| DecodeM1 (baseline) | 3.2 | 1.00x | Single token per step |
+| DecodeBatch (batch=8) | 19.6 | **6.06x** | TensorCore efficient |
+| DecodeSpeculative | 1.4 | 0.42x | Self-speculative (early layers) |
+| DecodeJacobi | 1.7 | 0.53x | Parallel iterative |
+
+**Note:** Large models (8B+) are GPU compute-bound; CUDA Graph benefit is modest. Batch decode shows near-linear scaling with TensorCore utilization.
 
 ### CMake Flags
 
