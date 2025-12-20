@@ -1625,6 +1625,16 @@ class CausalTransformerModel:
     def init_decode_graph(self, max_seq_len: int = 512) -> None:
         """Initialize CUDA Graph for single-token decode.
 
+        .. deprecated:: 0.2.11
+            Use :class:`DecodeM1` strategy instead::
+
+                from pygpukit.llm import DecodeM1
+                m1 = DecodeM1()
+                m1.bind(model)
+                m1.init_graph(max_seq_len=512)
+
+            Will be removed in v0.3.0.
+
         Pre-allocates buffers, pre-computes RoPE, initializes KV cache,
         and captures the decode graph for replay.
 
@@ -1634,6 +1644,14 @@ class CausalTransformerModel:
             max_seq_len: Maximum sequence length for KV cache.
         """
         import gc
+        import warnings
+
+        warnings.warn(
+            "init_decode_graph() is deprecated and will be removed in v0.3.0. "
+            "Use DecodeM1 strategy instead: m1 = DecodeM1(); m1.bind(model); m1.init_graph()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         from pygpukit._pygpukit_native import CudaGraph
 
@@ -1740,6 +1758,13 @@ class CausalTransformerModel:
     def _decode_step_graph_replay(self, token_id: int, position: int, context_len: int) -> GPUArray:
         """Execute decode step using CUDA Graph replay.
 
+        .. deprecated:: 0.2.11
+            Use :class:`DecodeM1` strategy instead::
+
+                m1.step_graph(token_id, position, context_len)
+
+            Will be removed in v0.3.0.
+
         Updates GPU buffers and replays the captured graph.
         Returns logits buffer.
 
@@ -1751,6 +1776,15 @@ class CausalTransformerModel:
         Returns:
             Logits buffer [1, vocab_size]
         """
+        import warnings
+
+        warnings.warn(
+            "_decode_step_graph_replay() is deprecated and will be removed in v0.3.0. "
+            "Use DecodeM1.step_graph() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         assert hasattr(self, "_decode_graph_ready") and self._decode_graph_ready, (
             "Call init_decode_graph() first"
         )
@@ -1808,6 +1842,16 @@ class CausalTransformerModel:
     ) -> None:
         """Initialize CUDA Graph for batch decode (seq_len > 1).
 
+        .. deprecated:: 0.2.11
+            Use :class:`DecodeBatch` strategy instead::
+
+                from pygpukit.llm import DecodeBatch
+                batch = DecodeBatch(batch_size=8)
+                batch.bind(model)
+                batch.init_graph(max_seq_len=512)
+
+            Will be removed in v0.3.0.
+
         Captures a graph for batch verification decode. The graph is replayed
         with different token IDs and positions without recapturing.
 
@@ -1818,6 +1862,14 @@ class CausalTransformerModel:
             max_seq_len: Maximum sequence length for RoPE pre-computation
         """
         import gc
+        import warnings
+
+        warnings.warn(
+            "init_decode_graph_batch() is deprecated and will be removed in v0.3.0. "
+            "Use DecodeBatch strategy instead: batch = DecodeBatch(batch_size); batch.bind(model); batch.init_graph()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         from pygpukit._pygpukit_native import CudaGraph
 
@@ -2029,6 +2081,13 @@ class CausalTransformerModel:
     ) -> GPUArray:
         """Execute batch decode step using CUDA Graph replay.
 
+        .. deprecated:: 0.2.11
+            Use :class:`DecodeBatch` strategy instead::
+
+                batch.step_graph(token_ids, start_position, context_len)
+
+            Will be removed in v0.3.0.
+
         Updates GPU buffers and replays the captured batch graph.
 
         Args:
@@ -2039,6 +2098,15 @@ class CausalTransformerModel:
         Returns:
             Logits buffer [batch_size, vocab_size]
         """
+        import warnings
+
+        warnings.warn(
+            "_decode_step_batch_graph_replay() is deprecated and will be removed in v0.3.0. "
+            "Use DecodeBatch.step_graph() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         assert hasattr(self, "_batch_decode_graph_ready") and self._batch_decode_graph_ready, (
             "Call init_decode_graph_batch() first"
         )
