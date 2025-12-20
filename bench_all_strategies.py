@@ -47,7 +47,7 @@ def main():
     print("=" * 70)
     print("All Decode Strategies Benchmark")
     print("=" * 70)
-    print("Model: Qwen2.5-7B-Instruct (float16)")
+    print("Model: Qwen2.5-7B-Instruct (bfloat16)")
     print(f"Max seq len: {MAX_SEQ_LEN}")
     print(f"Warmup: {WARMUP_TOKENS} tokens, Bench: {BENCH_TOKENS} tokens")
     print()
@@ -64,7 +64,7 @@ def main():
 
     model = load_model_from_safetensors(
         f"{MODEL_PATH}/model.safetensors.index.json",
-        dtype="float16",  # Use float16 for RoPE compatibility
+        dtype="bfloat16",
     )
     print(f"  Loaded in {time.perf_counter() - t0:.1f}s")
     print(f"  Layers: {len(model.blocks)}, Hidden: {model.config.hidden_size}")
@@ -374,8 +374,6 @@ def main():
     print("- DecodeBatch: Process multiple tokens in parallel")
     print("- DecodeSpeculative: Self-speculative using early layers as draft")
     print("- DecodeJacobi: Parallel iterative refinement without draft model")
-    print()
-    print("⚠ bfloat16 not supported for batch strategies due to RoPE dtype mismatch")
 
 
 if __name__ == "__main__":

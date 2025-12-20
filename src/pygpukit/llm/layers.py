@@ -584,13 +584,24 @@ class Attention:
             k_normed = self.k_norm(k_flat)
             k = reshape_copy(k_normed, (seq_len, self.num_kv_heads, self.head_dim))
 
+        q_dtype = q.dtype
+
         # RoPE
         if self.config.use_rope and self._cos is not None and self._sin is not None:
-            q_dtype_name = q.dtype.name
             end_pos = start_position + seq_len
-            if q_dtype_name == "float16":
+            if q_dtype == dt_float16:
                 cos = from_numpy(self._cos[start_position:end_pos].astype(np.float16))
                 sin = from_numpy(self._sin[start_position:end_pos].astype(np.float16))
+            elif q_dtype == dt_bfloat16:
+                # Convert float32 -> bfloat16 via bit manipulation
+                cos_f32 = self._cos[start_position:end_pos]
+                sin_f32 = self._sin[start_position:end_pos]
+                cos_u32 = cos_f32.view(np.uint32)
+                sin_u32 = sin_f32.view(np.uint32)
+                cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+                cos = from_numpy(cos_bf16)
+                sin = from_numpy(sin_bf16)
             else:
                 cos = from_numpy(self._cos[start_position:end_pos].astype(np.float32))
                 sin = from_numpy(self._sin[start_position:end_pos].astype(np.float32))
@@ -601,7 +612,14 @@ class Attention:
         kv_cache_prefill_gqa(v, self._v_cache, self.num_heads, start_position)
 
         q_t = transpose_3d_021(q)
-        attn_out = from_numpy(np.zeros((self.num_heads, seq_len, self.head_dim), dtype=np.float16))
+        # Allocate attn_out with matching dtype
+        if q_dtype == dt_float16:
+            out_np_dtype = np.float16
+        elif q_dtype == dt_bfloat16:
+            out_np_dtype = np.uint16  # bfloat16 stored as uint16
+        else:
+            out_np_dtype = np.float32
+        attn_out = from_numpy(np.zeros((self.num_heads, seq_len, self.head_dim), dtype=out_np_dtype))
 
         sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
 
