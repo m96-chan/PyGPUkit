@@ -553,6 +553,7 @@ from pygpukit.llm.decode import (  # noqa: E402
     DecodeBatch,
     DecodeJacobi,
     DecodeM1,
+    DecodeM1Graph,
     DecodeSpeculative,
     DecodeStrategy,
 )
@@ -660,6 +661,7 @@ __all__ = [
     # Decode strategies (v0.2.11)
     "DecodeStrategy",
     "DecodeM1",
+    "DecodeM1Graph",
     "DecodeBatch",
     "DecodeSpeculative",
     "DecodeJacobi",

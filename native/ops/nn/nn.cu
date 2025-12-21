@@ -143,27 +143,30 @@ void bias_add_inplace(GPUArray& output, const GPUArray& bias) {
     const int block_size = 256;
     const int grid_size = (n + block_size - 1) / block_size;
 
+    // Use capture stream for CUDA Graph compatibility
+    cudaStream_t stream = internal::get_capture_stream();
+
     switch (output.dtype()) {
         case DataType::Float32:
-            bias_add_f32_kernel<<<grid_size, block_size>>>(
+            bias_add_f32_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<float*>(output.data()),
                 static_cast<const float*>(bias.data()),
                 batch_size, features);
             break;
         case DataType::Float64:
-            bias_add_f64_kernel<<<grid_size, block_size>>>(
+            bias_add_f64_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<double*>(output.data()),
                 static_cast<const double*>(bias.data()),
                 batch_size, features);
             break;
         case DataType::Float16:
-            bias_add_f16_kernel<<<grid_size, block_size>>>(
+            bias_add_f16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__half*>(output.data()),
                 static_cast<const __half*>(bias.data()),
                 batch_size, features);
             break;
         case DataType::BFloat16:
-            bias_add_bf16_kernel<<<grid_size, block_size>>>(
+            bias_add_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__nv_bfloat16*>(output.data()),
                 static_cast<const __nv_bfloat16*>(bias.data()),
                 batch_size, features);
