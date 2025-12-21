@@ -435,6 +435,8 @@ def _matmul_native(
         use_tf32: Whether to use TF32 TensorCore acceleration.
             None means use environment variable PYGPUKIT_ALLOW_TF32.
     """
+    import os
+
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
@@ -442,6 +444,16 @@ def _matmul_native(
     # Get native arrays (zero-copy if already native)
     a_native = a._get_native()
     b_native = b._get_native()
+
+    # DEBUG: CUDA Graph investigation - QKV projection pointer tracking
+    # Kept for future debugging of CUDA Graph capture issues
+    # if os.environ.get("PYGPUKIT_DEBUG_MATMUL") == "1":
+    #     M, K = a.shape
+    #     K2, N = b.shape
+    #     if M == 1 and K == 3584 and N == 4608:  # QKV proj for Qwen2.5-7B
+    #         a_ptr = a_native.data_ptr()
+    #         b_ptr = b_native.data_ptr()
+    #         print(f"    [PY_MATMUL QKV] A_ptr={hex(a_ptr)} B_ptr={hex(b_ptr)}")
 
     if out is not None:
         # In-place operation - write to existing buffer

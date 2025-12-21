@@ -110,14 +110,15 @@ class DecodeM1Graph(DecodeStrategy):
         model = self.model
         attn = block.attn
 
-        # Debug: Print actual pointers being used (layer 0 only)
-        if block is model.blocks[0]:
-            if not hasattr(self, '_exec_call_count'):
-                self._exec_call_count = 0
-            self._exec_call_count += 1
-            # Print first 5 calls only
-            if self._exec_call_count <= 5:
-                print(f"    [EXEC#{self._exec_call_count}] buffers id: {id(buffers)}, norm_out: {hex(buffers.norm_out._get_native().data_ptr())}, qkv_out: {hex(buffers.qkv_proj_out._get_native().data_ptr())}")
+        # DEBUG: CUDA Graph investigation - pointer tracking (layer 0 only)
+        # Kept for future debugging of CUDA Graph capture issues
+        # if block is model.blocks[0]:
+        #     if not hasattr(self, '_exec_call_count'):
+        #         self._exec_call_count = 0
+        #     self._exec_call_count += 1
+        #     # Print first 5 calls only
+        #     if self._exec_call_count <= 5:
+        #         print(f"    [EXEC#{self._exec_call_count}] buffers id: {id(buffers)}, norm_out: {hex(buffers.norm_out._get_native().data_ptr())}, qkv_out: {hex(buffers.qkv_proj_out._get_native().data_ptr())}")
 
         # RMSNorm (attn pre-norm)
         rmsnorm(
@@ -288,9 +289,11 @@ class DecodeM1Graph(DecodeStrategy):
         buffers.token_id_buf._get_native().copy_from_numpy(self._tok_np)
 
         print("  [CUDA Graph] Capturing graphs (SDPA outside graph)...")
-        print(f"    [DEBUG A] buffers.norm_out ptr: {hex(buffers.norm_out._get_native().data_ptr())}")
-        print(f"    [DEBUG A] buffers.qkv_proj_out ptr: {hex(buffers.qkv_proj_out._get_native().data_ptr())}")
-        print(f"    [DEBUG A] buffers id: {id(buffers)}")
+        # DEBUG: CUDA Graph investigation - buffer pointer tracking
+        # Kept for future debugging of CUDA Graph capture issues
+        # print(f"    [DEBUG A] buffers.norm_out ptr: {hex(buffers.norm_out._get_native().data_ptr())}")
+        # print(f"    [DEBUG A] buffers.qkv_proj_out ptr: {hex(buffers.qkv_proj_out._get_native().data_ptr())}")
+        # print(f"    [DEBUG A] buffers id: {id(buffers)}")
 
         # =====================================================================
         # Create dummy KV caches and swap with real ones during warmup/capture
@@ -356,13 +359,14 @@ class DecodeM1Graph(DecodeStrategy):
             self._post_sdpa_graphs = []
 
             for i, block in enumerate(model.blocks):
-                # Debug: Print weight_t pointer DURING capture (layer 0 only)
-                if i == 0:
-                    wt = block.attn.qkv_proj._weight_t
-                    if wt is not None:
-                        print(f"    [CAPTURE L0] qkv_proj._weight_t: {hex(wt._get_native().data_ptr())}")
-                    else:
-                        print(f"    [CAPTURE L0] qkv_proj._weight_t: None")
+                # DEBUG: CUDA Graph investigation - weight_t pointer during capture
+                # Kept for future debugging of CUDA Graph capture issues
+                # if i == 0:
+                #     wt = block.attn.qkv_proj._weight_t
+                #     if wt is not None:
+                #         print(f"    [CAPTURE L0] qkv_proj._weight_t: {hex(wt._get_native().data_ptr())}")
+                #     else:
+                #         print(f"    [CAPTURE L0] qkv_proj._weight_t: None")
 
                 # Pre-SDPA graph
                 pre_graph = CudaGraph()
@@ -460,23 +464,25 @@ class DecodeM1Graph(DecodeStrategy):
         # Full device sync to ensure H2D visible to all graph streams
         device_synchronize()
 
-        # DEBUG: Check pointer contents after H2D
-        import os
-        if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1":
-            import numpy as np
-            pos_check = buffers.position_buf.to_numpy()
-            tok_check = buffers.token_id_buf.to_numpy()
-            print(f"[DEBUG] After H2D: position_buf={pos_check[0]}, token_id_buf={tok_check[0]}")
-            print(f"[DEBUG] Expected: position={position}, token_id={token_id}")
+        # DEBUG: CUDA Graph investigation - H2D and embedding verification
+        # Kept for future debugging of CUDA Graph capture issues
+        # import os
+        # if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1":
+        #     import numpy as np
+        #     pos_check = buffers.position_buf.to_numpy()
+        #     tok_check = buffers.token_id_buf.to_numpy()
+        #     print(f"[DEBUG] After H2D: position_buf={pos_check[0]}, token_id_buf={tok_check[0]}")
+        #     print(f"[DEBUG] Expected: position={position}, token_id={token_id}")
 
         # Embedding graph
         self._embed_graph.replay()
         device_synchronize()
 
-        # DEBUG: Check embedding output
-        if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1":
-            hidden_np = buffers.hidden.to_numpy()
-            print(f"[DEBUG] After embed: hidden[:5]={hidden_np[0, :5]}, sum={np.sum(hidden_np):.4f}")
+        # DEBUG: CUDA Graph investigation - embedding output verification
+        # Kept for future debugging of CUDA Graph capture issues
+        # if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1":
+        #     hidden_np = buffers.hidden.to_numpy()
+        #     print(f"[DEBUG] After embed: hidden[:5]={hidden_np[0, :5]}, sum={np.sum(hidden_np):.4f}")
 
         # Transformer layers with interleaved SDPA
         for i, block in enumerate(model.blocks):
@@ -484,18 +490,19 @@ class DecodeM1Graph(DecodeStrategy):
             self._pre_sdpa_graphs[i].replay()
             device_synchronize()
 
-            # DEBUG: Check pre_sdpa outputs for layer 0
-            if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1" and i == 0:
-                import numpy as np
-                cos_np = self._cos_f32.to_numpy()
-                sin_np = self._sin_f32.to_numpy()
-                q_np = buffers.q.to_numpy()
-                k_np = buffers.k.to_numpy()
-                print(f"[DEBUG] Layer 0 pre_sdpa:")
-                print(f"  cos[:5]={cos_np[0, :5]}")
-                print(f"  sin[:5]={sin_np[0, :5]}")
-                print(f"  q[:5]={q_np[0, 0, :5]}, q_sum={np.sum(q_np):.4f}")
-                print(f"  k[:5]={k_np[0, 0, :5]}, k_sum={np.sum(k_np):.4f}")
+            # DEBUG: CUDA Graph investigation - layer 0 pre_sdpa outputs
+            # Kept for future debugging of CUDA Graph capture issues
+            # if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1" and i == 0:
+            #     import numpy as np
+            #     cos_np = self._cos_f32.to_numpy()
+            #     sin_np = self._sin_f32.to_numpy()
+            #     q_np = buffers.q.to_numpy()
+            #     k_np = buffers.k.to_numpy()
+            #     print(f"[DEBUG] Layer 0 pre_sdpa:")
+            #     print(f"  cos[:5]={cos_np[0, :5]}")
+            #     print(f"  sin[:5]={sin_np[0, :5]}")
+            #     print(f"  q[:5]={q_np[0, 0, :5]}, q_sum={np.sum(q_np):.4f}")
+            #     print(f"  k[:5]={k_np[0, 0, :5]}, k_sum={np.sum(k_np):.4f}")
 
             # KV cache update (NOT graphed)
             kv_cache_update_gqa(buffers.k, block.attn._k_cache, block.attn.num_heads, position)
@@ -511,10 +518,11 @@ class DecodeM1Graph(DecodeStrategy):
             )
             device_synchronize()
 
-            # DEBUG: Check SDPA output for layer 0
-            if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1" and i == 0:
-                attn_np = buffers.attn_out.to_numpy()
-                print(f"  attn_out[:5]={attn_np[0, 0, :5]}, attn_sum={np.sum(attn_np):.4f}")
+            # DEBUG: CUDA Graph investigation - SDPA output for layer 0
+            # Kept for future debugging of CUDA Graph capture issues
+            # if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1" and i == 0:
+            #     attn_np = buffers.attn_out.to_numpy()
+            #     print(f"  attn_out[:5]={attn_np[0, 0, :5]}, attn_sum={np.sum(attn_np):.4f}")
 
             # Post-SDPA (graphed)
             self._post_sdpa_graphs[i].replay()
@@ -524,13 +532,14 @@ class DecodeM1Graph(DecodeStrategy):
         self._final_graph.replay()
         device_synchronize()
 
-        # DEBUG: Check final logits
-        if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1":
-            logits_np = buffers.logits.to_numpy()
-            if logits_np.dtype == np.uint16:
-                logits_np = (logits_np.astype(np.uint32) << 16).view(np.float32)
-            print(f"[DEBUG] Final logits[:5]={logits_np[0, :5]}")
-            print(f"[DEBUG] argmax={np.argmax(logits_np[0])}")
+        # DEBUG: CUDA Graph investigation - final logits verification
+        # Kept for future debugging of CUDA Graph capture issues
+        # if os.environ.get("PYGPUKIT_DEBUG_GRAPH") == "1":
+        #     logits_np = buffers.logits.to_numpy()
+        #     if logits_np.dtype == np.uint16:
+        #         logits_np = (logits_np.astype(np.uint32) << 16).view(np.float32)
+        #     print(f"[DEBUG] Final logits[:5]={logits_np[0, :5]}")
+        #     print(f"[DEBUG] argmax={np.argmax(logits_np[0])}")
 
         assert buffers.logits is not None, "logits buffer not allocated"
         return buffers.logits
