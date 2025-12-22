@@ -286,7 +286,8 @@ def main():
         load_safetensors,
     )
     from pygpukit.llm.buffers import DecodeBuffers
-    from pygpukit.llm.model import precompute_freqs_cis, sample_token
+    from pygpukit.llm.layers import precompute_freqs_cis
+    from pygpukit.llm.sampling import sample_token
     from pygpukit.ops.basic import kv_cache_prefill_gqa
 
     # =========================================================================
