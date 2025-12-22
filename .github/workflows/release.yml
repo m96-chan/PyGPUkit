@@ -75,7 +75,7 @@ jobs:
         run: |
           mkdir -p build-cu12
           cd build-cu12
-          cmake .. \
+          cmake ../native \
             -DCMAKE_BUILD_TYPE=Release \
             -DPYBIND11_FINDPYTHON=ON \
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
@@ -122,7 +122,7 @@ jobs:
         run: |
           mkdir -p build-cu13
           cd build-cu13
-          cmake .. \
+          cmake ../native \
             -DCMAKE_BUILD_TYPE=Release \
             -DPYBIND11_FINDPYTHON=ON \
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" \
@@ -292,7 +292,7 @@ jobs:
 
           mkdir build-cu12
           cd build-cu12
-          cmake .. -G Ninja ^
+          cmake ..\native -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DPYBIND11_FINDPYTHON=ON ^
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" ^
@@ -356,7 +356,7 @@ jobs:
 
           mkdir build-cu13
           cd build-cu13
-          cmake .. -G Ninja ^
+          cmake ..\native -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DPYBIND11_FINDPYTHON=ON ^
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" ^
