@@ -435,7 +435,6 @@ def _matmul_native(
         use_tf32: Whether to use TF32 TensorCore acceleration.
             None means use environment variable PYGPUKIT_ALLOW_TF32.
     """
-    import os
 
     from pygpukit.core.backend import get_native_module
 
