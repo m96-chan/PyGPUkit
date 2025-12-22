@@ -80,7 +80,7 @@ jobs:
             -DPYBIND11_FINDPYTHON=ON \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
-            -DPYGPUKIT_MODULE_SUFFIX="_cu129"
+            -DMODULE_SUFFIX="_cu129"
           cmake --build . --config Release -j$(nproc)
 
           # Find and copy the built module
@@ -128,7 +128,7 @@ jobs:
             -DPYBIND11_FINDPYTHON=ON \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" \
-            -DPYGPUKIT_MODULE_SUFFIX="_cu131"
+            -DMODULE_SUFFIX="_cu131"
           cmake --build . --config Release -j$(nproc)
 
           # Find and copy the built module
@@ -302,7 +302,7 @@ jobs:
             -DPYBIND11_FINDPYTHON=ON ^
             -Dpybind11_DIR="%PYBIND11_DIR%" ^
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" ^
-            -DPYGPUKIT_MODULE_SUFFIX="_cu129"
+            -DMODULE_SUFFIX="_cu129"
           cmake --build . --config Release
 
       - name: Copy native module
@@ -370,7 +370,7 @@ jobs:
             -DPYBIND11_FINDPYTHON=ON ^
             -Dpybind11_DIR="%PYBIND11_DIR%" ^
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" ^
-            -DPYGPUKIT_MODULE_SUFFIX="_cu131"
+            -DMODULE_SUFFIX="_cu131"
           cmake --build . --config Release
 
       - name: Copy native module
