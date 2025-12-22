@@ -78,6 +78,7 @@ jobs:
           cmake ../native \
             -DCMAKE_BUILD_TYPE=Release \
             -DPYBIND11_FINDPYTHON=ON \
+            -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
             -DPYGPUKIT_MODULE_SUFFIX="_cu129"
           cmake --build . --config Release -j$(nproc)
@@ -125,6 +126,7 @@ jobs:
           cmake ../native \
             -DCMAKE_BUILD_TYPE=Release \
             -DPYBIND11_FINDPYTHON=ON \
+            -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" \
             -DPYGPUKIT_MODULE_SUFFIX="_cu131"
           cmake --build . --config Release -j$(nproc)
@@ -290,11 +292,15 @@ jobs:
           set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
           set "PATH=%CUDA_PATH%\bin;%PATH%"
 
+          @REM Get pybind11 cmake dir
+          for /f "delims=" %%i in ('python -c "import pybind11; print(pybind11.get_cmake_dir())"') do set PYBIND11_DIR=%%i
+
           mkdir build-cu12
           cd build-cu12
           cmake ..\native -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DPYBIND11_FINDPYTHON=ON ^
+            -Dpybind11_DIR="%PYBIND11_DIR%" ^
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" ^
             -DPYGPUKIT_MODULE_SUFFIX="_cu129"
           cmake --build . --config Release
@@ -354,11 +360,15 @@ jobs:
           set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1"
           set "PATH=%CUDA_PATH%\bin;%PATH%"
 
+          @REM Get pybind11 cmake dir
+          for /f "delims=" %%i in ('python -c "import pybind11; print(pybind11.get_cmake_dir())"') do set PYBIND11_DIR=%%i
+
           mkdir build-cu13
           cd build-cu13
           cmake ..\native -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DPYBIND11_FINDPYTHON=ON ^
+            -Dpybind11_DIR="%PYBIND11_DIR%" ^
             -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" ^
             -DPYGPUKIT_MODULE_SUFFIX="_cu131"
           cmake --build . --config Release
