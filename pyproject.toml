@@ -113,8 +113,11 @@ select = ["E", "F", "W", "I", "B", "C4", "UP"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"examples/*" = ["E402", "B007", "F841"]
+"examples/*" = ["E402", "B007", "F841", "F821"]
 "src/pygpukit/jit/compiler.py" = ["E402", "F841"]
+"bench*.py" = ["E402", "F841"]
+"test_*.py" = ["E402", "F841"]
+"demo_*.py" = ["E402", "F841"]
 
 [tool.mypy]
 python_version = "3.9"
