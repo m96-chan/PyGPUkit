@@ -50,16 +50,18 @@ Issues = "https://github.com/m96-chan/PyGPUkit/issues"
 [tool.scikit-build]
 cmake.source-dir = "native"
 cmake.build-type = "Release"
-wheel.packages = ["src/pygpukit"]
 wheel.install-dir = "pygpukit"
-# Include Rust extension modules (.pyd on Windows, .so on Linux)
 wheel.py-api = ""
-sdist.include = ["native/*", "rust/*"]
-sdist.exclude = ["native/build/*", "rust/target/*"]
-# Allow building without CUDA for testing
-# Ninja generator for faster builds (platform-neutral - no hardcoded paths)
+# Ninja generator for faster builds
 cmake.args = ["-GNinja"]
 build.targets = []
+sdist.include = ["native/*", "rust/*"]
+sdist.exclude = ["native/build/*", "rust/target/*"]
+
+# Include packages with explicit patterns to include native extensions
+[[tool.scikit-build.wheel.packages]]
+directory = "src/pygpukit"
+include = ["*.py", "**/*.py", "_pygpukit_*.so", "_pygpukit_*.pyd"]
 
 [tool.scikit-build.cmake.define]
 # PyGPUkit requires SM >= 80 (Ampere and newer) for cp.async support
