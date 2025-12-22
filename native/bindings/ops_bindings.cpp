@@ -634,6 +634,51 @@ void init_ops_bindings(py::module_& m) {
           "output_offset: Offset in output buffer");
 
     // ========================================================================
+    // Voice Activity Detection (VAD)
+    // ========================================================================
+
+    m.def("vad_compute_energy", &ops::audio::vad_compute_energy,
+          py::arg("audio"), py::arg("frame_size"), py::arg("hop_size"),
+          "Compute frame-level RMS energy for VAD.\n"
+          "audio: Input audio samples (float32)\n"
+          "frame_size: Frame size in samples\n"
+          "hop_size: Hop size in samples\n"
+          "Returns: GPUArray of frame energies");
+
+    m.def("vad_compute_zcr", &ops::audio::vad_compute_zcr,
+          py::arg("audio"), py::arg("frame_size"), py::arg("hop_size"),
+          "Compute frame-level zero-crossing rate for VAD.\n"
+          "audio: Input audio samples (float32)\n"
+          "frame_size: Frame size in samples\n"
+          "hop_size: Hop size in samples\n"
+          "Returns: GPUArray of frame ZCR values [0, 1]");
+
+    m.def("vad_decide", &ops::audio::vad_decide,
+          py::arg("frame_energy"), py::arg("frame_zcr"),
+          py::arg("energy_threshold"), py::arg("zcr_low"), py::arg("zcr_high"),
+          "Apply threshold-based VAD decision.\n"
+          "frame_energy: Frame energy values (float32)\n"
+          "frame_zcr: Frame ZCR values (float32)\n"
+          "energy_threshold: Energy threshold for speech detection\n"
+          "zcr_low: Lower ZCR bound for voiced speech\n"
+          "zcr_high: Upper ZCR bound\n"
+          "Returns: GPUArray of int32 VAD flags (0=silence, 1=speech)");
+
+    m.def("vad_apply_hangover", &ops::audio::vad_apply_hangover,
+          py::arg("vad_input"), py::arg("hangover_frames"),
+          "Apply hangover smoothing to VAD output.\n"
+          "Extends speech regions by hangover_frames after speech ends.\n"
+          "vad_input: Input VAD flags (int32)\n"
+          "hangover_frames: Number of frames to extend\n"
+          "Returns: Smoothed VAD flags (int32)");
+
+    m.def("vad_compute_noise_floor", &ops::audio::vad_compute_noise_floor,
+          py::arg("frame_energy"),
+          "Compute noise floor (minimum energy) for adaptive thresholding.\n"
+          "frame_energy: Frame energy values (float32)\n"
+          "Returns: Minimum energy value (float)");
+
+    // ========================================================================
     // cuBLASLt debug functions
     // ========================================================================
 

@@ -306,6 +306,160 @@ void overlap_add(const GPUArray& input, GPUArray& output, int output_offset) {
     sync_and_check("overlap_add kernel failed");
 }
 
+// ============================================================================
+// Voice Activity Detection (VAD)
+// ============================================================================
+
+GPUArray vad_compute_energy(const GPUArray& audio, int frame_size, int hop_size) {
+    if (audio.dtype() != DataType::Float32) {
+        throw std::runtime_error("vad_compute_energy: input must be Float32");
+    }
+
+    int audio_len = static_cast<int>(audio.size());
+    int num_frames = (audio_len - frame_size) / hop_size + 1;
+    if (num_frames <= 0) {
+        throw std::runtime_error("vad_compute_energy: audio too short for given frame_size");
+    }
+
+    GPUArray output({static_cast<size_t>(num_frames)}, DataType::Float32);
+
+    const int block_size = 256;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    // One block per frame
+    vad_frame_energy_kernel<<<num_frames, block_size, block_size * sizeof(float), stream>>>(
+        static_cast<const float*>(audio.data()),
+        static_cast<float*>(output.data()),
+        audio_len,
+        frame_size,
+        hop_size,
+        num_frames);
+
+    sync_and_check("vad_frame_energy kernel failed");
+    return output;
+}
+
+GPUArray vad_compute_zcr(const GPUArray& audio, int frame_size, int hop_size) {
+    if (audio.dtype() != DataType::Float32) {
+        throw std::runtime_error("vad_compute_zcr: input must be Float32");
+    }
+
+    int audio_len = static_cast<int>(audio.size());
+    int num_frames = (audio_len - frame_size) / hop_size + 1;
+    if (num_frames <= 0) {
+        throw std::runtime_error("vad_compute_zcr: audio too short for given frame_size");
+    }
+
+    GPUArray output({static_cast<size_t>(num_frames)}, DataType::Float32);
+
+    const int block_size = 256;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    // One block per frame
+    vad_zero_crossing_kernel<<<num_frames, block_size, block_size * sizeof(int), stream>>>(
+        static_cast<const float*>(audio.data()),
+        static_cast<float*>(output.data()),
+        audio_len,
+        frame_size,
+        hop_size,
+        num_frames);
+
+    sync_and_check("vad_zero_crossing kernel failed");
+    return output;
+}
+
+GPUArray vad_decide(
+    const GPUArray& frame_energy,
+    const GPUArray& frame_zcr,
+    float energy_threshold,
+    float zcr_low,
+    float zcr_high)
+{
+    if (frame_energy.dtype() != DataType::Float32) {
+        throw std::runtime_error("vad_decide: frame_energy must be Float32");
+    }
+    if (frame_zcr.dtype() != DataType::Float32) {
+        throw std::runtime_error("vad_decide: frame_zcr must be Float32");
+    }
+    if (frame_energy.size() != frame_zcr.size()) {
+        throw std::runtime_error("vad_decide: frame_energy and frame_zcr must have same size");
+    }
+
+    int num_frames = static_cast<int>(frame_energy.size());
+    GPUArray output({static_cast<size_t>(num_frames)}, DataType::Int32);
+
+    const int block_size = 256;
+    int num_blocks = (num_frames + block_size - 1) / block_size;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    vad_decision_kernel<<<num_blocks, block_size, 0, stream>>>(
+        static_cast<const float*>(frame_energy.data()),
+        static_cast<const float*>(frame_zcr.data()),
+        static_cast<int*>(output.data()),
+        num_frames,
+        energy_threshold,
+        zcr_low,
+        zcr_high);
+
+    sync_and_check("vad_decision kernel failed");
+    return output;
+}
+
+GPUArray vad_apply_hangover(const GPUArray& vad_input, int hangover_frames) {
+    if (vad_input.dtype() != DataType::Int32) {
+        throw std::runtime_error("vad_apply_hangover: input must be Int32");
+    }
+
+    int num_frames = static_cast<int>(vad_input.size());
+    GPUArray output({static_cast<size_t>(num_frames)}, DataType::Int32);
+
+    const int block_size = 256;
+    int num_blocks = (num_frames + block_size - 1) / block_size;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    vad_hangover_kernel<<<num_blocks, block_size, 0, stream>>>(
+        static_cast<const int*>(vad_input.data()),
+        static_cast<int*>(output.data()),
+        num_frames,
+        hangover_frames);
+
+    sync_and_check("vad_hangover kernel failed");
+    return output;
+}
+
+float vad_compute_noise_floor(const GPUArray& frame_energy) {
+    if (frame_energy.dtype() != DataType::Float32) {
+        throw std::runtime_error("vad_compute_noise_floor: input must be Float32");
+    }
+
+    int num_frames = static_cast<int>(frame_energy.size());
+    if (num_frames == 0) return 0.0f;
+
+    const int block_size = 256;
+    int num_blocks = (num_frames + block_size - 1) / block_size;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    GPUArray block_min({static_cast<size_t>(num_blocks)}, DataType::Float32);
+
+    vad_compute_noise_floor_kernel<<<num_blocks, block_size, block_size * sizeof(float), stream>>>(
+        static_cast<const float*>(frame_energy.data()),
+        static_cast<float*>(block_min.data()),
+        num_frames);
+
+    sync_and_check("vad_compute_noise_floor kernel failed");
+
+    // Copy to host and find global minimum
+    std::vector<float> host_min(num_blocks);
+    memcpy_device_to_host(host_min.data(), block_min.data(), num_blocks * sizeof(float));
+
+    float global_min = host_min[0];
+    for (int i = 1; i < num_blocks; ++i) {
+        global_min = std::min(global_min, host_min[i]);
+    }
+
+    return global_min;
+}
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

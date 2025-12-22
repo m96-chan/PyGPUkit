@@ -83,6 +83,60 @@ void apply_hann_window(GPUArray& data);
  */
 void overlap_add(const GPUArray& input, GPUArray& output, int output_offset);
 
+// ============================================================================
+// Voice Activity Detection (VAD)
+// ============================================================================
+
+/**
+ * Compute frame-level energy (RMS) for VAD.
+ * @param audio Input audio samples (float32)
+ * @param frame_size Frame size in samples
+ * @param hop_size Hop size in samples
+ * @return GPUArray of frame energies
+ */
+GPUArray vad_compute_energy(const GPUArray& audio, int frame_size, int hop_size);
+
+/**
+ * Compute frame-level zero-crossing rate for VAD.
+ * @param audio Input audio samples (float32)
+ * @param frame_size Frame size in samples
+ * @param hop_size Hop size in samples
+ * @return GPUArray of frame ZCR values [0, 1]
+ */
+GPUArray vad_compute_zcr(const GPUArray& audio, int frame_size, int hop_size);
+
+/**
+ * Apply threshold-based VAD decision.
+ * @param frame_energy Frame energy values
+ * @param frame_zcr Frame ZCR values
+ * @param energy_threshold Energy threshold for speech detection
+ * @param zcr_low Lower ZCR bound for voiced speech
+ * @param zcr_high Upper ZCR bound (above = unvoiced or noise)
+ * @return GPUArray of int32 VAD flags (0=silence, 1=speech)
+ */
+GPUArray vad_decide(
+    const GPUArray& frame_energy,
+    const GPUArray& frame_zcr,
+    float energy_threshold,
+    float zcr_low,
+    float zcr_high);
+
+/**
+ * Apply hangover smoothing to VAD output.
+ * Extends speech regions by hangover_frames after speech ends.
+ * @param vad_input Input VAD flags
+ * @param hangover_frames Number of frames to extend
+ * @return Smoothed VAD flags
+ */
+GPUArray vad_apply_hangover(const GPUArray& vad_input, int hangover_frames);
+
+/**
+ * Compute noise floor (minimum energy) for adaptive thresholding.
+ * @param frame_energy Frame energy values
+ * @return Minimum energy value (scalar)
+ */
+float vad_compute_noise_floor(const GPUArray& frame_energy);
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

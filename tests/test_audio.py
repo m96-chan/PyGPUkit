@@ -287,5 +287,118 @@ class TestAudioStream:
         assert stream.chunks_available == 0
 
 
+class TestVAD:
+    """Tests for Voice Activity Detection."""
+
+    def test_vad_creation(self, skip_if_no_cuda):
+        """Test VAD creation with default parameters."""
+        vad = audio.VAD(sample_rate=16000)
+        assert vad.sample_rate == 16000
+        assert vad.frame_size == 320  # 20ms @ 16kHz
+        assert vad.hop_size == 160  # 10ms @ 16kHz
+
+    def test_vad_detect_silence(self, skip_if_no_cuda):
+        """Test VAD on silence (should detect no speech)."""
+        vad = audio.VAD(sample_rate=16000, energy_threshold=0.01)
+
+        # Create silent audio (1 second)
+        silence = np.zeros(16000, dtype=np.float32)
+        buf = audio.from_pcm(silence, sample_rate=16000)
+
+        segments = vad.detect(buf)
+        assert len(segments) == 0
+
+    def test_vad_detect_speech(self, skip_if_no_cuda):
+        """Test VAD on synthetic speech-like signal."""
+        vad = audio.VAD(sample_rate=16000, energy_threshold=0.05)
+
+        # Create audio: silence + tone + silence
+        # 0.5s silence + 0.5s tone + 0.5s silence
+        silence1 = np.zeros(8000, dtype=np.float32)
+        tone = np.sin(np.linspace(0, 2 * np.pi * 200, 8000)).astype(np.float32) * 0.5
+        silence2 = np.zeros(8000, dtype=np.float32)
+
+        samples = np.concatenate([silence1, tone, silence2])
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        segments = vad.detect(buf)
+
+        # Should detect one speech segment
+        assert len(segments) >= 1
+
+        # Speech should be roughly in the middle
+        seg = segments[0]
+        assert seg.start_time >= 0.3  # After first silence
+        assert seg.end_time <= 1.2  # Before end
+
+    def test_vad_get_frame_features(self, skip_if_no_cuda):
+        """Test getting raw frame features."""
+        vad = audio.VAD(sample_rate=16000)
+
+        # Create 1 second of audio
+        samples = np.random.randn(16000).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        energy, zcr = vad.get_frame_features(buf)
+
+        # Check output shapes
+        # With 20ms frame and 10ms hop: (16000 - 320) / 160 + 1 = 99 frames
+        expected_frames = (16000 - vad.frame_size) // vad.hop_size + 1
+        assert energy.shape[0] == expected_frames
+        assert zcr.shape[0] == expected_frames
+
+        # Check value ranges
+        energy_np = energy.to_numpy()
+        zcr_np = zcr.to_numpy()
+
+        assert np.all(energy_np >= 0)  # Energy is non-negative
+        assert np.all(zcr_np >= 0)  # ZCR is non-negative
+        assert np.all(zcr_np <= 1)  # ZCR is normalized to [0, 1]
+
+    def test_vad_speech_segment_times(self, skip_if_no_cuda):
+        """Test SpeechSegment time calculations."""
+        seg = audio.SpeechSegment(
+            start_sample=16000,
+            end_sample=32000,
+            start_time=1.0,
+            end_time=2.0,
+        )
+
+        assert seg.start_sample == 16000
+        assert seg.end_sample == 32000
+        assert seg.start_time == 1.0
+        assert seg.end_time == 2.0
+
+    def test_vad_hangover(self, skip_if_no_cuda):
+        """Test VAD hangover smoothing."""
+        # Create VAD with different hangover settings
+        vad_no_hangover = audio.VAD(sample_rate=16000, hangover_ms=0)
+        vad_with_hangover = audio.VAD(sample_rate=16000, hangover_ms=100)
+
+        # Short burst of sound
+        silence1 = np.zeros(4000, dtype=np.float32)
+        tone = np.sin(np.linspace(0, 2 * np.pi * 200, 1600)).astype(np.float32) * 0.5
+        silence2 = np.zeros(4000, dtype=np.float32)
+
+        samples = np.concatenate([silence1, tone, silence2])
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        seg_no = vad_no_hangover.detect(buf)
+        seg_with = vad_with_hangover.detect(buf)
+
+        # Hangover should extend the speech region
+        if len(seg_no) > 0 and len(seg_with) > 0:
+            # With hangover, end time should be later or equal
+            assert seg_with[0].end_time >= seg_no[0].end_time
+
+    def test_vad_repr(self, skip_if_no_cuda):
+        """Test VAD string representation."""
+        vad = audio.VAD(sample_rate=16000, frame_ms=30, hop_ms=15)
+
+        repr_str = repr(vad)
+        assert "16000" in repr_str
+        assert "VAD" in repr_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -240,6 +240,192 @@ __global__ void overlap_add_kernel(
     }
 }
 
+// ============================================================================
+// Voice Activity Detection (VAD)
+// ============================================================================
+
+// Compute frame-level energy (RMS) for VAD
+// Each block processes one frame
+__global__ void vad_frame_energy_kernel(
+    const float* __restrict__ audio,
+    float* __restrict__ frame_energy,
+    int audio_len,
+    int frame_size,
+    int hop_size,
+    int num_frames)
+{
+    extern __shared__ float sdata[];
+
+    int frame_idx = blockIdx.x;
+    if (frame_idx >= num_frames) return;
+
+    int tid = threadIdx.x;
+    int frame_start = frame_idx * hop_size;
+
+    // Each thread accumulates squared samples
+    float sum_sq = 0.0f;
+    for (int i = tid; i < frame_size; i += blockDim.x) {
+        int sample_idx = frame_start + i;
+        if (sample_idx < audio_len) {
+            float val = audio[sample_idx];
+            sum_sq += val * val;
+        }
+    }
+
+    sdata[tid] = sum_sq;
+    __syncthreads();
+
+    // Reduce within block
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // Compute RMS energy
+    if (tid == 0) {
+        float rms = sqrtf(sdata[0] / static_cast<float>(frame_size));
+        frame_energy[frame_idx] = rms;
+    }
+}
+
+// Compute frame-level zero-crossing rate for VAD
+__global__ void vad_zero_crossing_kernel(
+    const float* __restrict__ audio,
+    float* __restrict__ frame_zcr,
+    int audio_len,
+    int frame_size,
+    int hop_size,
+    int num_frames)
+{
+    extern __shared__ int sdata_int[];
+
+    int frame_idx = blockIdx.x;
+    if (frame_idx >= num_frames) return;
+
+    int tid = threadIdx.x;
+    int frame_start = frame_idx * hop_size;
+
+    // Count zero crossings
+    int crossings = 0;
+    for (int i = tid; i < frame_size - 1; i += blockDim.x) {
+        int sample_idx = frame_start + i;
+        if (sample_idx + 1 < audio_len) {
+            float curr = audio[sample_idx];
+            float next = audio[sample_idx + 1];
+            // Count sign change
+            if ((curr >= 0.0f && next < 0.0f) || (curr < 0.0f && next >= 0.0f)) {
+                crossings++;
+            }
+        }
+    }
+
+    sdata_int[tid] = crossings;
+    __syncthreads();
+
+    // Reduce within block
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata_int[tid] += sdata_int[tid + s];
+        }
+        __syncthreads();
+    }
+
+    // Normalize to rate [0, 1]
+    if (tid == 0) {
+        float zcr = static_cast<float>(sdata_int[0]) / static_cast<float>(frame_size - 1);
+        frame_zcr[frame_idx] = zcr;
+    }
+}
+
+// Apply threshold-based VAD decision with hangover smoothing
+__global__ void vad_decision_kernel(
+    const float* __restrict__ frame_energy,
+    const float* __restrict__ frame_zcr,
+    int* __restrict__ vad_output,
+    int num_frames,
+    float energy_threshold,
+    float zcr_low,
+    float zcr_high)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_frames) return;
+
+    float energy = frame_energy[idx];
+    float zcr = frame_zcr[idx];
+
+    // VAD decision based on energy and ZCR
+    // High energy + moderate ZCR = speech
+    // High energy + very high ZCR = unvoiced speech or noise
+    // Low energy = silence
+    int is_speech = 0;
+
+    if (energy > energy_threshold) {
+        // Energy above threshold - check ZCR
+        if (zcr >= zcr_low && zcr <= zcr_high) {
+            is_speech = 1;  // Voiced speech (moderate ZCR)
+        } else if (zcr > zcr_high) {
+            is_speech = 1;  // Unvoiced speech (high ZCR but high energy)
+        }
+    }
+
+    vad_output[idx] = is_speech;
+}
+
+// Apply hangover smoothing to VAD output
+// Extends speech regions by hangover_frames after speech ends
+__global__ void vad_hangover_kernel(
+    const int* __restrict__ vad_input,
+    int* __restrict__ vad_output,
+    int num_frames,
+    int hangover_frames)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_frames) return;
+
+    // Check if this frame or any of the previous hangover_frames had speech
+    int is_speech = 0;
+    for (int i = 0; i <= hangover_frames; ++i) {
+        int check_idx = idx - i;
+        if (check_idx >= 0 && vad_input[check_idx] == 1) {
+            is_speech = 1;
+            break;
+        }
+    }
+
+    vad_output[idx] = is_speech;
+}
+
+// Compute energy-to-silence ratio for adaptive thresholding
+__global__ void vad_compute_noise_floor_kernel(
+    const float* __restrict__ frame_energy,
+    float* __restrict__ block_min,
+    int num_frames)
+{
+    extern __shared__ float sdata[];
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Load frame energy (use large value for out-of-bounds)
+    float val = (idx < num_frames) ? frame_energy[idx] : 1e10f;
+    sdata[tid] = val;
+    __syncthreads();
+
+    // Find minimum in block
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = fminf(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        block_min[blockIdx.x] = sdata[0];
+    }
+}
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit
