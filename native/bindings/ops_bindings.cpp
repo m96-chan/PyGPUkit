@@ -679,6 +679,151 @@ void init_ops_bindings(py::module_& m) {
           "Returns: Minimum energy value (float)");
 
     // ========================================================================
+    // Audio Preprocessing Operations
+    // ========================================================================
+
+    m.def("audio_preemphasis", &ops::audio::preemphasis,
+          py::arg("input"), py::arg("alpha") = 0.97f,
+          "Apply pre-emphasis filter (in-place).\n"
+          "y[n] = x[n] - alpha * x[n-1]\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "alpha: Pre-emphasis coefficient (default 0.97)");
+
+    m.def("audio_deemphasis", &ops::audio::deemphasis,
+          py::arg("input"), py::arg("alpha") = 0.97f,
+          "Apply de-emphasis filter (in-place).\n"
+          "y[n] = x[n] + alpha * y[n-1]\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "alpha: De-emphasis coefficient (default 0.97)");
+
+    m.def("audio_remove_dc", &ops::audio::remove_dc,
+          py::arg("input"),
+          "Remove DC offset from audio signal (in-place).\n"
+          "Subtracts the mean value from all samples.\n"
+          "input: GPUArray of float32 samples (modified in-place)");
+
+    m.def("audio_highpass_filter", &ops::audio::highpass_filter,
+          py::arg("input"), py::arg("cutoff_hz") = 20.0f, py::arg("sample_rate") = 16000,
+          "Apply high-pass filter for DC removal (in-place).\n"
+          "Uses single-pole IIR filter.\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "cutoff_hz: Cutoff frequency in Hz (default 20.0)\n"
+          "sample_rate: Sample rate in Hz (default 16000)");
+
+    m.def("audio_noise_gate", &ops::audio::noise_gate,
+          py::arg("input"), py::arg("threshold") = 0.01f,
+          "Apply simple noise gate (in-place).\n"
+          "Zeros samples with absolute value below threshold.\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "threshold: Amplitude threshold (default 0.01)");
+
+    m.def("audio_spectral_gate", &ops::audio::spectral_gate,
+          py::arg("input"), py::arg("threshold") = 0.01f,
+          py::arg("attack_samples") = 64, py::arg("release_samples") = 256,
+          "Apply spectral gate for noise reduction (in-place).\n"
+          "Attenuates samples in frames with energy below threshold.\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "threshold: Energy threshold (linear scale, default 0.01)\n"
+          "attack_samples: Frame size for energy computation (default 64)\n"
+          "release_samples: Smoothing release (reserved, default 256)");
+
+    m.def("audio_compute_short_term_energy", &ops::audio::compute_short_term_energy,
+          py::arg("input"), py::arg("frame_size"),
+          "Compute short-term energy for adaptive noise gating.\n"
+          "input: GPUArray of float32 audio samples\n"
+          "frame_size: Frame size in samples\n"
+          "Returns: GPUArray of frame energies");
+
+    // ========================================================================
+    // Spectral Processing Operations
+    // ========================================================================
+
+    m.def("audio_stft", &ops::audio::stft,
+          py::arg("input"), py::arg("n_fft") = 400, py::arg("hop_length") = 160,
+          py::arg("win_length") = -1, py::arg("center") = true,
+          "Compute Short-Time Fourier Transform (STFT).\n"
+          "input: GPUArray of float32 audio samples\n"
+          "n_fft: FFT size (must be power of 2, default 400 for Whisper)\n"
+          "hop_length: Hop size (default 160 for Whisper)\n"
+          "win_length: Window length (default n_fft)\n"
+          "center: Whether to pad input (default true)\n"
+          "Returns: Complex STFT output [n_frames, n_fft/2+1, 2] (real, imag)");
+
+    m.def("audio_power_spectrum", &ops::audio::power_spectrum,
+          py::arg("stft_output"),
+          "Compute power spectrogram from STFT output.\n"
+          "power = real^2 + imag^2\n"
+          "stft_output: STFT output [n_frames, n_freq, 2]\n"
+          "Returns: Power spectrogram [n_frames, n_freq]");
+
+    m.def("audio_magnitude_spectrum", &ops::audio::magnitude_spectrum,
+          py::arg("stft_output"),
+          "Compute magnitude spectrogram from STFT output.\n"
+          "magnitude = sqrt(real^2 + imag^2)\n"
+          "stft_output: STFT output [n_frames, n_freq, 2]\n"
+          "Returns: Magnitude spectrogram [n_frames, n_freq]");
+
+    m.def("audio_create_mel_filterbank", &ops::audio::create_mel_filterbank,
+          py::arg("n_mels"), py::arg("n_fft"), py::arg("sample_rate"),
+          py::arg("f_min") = 0.0f, py::arg("f_max") = -1.0f,
+          "Create Mel filterbank matrix.\n"
+          "n_mels: Number of mel bands (default 80 for Whisper)\n"
+          "n_fft: FFT size\n"
+          "sample_rate: Sample rate in Hz\n"
+          "f_min: Minimum frequency (default 0)\n"
+          "f_max: Maximum frequency (default sample_rate/2)\n"
+          "Returns: Mel filterbank matrix [n_mels, n_fft/2+1]");
+
+    m.def("audio_apply_mel_filterbank", &ops::audio::apply_mel_filterbank,
+          py::arg("spectrogram"), py::arg("mel_filterbank"),
+          "Apply Mel filterbank to power/magnitude spectrogram.\n"
+          "spectrogram: Input spectrogram [n_frames, n_fft/2+1]\n"
+          "mel_filterbank: Mel filterbank [n_mels, n_fft/2+1]\n"
+          "Returns: Mel spectrogram [n_frames, n_mels]");
+
+    m.def("audio_log_mel_spectrogram", &ops::audio::log_mel_spectrogram,
+          py::arg("mel_spectrogram"), py::arg("eps") = 1e-10f,
+          "Compute log-mel spectrogram.\n"
+          "log_mel = log(mel + eps)\n"
+          "mel_spectrogram: Mel spectrogram [n_frames, n_mels]\n"
+          "eps: Small constant for numerical stability (default 1e-10)\n"
+          "Returns: Log-mel spectrogram [n_frames, n_mels]");
+
+    m.def("audio_to_decibels", &ops::audio::to_decibels,
+          py::arg("input"), py::arg("eps") = 1e-10f,
+          "Convert to decibels.\n"
+          "dB = 10 * log10(x + eps)\n"
+          "input: Input array\n"
+          "eps: Small constant for numerical stability (default 1e-10)\n"
+          "Returns: dB values");
+
+    m.def("audio_mfcc", &ops::audio::mfcc,
+          py::arg("log_mel"), py::arg("n_mfcc") = 13,
+          "Compute MFCC from log-mel spectrogram using DCT-II.\n"
+          "log_mel: Log-mel spectrogram [n_frames, n_mels]\n"
+          "n_mfcc: Number of MFCC coefficients (default 13)\n"
+          "Returns: MFCC [n_frames, n_mfcc]");
+
+    m.def("audio_delta_features", &ops::audio::delta_features,
+          py::arg("features"), py::arg("order") = 1, py::arg("width") = 2,
+          "Compute delta (differential) features.\n"
+          "features: Input features [n_frames, n_features]\n"
+          "order: Delta order (1 for delta, 2 for delta-delta)\n"
+          "width: Window width for computation (default 2)\n"
+          "Returns: Delta features [n_frames, n_features]");
+
+    m.def("audio_whisper_mel_spectrogram", &ops::audio::whisper_mel_spectrogram,
+          py::arg("input"), py::arg("n_fft") = 400, py::arg("hop_length") = 160,
+          py::arg("n_mels") = 80,
+          "Compute Whisper-compatible log-mel spectrogram in one call.\n"
+          "Combines: STFT -> power -> mel filterbank -> log\n"
+          "input: Input audio (float32, 16kHz expected)\n"
+          "n_fft: FFT size (default 400)\n"
+          "hop_length: Hop size (default 160)\n"
+          "n_mels: Number of mel bands (default 80)\n"
+          "Returns: Log-mel spectrogram [n_frames, n_mels]");
+
+    // ========================================================================
     // cuBLASLt debug functions
     // ========================================================================
 

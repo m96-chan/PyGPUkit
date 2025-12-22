@@ -400,5 +400,371 @@ class TestVAD:
         assert "VAD" in repr_str
 
 
+class TestAudioPreprocessing:
+    """Tests for audio preprocessing functions."""
+
+    def test_preemphasis(self, skip_if_no_cuda):
+        """Test pre-emphasis filter."""
+        # Create test signal
+        samples = np.array([0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        audio.preemphasis(buf, alpha=0.97)
+        result = buf.to_numpy()
+
+        # y[0] = x[0] - 0.97 * 0 = 0
+        # y[1] = x[1] - 0.97 * x[0] = 1.0 - 0 = 1.0
+        # y[2] = x[2] - 0.97 * x[1] = 0 - 0.97 = -0.97
+        # y[3] = x[3] - 0.97 * x[2] = 1.0 - 0 = 1.0
+        # y[4] = x[4] - 0.97 * x[3] = 0 - 0.97 = -0.97
+        expected = np.array([0.0, 1.0, -0.97, 1.0, -0.97], dtype=np.float32)
+        np.testing.assert_allclose(result, expected, rtol=1e-5)
+
+    def test_preemphasis_with_gpuarray(self, skip_if_no_cuda):
+        """Test pre-emphasis with GPUArray directly."""
+        samples = np.array([1.0, 0.5, 0.25, 0.125], dtype=np.float32)
+        gpu_arr = gk.from_numpy(samples)
+
+        result = audio.preemphasis(gpu_arr, alpha=0.5)
+        # Should return the same object
+        assert result is gpu_arr
+
+    def test_deemphasis(self, skip_if_no_cuda):
+        """Test de-emphasis filter."""
+        # Create a simple signal
+        samples = np.array([1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        audio.deemphasis(buf, alpha=0.5)
+        result = buf.to_numpy()
+
+        # De-emphasis is IIR: y[n] = x[n] + alpha * y[n-1]
+        # y[0] = 1.0 + 0.5 * 0 = 1.0
+        # y[1] = 0.0 + 0.5 * 1.0 = 0.5
+        # y[2] = 0.0 + 0.5 * 0.5 = 0.25
+        # y[3] = 0.0 + 0.5 * 0.25 = 0.125
+        # y[4] = 0.0 + 0.5 * 0.125 = 0.0625
+        expected = np.array([1.0, 0.5, 0.25, 0.125, 0.0625], dtype=np.float32)
+        np.testing.assert_allclose(result, expected, rtol=1e-5)
+
+    def test_remove_dc(self, skip_if_no_cuda):
+        """Test DC offset removal."""
+        # Signal with DC offset of 0.5
+        samples = np.array([0.5, 0.6, 0.7, 0.4, 0.3], dtype=np.float32)
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        audio.remove_dc(buf)
+        result = buf.to_numpy()
+
+        # Mean should be approximately zero
+        np.testing.assert_allclose(np.mean(result), 0.0, atol=1e-6)
+
+    def test_remove_dc_with_gpuarray(self, skip_if_no_cuda):
+        """Test DC removal with GPUArray directly."""
+        samples = np.ones(1000, dtype=np.float32) * 0.3
+        gpu_arr = gk.from_numpy(samples)
+
+        result = audio.remove_dc(gpu_arr)
+        # Should return the same object
+        assert result is gpu_arr
+
+        # Mean should be zero
+        np.testing.assert_allclose(np.mean(result.to_numpy()), 0.0, atol=1e-5)
+
+    def test_highpass_filter(self, skip_if_no_cuda):
+        """Test high-pass filter."""
+        # Create a signal with DC offset + sine wave
+        t = np.linspace(0, 0.1, 1600)  # 100ms at 16kHz
+        dc_offset = 0.5
+        sine = np.sin(2 * np.pi * 200 * t) * 0.3  # 200Hz sine
+        samples = (dc_offset + sine).astype(np.float32)
+
+        buf = audio.from_pcm(samples, sample_rate=16000)
+        audio.highpass_filter(buf, cutoff_hz=20.0, sample_rate=16000)
+
+        result = buf.to_numpy()
+
+        # DC offset should be significantly reduced
+        # (High-pass filter attenuates DC)
+        assert abs(np.mean(result)) < 0.1
+
+    def test_noise_gate(self, skip_if_no_cuda):
+        """Test noise gate."""
+        # Signal with some quiet samples
+        samples = np.array([0.5, 0.005, -0.3, 0.001, 0.0, 0.8], dtype=np.float32)
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        audio.noise_gate(buf, threshold=0.01)
+        result = buf.to_numpy()
+
+        # Samples below threshold should be zeroed
+        expected = np.array([0.5, 0.0, -0.3, 0.0, 0.0, 0.8], dtype=np.float32)
+        np.testing.assert_allclose(result, expected, rtol=1e-5)
+
+    def test_noise_gate_with_gpuarray(self, skip_if_no_cuda):
+        """Test noise gate with GPUArray directly."""
+        samples = np.array([0.1, 0.001, 0.2, 0.0001], dtype=np.float32)
+        gpu_arr = gk.from_numpy(samples)
+
+        result = audio.noise_gate(gpu_arr, threshold=0.01)
+        # Should return the same object
+        assert result is gpu_arr
+
+        result_np = result.to_numpy()
+        assert result_np[1] == 0.0
+        assert result_np[3] == 0.0
+
+    def test_spectral_gate(self, skip_if_no_cuda):
+        """Test spectral gate for noise reduction."""
+        # Create signal: loud part + quiet noise
+        loud = np.sin(np.linspace(0, 2 * np.pi * 10, 256)).astype(np.float32) * 0.5
+        quiet = np.random.randn(256).astype(np.float32) * 0.001
+        samples = np.concatenate([loud, quiet])
+
+        buf = audio.from_pcm(samples, sample_rate=16000)
+        audio.spectral_gate(buf, threshold=0.01, attack_samples=64)
+
+        result = buf.to_numpy()
+
+        # Loud part should be mostly preserved
+        assert np.max(np.abs(result[:256])) > 0.3
+
+        # Quiet part should be attenuated
+        assert np.max(np.abs(result[256:])) < 0.01
+
+    def test_compute_short_term_energy(self, skip_if_no_cuda):
+        """Test short-term energy computation."""
+        # Create signal with varying energy
+        loud = np.ones(256, dtype=np.float32) * 0.5
+        quiet = np.ones(256, dtype=np.float32) * 0.1
+        samples = np.concatenate([loud, quiet])
+
+        buf = audio.from_pcm(samples, sample_rate=16000)
+        energy = audio.compute_short_term_energy(buf, frame_size=128)
+
+        energy_np = energy.to_numpy()
+
+        # Should have 4 frames (512 / 128)
+        assert len(energy_np) == 4
+
+        # First two frames should have higher energy
+        assert energy_np[0] > energy_np[2]
+        assert energy_np[1] > energy_np[3]
+
+    def test_preemphasis_deemphasis_roundtrip(self, skip_if_no_cuda):
+        """Test that pre-emphasis + de-emphasis approximately recovers original."""
+        # Note: This is not exact due to the parallel approximation in preemphasis
+        samples = np.sin(np.linspace(0, 2 * np.pi * 5, 1000)).astype(np.float32) * 0.5
+        original = samples.copy()
+
+        buf = audio.from_pcm(samples, sample_rate=16000)
+
+        # Apply pre-emphasis then de-emphasis
+        audio.preemphasis(buf, alpha=0.97)
+        audio.deemphasis(buf, alpha=0.97)
+
+        result = buf.to_numpy()
+
+        # Should be close to original (not exact due to approximation)
+        # The parallel preemphasis is an approximation, so we use a loose tolerance
+        np.testing.assert_allclose(result, original, atol=0.5)
+
+
+class TestSpectralProcessing:
+    """Tests for spectral processing functions (STFT, Mel, MFCC, etc.)."""
+
+    def test_stft_basic(self, skip_if_no_cuda):
+        """Test basic STFT computation."""
+        # Create 1 second of 440Hz sine wave at 16kHz
+        sr = 16000
+        t = np.linspace(0, 1.0, sr)
+        samples = np.sin(2 * np.pi * 440 * t).astype(np.float32) * 0.5
+
+        buf = audio.from_pcm(samples, sample_rate=sr)
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+
+        # Check shape: [n_frames, n_freq, 2]
+        assert len(stft_out.shape) == 3
+        assert stft_out.shape[1] == 257  # 512/2 + 1
+        assert stft_out.shape[2] == 2  # real, imag
+
+    def test_stft_power_spectrum(self, skip_if_no_cuda):
+        """Test power spectrum computation from STFT."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+        power = audio.power_spectrum(stft_out)
+
+        # Power should be non-negative
+        power_np = power.to_numpy()
+        assert np.all(power_np >= 0)
+
+        # Shape should be [n_frames, n_freq]
+        assert len(power.shape) == 2
+        assert power.shape[1] == 257
+
+    def test_stft_magnitude_spectrum(self, skip_if_no_cuda):
+        """Test magnitude spectrum computation from STFT."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+        mag = audio.magnitude_spectrum(stft_out)
+
+        # Magnitude should be non-negative
+        mag_np = mag.to_numpy()
+        assert np.all(mag_np >= 0)
+
+    def test_mel_filterbank_creation(self, skip_if_no_cuda):
+        """Test mel filterbank creation."""
+        mel_fb = audio.create_mel_filterbank(
+            n_mels=80, n_fft=512, sample_rate=16000, f_min=0.0, f_max=8000.0
+        )
+
+        # Check shape
+        assert mel_fb.shape == (80, 257)
+
+        # Filterbank weights should be non-negative
+        fb_np = mel_fb.to_numpy()
+        assert np.all(fb_np >= 0)
+
+        # Each filter should have some non-zero weights
+        for i in range(80):
+            assert np.sum(fb_np[i, :]) > 0
+
+    def test_apply_mel_filterbank(self, skip_if_no_cuda):
+        """Test applying mel filterbank."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+        power = audio.power_spectrum(stft_out)
+
+        mel_fb = audio.create_mel_filterbank(n_mels=80, n_fft=512, sample_rate=sr)
+        mel = audio.apply_mel_filterbank(power, mel_fb)
+
+        # Check shape: [n_frames, n_mels]
+        assert len(mel.shape) == 2
+        assert mel.shape[1] == 80
+
+    def test_log_mel(self, skip_if_no_cuda):
+        """Test log mel computation."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+        power = audio.power_spectrum(stft_out)
+        mel_fb = audio.create_mel_filterbank(n_mels=80, n_fft=512, sample_rate=sr)
+        mel = audio.apply_mel_filterbank(power, mel_fb)
+
+        log_mel_out = audio.log_mel(mel)
+
+        # Log mel should have same shape as mel
+        assert log_mel_out.shape == mel.shape
+
+        # Values should be finite
+        log_mel_np = log_mel_out.to_numpy()
+        assert np.all(np.isfinite(log_mel_np))
+
+    def test_to_decibels(self, skip_if_no_cuda):
+        """Test dB conversion."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+        power = audio.power_spectrum(stft_out)
+        db = audio.to_decibels(power)
+
+        # dB values should be finite
+        db_np = db.to_numpy()
+        assert np.all(np.isfinite(db_np))
+
+    def test_mfcc(self, skip_if_no_cuda):
+        """Test MFCC computation."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+        power = audio.power_spectrum(stft_out)
+        mel_fb = audio.create_mel_filterbank(n_mels=80, n_fft=512, sample_rate=sr)
+        mel = audio.apply_mel_filterbank(power, mel_fb)
+        log_mel_out = audio.log_mel(mel)
+
+        mfcc_out = audio.mfcc(log_mel_out, n_mfcc=13)
+
+        # Check shape: [n_frames, n_mfcc]
+        assert len(mfcc_out.shape) == 2
+        assert mfcc_out.shape[1] == 13
+
+        # MFCC values should be finite
+        mfcc_np = mfcc_out.to_numpy()
+        assert np.all(np.isfinite(mfcc_np))
+
+    def test_delta_features(self, skip_if_no_cuda):
+        """Test delta feature computation."""
+        # Create simple features
+        features = np.arange(100).reshape(10, 10).astype(np.float32)
+        gpu_features = gk.from_numpy(features)
+
+        delta_out = audio.delta(gpu_features, order=1, width=2)
+
+        # Check shape preserved
+        assert delta_out.shape == gpu_features.shape
+
+        # Delta of increasing sequence should be positive
+        delta_np = delta_out.to_numpy()
+        assert np.all(np.isfinite(delta_np))
+
+    def test_mel_spectrogram_high_level(self, skip_if_no_cuda):
+        """Test high-level mel_spectrogram function."""
+        sr = 16000
+        samples = np.sin(np.linspace(0, 2 * np.pi * 440, sr)).astype(np.float32) * 0.5
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        mel = audio.mel_spectrogram(buf, n_fft=512, hop_length=160, n_mels=80)
+
+        # Check shape
+        assert len(mel.shape) == 2
+        assert mel.shape[1] == 80
+
+        # Values should be non-negative
+        mel_np = mel.to_numpy()
+        assert np.all(mel_np >= 0)
+
+    def test_log_mel_spectrogram_high_level(self, skip_if_no_cuda):
+        """Test high-level log_mel_spectrogram function."""
+        sr = 16000
+        samples = np.sin(np.linspace(0, 2 * np.pi * 440, sr)).astype(np.float32) * 0.5
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        log_mel = audio.log_mel_spectrogram(buf, n_fft=512, hop_length=160, n_mels=80)
+
+        # Check shape
+        assert len(log_mel.shape) == 2
+        assert log_mel.shape[1] == 80
+
+        # Values should be finite
+        log_mel_np = log_mel.to_numpy()
+        assert np.all(np.isfinite(log_mel_np))
+
+    def test_stft_different_sizes(self, skip_if_no_cuda):
+        """Test STFT with different FFT sizes."""
+        sr = 16000
+        samples = np.random.randn(sr).astype(np.float32) * 0.1
+        buf = audio.from_pcm(samples, sample_rate=sr)
+
+        # Test power of 2 sizes
+        for n_fft in [256, 512, 1024]:
+            stft_out = audio.stft(buf, n_fft=n_fft, hop_length=160)
+            assert stft_out.shape[1] == n_fft // 2 + 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

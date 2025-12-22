@@ -621,11 +621,550 @@ class VAD:
         )
 
 
+# =============================================================================
+# Audio Preprocessing Functions
+# =============================================================================
+
+
+def preemphasis(audio: AudioBuffer | GPUArray, alpha: float = 0.97) -> AudioBuffer | GPUArray:
+    """Apply pre-emphasis filter to emphasize high-frequency components.
+
+    Pre-emphasis is commonly used in speech processing to boost high frequencies
+    that are typically attenuated during recording.
+
+    Formula: y[n] = x[n] - alpha * x[n-1]
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        alpha: Pre-emphasis coefficient (default 0.97)
+
+    Returns:
+        Same type as input (modified in-place)
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> preemphasis(buf, alpha=0.97)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        native.audio_preemphasis(audio.data._get_native(), alpha)
+        return audio
+    else:
+        native.audio_preemphasis(audio._get_native(), alpha)
+        return audio
+
+
+def deemphasis(audio: AudioBuffer | GPUArray, alpha: float = 0.97) -> AudioBuffer | GPUArray:
+    """Apply de-emphasis filter (inverse of pre-emphasis).
+
+    Used to restore the original spectral balance after pre-emphasis.
+
+    Formula: y[n] = x[n] + alpha * y[n-1]
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        alpha: De-emphasis coefficient (default 0.97)
+
+    Returns:
+        Same type as input (modified in-place)
+
+    Example:
+        >>> buf = preemphasis(buf)
+        >>> # ... processing ...
+        >>> deemphasis(buf)  # Restore original balance
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        native.audio_deemphasis(audio.data._get_native(), alpha)
+        return audio
+    else:
+        native.audio_deemphasis(audio._get_native(), alpha)
+        return audio
+
+
+def remove_dc(audio: AudioBuffer | GPUArray) -> AudioBuffer | GPUArray:
+    """Remove DC offset from audio signal.
+
+    Subtracts the mean value from all samples, centering the signal at zero.
+    This is a simple but effective way to remove DC bias.
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+
+    Returns:
+        Same type as input (modified in-place)
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> remove_dc(buf)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        native.audio_remove_dc(audio.data._get_native())
+        return audio
+    else:
+        native.audio_remove_dc(audio._get_native())
+        return audio
+
+
+def highpass_filter(
+    audio: AudioBuffer | GPUArray,
+    cutoff_hz: float = 20.0,
+    sample_rate: int | None = None,
+) -> AudioBuffer | GPUArray:
+    """Apply high-pass filter for DC removal.
+
+    Uses a single-pole IIR high-pass filter, which is more effective than
+    simple mean subtraction for removing low-frequency noise.
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        cutoff_hz: Cutoff frequency in Hz (default 20.0)
+        sample_rate: Sample rate in Hz (auto-detected from AudioBuffer)
+
+    Returns:
+        Same type as input (modified in-place)
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> highpass_filter(buf, cutoff_hz=50.0)  # Remove hum
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        sr = sample_rate if sample_rate is not None else audio.sample_rate
+        native.audio_highpass_filter(audio.data._get_native(), cutoff_hz, sr)
+        return audio
+    else:
+        sr = sample_rate if sample_rate is not None else 16000
+        native.audio_highpass_filter(audio._get_native(), cutoff_hz, sr)
+        return audio
+
+
+def noise_gate(audio: AudioBuffer | GPUArray, threshold: float = 0.01) -> AudioBuffer | GPUArray:
+    """Apply simple noise gate.
+
+    Zeros samples with absolute value below threshold. This is a hard gate
+    that completely silences quiet sections.
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        threshold: Amplitude threshold (default 0.01)
+
+    Returns:
+        Same type as input (modified in-place)
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> noise_gate(buf, threshold=0.02)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        native.audio_noise_gate(audio.data._get_native(), threshold)
+        return audio
+    else:
+        native.audio_noise_gate(audio._get_native(), threshold)
+        return audio
+
+
+def spectral_gate(
+    audio: AudioBuffer | GPUArray,
+    threshold: float = 0.01,
+    attack_samples: int = 64,
+    release_samples: int = 256,
+) -> AudioBuffer | GPUArray:
+    """Apply spectral gate for noise reduction.
+
+    A softer noise gate that attenuates (rather than silences) quiet sections
+    based on short-term frame energy. Provides smoother transitions than
+    a hard noise gate.
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        threshold: Energy threshold (linear scale, default 0.01)
+        attack_samples: Frame size for energy computation (default 64)
+        release_samples: Smoothing release in samples (default 256)
+
+    Returns:
+        Same type as input (modified in-place)
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> spectral_gate(buf, threshold=0.005)  # Subtle noise reduction
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        native.audio_spectral_gate(
+            audio.data._get_native(), threshold, attack_samples, release_samples
+        )
+        return audio
+    else:
+        native.audio_spectral_gate(audio._get_native(), threshold, attack_samples, release_samples)
+        return audio
+
+
+def compute_short_term_energy(audio: AudioBuffer | GPUArray, frame_size: int = 256) -> GPUArray:
+    """Compute short-term energy for analysis or adaptive processing.
+
+    Divides the audio into non-overlapping frames and computes the mean
+    energy (sum of squares / frame_size) for each frame.
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        frame_size: Frame size in samples (default 256)
+
+    Returns:
+        GPUArray of frame energies
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> energy = compute_short_term_energy(buf, frame_size=320)  # 20ms @ 16kHz
+        >>> print(f"Max energy: {energy.to_numpy().max():.4f}")
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_compute_short_term_energy(data._get_native(), frame_size)
+    return GPUArray._wrap_native(result)
+
+
+# =============================================================================
+# Spectral Processing Functions
+# =============================================================================
+
+
+def stft(
+    audio: AudioBuffer | GPUArray,
+    n_fft: int = 512,
+    hop_length: int = 160,
+    win_length: int = -1,
+    center: bool = True,
+) -> GPUArray:
+    """Compute Short-Time Fourier Transform (STFT).
+
+    Uses a custom Radix-2 FFT implementation (no cuFFT dependency).
+
+    Args:
+        audio: AudioBuffer or GPUArray of float32 samples
+        n_fft: FFT size (must be power of 2, default 512)
+        hop_length: Hop size (default 160)
+        win_length: Window length (default n_fft)
+        center: Whether to pad input with reflection (default True)
+
+    Returns:
+        Complex STFT output [n_frames, n_fft/2+1, 2] (real, imag)
+
+    Example:
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> stft_out = stft(buf, n_fft=512, hop_length=160)
+        >>> print(f"STFT shape: {stft_out.shape}")  # [n_frames, 257, 2]
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_stft(data._get_native(), n_fft, hop_length, win_length, center)
+    return GPUArray._wrap_native(result)
+
+
+def power_spectrum(stft_output: GPUArray) -> GPUArray:
+    """Compute power spectrogram from STFT output.
+
+    power = real^2 + imag^2
+
+    Args:
+        stft_output: STFT output [n_frames, n_freq, 2]
+
+    Returns:
+        Power spectrogram [n_frames, n_freq]
+
+    Example:
+        >>> stft_out = stft(buf, n_fft=512)
+        >>> power = power_spectrum(stft_out)
+    """
+    native = _get_native()
+    result = native.audio_power_spectrum(stft_output._get_native())
+    return GPUArray._wrap_native(result)
+
+
+def magnitude_spectrum(stft_output: GPUArray) -> GPUArray:
+    """Compute magnitude spectrogram from STFT output.
+
+    magnitude = sqrt(real^2 + imag^2)
+
+    Args:
+        stft_output: STFT output [n_frames, n_freq, 2]
+
+    Returns:
+        Magnitude spectrogram [n_frames, n_freq]
+
+    Example:
+        >>> stft_out = stft(buf, n_fft=512)
+        >>> mag = magnitude_spectrum(stft_out)
+    """
+    native = _get_native()
+    result = native.audio_magnitude_spectrum(stft_output._get_native())
+    return GPUArray._wrap_native(result)
+
+
+def create_mel_filterbank(
+    n_mels: int = 80,
+    n_fft: int = 512,
+    sample_rate: int = 16000,
+    f_min: float = 0.0,
+    f_max: float = -1.0,
+) -> GPUArray:
+    """Create Mel filterbank matrix.
+
+    Args:
+        n_mels: Number of mel bands (default 80 for Whisper)
+        n_fft: FFT size
+        sample_rate: Sample rate in Hz
+        f_min: Minimum frequency (default 0)
+        f_max: Maximum frequency (default sample_rate/2)
+
+    Returns:
+        Mel filterbank matrix [n_mels, n_fft/2+1]
+
+    Example:
+        >>> mel_fb = create_mel_filterbank(n_mels=80, n_fft=512, sample_rate=16000)
+    """
+    native = _get_native()
+    result = native.audio_create_mel_filterbank(n_mels, n_fft, sample_rate, f_min, f_max)
+    return GPUArray._wrap_native(result)
+
+
+def apply_mel_filterbank(spectrogram: GPUArray, mel_filterbank: GPUArray) -> GPUArray:
+    """Apply Mel filterbank to power/magnitude spectrogram.
+
+    Args:
+        spectrogram: Input spectrogram [n_frames, n_fft/2+1]
+        mel_filterbank: Mel filterbank [n_mels, n_fft/2+1]
+
+    Returns:
+        Mel spectrogram [n_frames, n_mels]
+
+    Example:
+        >>> power = power_spectrum(stft_out)
+        >>> mel_fb = create_mel_filterbank(n_mels=80, n_fft=512)
+        >>> mel = apply_mel_filterbank(power, mel_fb)
+    """
+    native = _get_native()
+    result = native.audio_apply_mel_filterbank(
+        spectrogram._get_native(), mel_filterbank._get_native()
+    )
+    return GPUArray._wrap_native(result)
+
+
+def log_mel(mel_spectrogram: GPUArray, eps: float = 1e-10) -> GPUArray:
+    """Compute log-mel spectrogram.
+
+    log_mel = log(mel + eps)
+
+    Args:
+        mel_spectrogram: Mel spectrogram [n_frames, n_mels]
+        eps: Small constant for numerical stability (default 1e-10)
+
+    Returns:
+        Log-mel spectrogram [n_frames, n_mels]
+
+    Example:
+        >>> log_mel_spec = log_mel(mel_spectrogram)
+    """
+    native = _get_native()
+    result = native.audio_log_mel_spectrogram(mel_spectrogram._get_native(), eps)
+    return GPUArray._wrap_native(result)
+
+
+def to_decibels(audio: AudioBuffer | GPUArray, eps: float = 1e-10) -> GPUArray:
+    """Convert to decibels.
+
+    dB = 10 * log10(x + eps)
+
+    Args:
+        audio: Input array (power values)
+        eps: Small constant for numerical stability (default 1e-10)
+
+    Returns:
+        dB values
+
+    Example:
+        >>> power = power_spectrum(stft_out)
+        >>> db = to_decibels(power)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_to_decibels(data._get_native(), eps)
+    return GPUArray._wrap_native(result)
+
+
+def mfcc(log_mel_input: GPUArray, n_mfcc: int = 13) -> GPUArray:
+    """Compute MFCC from log-mel spectrogram using DCT-II.
+
+    Args:
+        log_mel_input: Log-mel spectrogram [n_frames, n_mels]
+        n_mfcc: Number of MFCC coefficients (default 13)
+
+    Returns:
+        MFCC [n_frames, n_mfcc]
+
+    Example:
+        >>> log_mel_spec = log_mel(mel_spectrogram)
+        >>> mfcc_features = mfcc(log_mel_spec, n_mfcc=13)
+    """
+    native = _get_native()
+    result = native.audio_mfcc(log_mel_input._get_native(), n_mfcc)
+    return GPUArray._wrap_native(result)
+
+
+def delta(features: GPUArray, order: int = 1, width: int = 2) -> GPUArray:
+    """Compute delta (differential) features.
+
+    Args:
+        features: Input features [n_frames, n_features]
+        order: Delta order (1 for delta, 2 for delta-delta)
+        width: Window width for computation (default 2)
+
+    Returns:
+        Delta features [n_frames, n_features]
+
+    Example:
+        >>> mfcc_features = mfcc(log_mel_spec)
+        >>> delta_mfcc = delta(mfcc_features, order=1)
+        >>> delta_delta_mfcc = delta(mfcc_features, order=2)
+    """
+    native = _get_native()
+    result = native.audio_delta_features(features._get_native(), order, width)
+    return GPUArray._wrap_native(result)
+
+
+def mel_spectrogram(
+    audio: AudioBuffer | GPUArray,
+    n_fft: int = 512,
+    hop_length: int = 160,
+    n_mels: int = 80,
+    sample_rate: int = 16000,
+    f_min: float = 0.0,
+    f_max: float = -1.0,
+) -> GPUArray:
+    """Compute mel spectrogram.
+
+    Combines: STFT -> power -> mel filterbank
+
+    Args:
+        audio: Input audio (float32)
+        n_fft: FFT size (must be power of 2)
+        hop_length: Hop size
+        n_mels: Number of mel bands
+        sample_rate: Sample rate in Hz
+        f_min: Minimum frequency
+        f_max: Maximum frequency (-1 for sample_rate/2)
+
+    Returns:
+        Mel spectrogram [n_frames, n_mels]
+
+    Example:
+        >>> mel = mel_spectrogram(buf, n_fft=512, hop_length=160, n_mels=80)
+    """
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    # STFT
+    stft_out = stft(data, n_fft=n_fft, hop_length=hop_length, center=True)
+
+    # Power spectrum
+    power = power_spectrum(stft_out)
+
+    # Create and apply mel filterbank
+    mel_fb = create_mel_filterbank(n_mels, n_fft, sample_rate, f_min, f_max)
+    mel = apply_mel_filterbank(power, mel_fb)
+
+    return mel
+
+
+def log_mel_spectrogram(
+    audio: AudioBuffer | GPUArray,
+    n_fft: int = 512,
+    hop_length: int = 160,
+    n_mels: int = 80,
+    sample_rate: int = 16000,
+    f_min: float = 0.0,
+    f_max: float = -1.0,
+    eps: float = 1e-10,
+) -> GPUArray:
+    """Compute log-mel spectrogram (Whisper-compatible).
+
+    Combines: STFT -> power -> mel filterbank -> log
+
+    Args:
+        audio: Input audio (float32, 16kHz expected for Whisper)
+        n_fft: FFT size (must be power of 2)
+        hop_length: Hop size
+        n_mels: Number of mel bands (80 for Whisper)
+        sample_rate: Sample rate in Hz
+        f_min: Minimum frequency
+        f_max: Maximum frequency (-1 for sample_rate/2)
+        eps: Small constant for log stability
+
+    Returns:
+        Log-mel spectrogram [n_frames, n_mels]
+
+    Example:
+        >>> # Whisper-style mel spectrogram
+        >>> buf = from_pcm(pcm_data, sample_rate=16000)
+        >>> log_mel = log_mel_spectrogram(buf, n_fft=512, hop_length=160, n_mels=80)
+    """
+    mel = mel_spectrogram(audio, n_fft, hop_length, n_mels, sample_rate, f_min, f_max)
+    return log_mel(mel, eps)
+
+
 __all__ = [
+    # Classes
     "AudioBuffer",
     "AudioRingBuffer",
     "AudioStream",
     "SpeechSegment",
     "VAD",
+    # Basic functions
     "from_pcm",
+    # Preprocessing functions
+    "preemphasis",
+    "deemphasis",
+    "remove_dc",
+    "highpass_filter",
+    "noise_gate",
+    "spectral_gate",
+    "compute_short_term_energy",
+    # Spectral processing
+    "stft",
+    "power_spectrum",
+    "magnitude_spectrum",
+    "create_mel_filterbank",
+    "apply_mel_filterbank",
+    "log_mel",
+    "to_decibels",
+    "mfcc",
+    "delta",
+    # High-level functions
+    "mel_spectrogram",
+    "log_mel_spectrogram",
 ]

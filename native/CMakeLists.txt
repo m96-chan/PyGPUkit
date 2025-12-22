@@ -122,6 +122,7 @@ pybind11_add_module(${MODULE_NAME}
 # Link only cuda_driver (no cudart, no nvrtc/cublasLt link-time dependency)
 # NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
 # cuBLASLt is loaded dynamically at runtime via cublaslt_loader.cpp
+# FFT is implemented with custom Radix-2 kernel (no cuFFT dependency)
 # This enables single-binary distribution that works with just GPU drivers
 target_link_libraries(${MODULE_NAME} PRIVATE
     CUDA::cuda_driver

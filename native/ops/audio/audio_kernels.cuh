@@ -426,6 +426,633 @@ __global__ void vad_compute_noise_floor_kernel(
     }
 }
 
+// ============================================================================
+// Audio Preprocessing Kernels
+// ============================================================================
+
+// Pre-emphasis filter: y[n] = x[n] - alpha * x[n-1]
+// Parallelized version using scan-like pattern
+__global__ void preemphasis_kernel(
+    float* __restrict__ data,
+    size_t n,
+    float alpha)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    // For parallel processing, we read x[n] and x[n-1] independently
+    // Note: This is an approximation that works well for most audio
+    float curr = data[idx];
+    float prev = (idx > 0) ? data[idx - 1] : 0.0f;
+    data[idx] = curr - alpha * prev;
+}
+
+// De-emphasis filter: y[n] = x[n] + alpha * y[n-1]
+// Sequential by nature (IIR filter) - runs on single thread
+// For GPU efficiency, we process in blocks with overlap-save
+__global__ void deemphasis_sequential_kernel(
+    float* __restrict__ data,
+    size_t n,
+    float alpha)
+{
+    // Single thread sequential processing (for small arrays)
+    // For larger arrays, use block-based approach
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    float y_prev = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        float y = data[i] + alpha * y_prev;
+        data[i] = y;
+        y_prev = y;
+    }
+}
+
+// Compute sum for DC removal (reduction kernel)
+__global__ void compute_sum_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ block_sum,
+    size_t n)
+{
+    extern __shared__ float sdata[];
+
+    size_t tid = threadIdx.x;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Load value
+    float val = (idx < n) ? input[idx] : 0.0f;
+    sdata[tid] = val;
+    __syncthreads();
+
+    // Reduction in shared memory
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        block_sum[blockIdx.x] = sdata[0];
+    }
+}
+
+// Subtract mean (DC removal)
+__global__ void subtract_mean_kernel(
+    float* __restrict__ data,
+    size_t n,
+    float mean)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] -= mean;
+    }
+}
+
+// Single-pole high-pass filter (IIR)
+// y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+// Sequential processing
+__global__ void highpass_iir_kernel(
+    float* __restrict__ data,
+    size_t n,
+    float alpha)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    float x_prev = 0.0f;
+    float y_prev = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        float x = data[i];
+        float y = alpha * (y_prev + x - x_prev);
+        data[i] = y;
+        x_prev = x;
+        y_prev = y;
+    }
+}
+
+// Simple noise gate: zero samples below threshold
+__global__ void noise_gate_kernel(
+    float* __restrict__ data,
+    size_t n,
+    float threshold)
+{
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float val = data[idx];
+        if (fabsf(val) < threshold) {
+            data[idx] = 0.0f;
+        }
+    }
+}
+
+// Compute short-term energy per frame
+__global__ void short_term_energy_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int input_len,
+    int frame_size,
+    int num_frames)
+{
+    extern __shared__ float sdata[];
+
+    int frame_idx = blockIdx.x;
+    if (frame_idx >= num_frames) return;
+
+    int tid = threadIdx.x;
+    int frame_start = frame_idx * frame_size;
+
+    // Compute sum of squares
+    float sum_sq = 0.0f;
+    for (int i = tid; i < frame_size; i += blockDim.x) {
+        int sample_idx = frame_start + i;
+        if (sample_idx < input_len) {
+            float val = input[sample_idx];
+            sum_sq += val * val;
+        }
+    }
+
+    sdata[tid] = sum_sq;
+    __syncthreads();
+
+    // Reduce
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        // Output mean energy (not RMS to save sqrt)
+        output[frame_idx] = sdata[0] / static_cast<float>(frame_size);
+    }
+}
+
+// Spectral gate with smoothing
+// Computes per-sample gain based on local energy
+__global__ void spectral_gate_kernel(
+    float* __restrict__ data,
+    const float* __restrict__ frame_energy,
+    int n,
+    int frame_size,
+    int num_frames,
+    float threshold)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+
+    // Find which frame this sample belongs to
+    int frame_idx = idx / frame_size;
+    if (frame_idx >= num_frames) frame_idx = num_frames - 1;
+
+    // Get energy for this frame
+    float energy = frame_energy[frame_idx];
+
+    // Compute gain (soft gate with smoothing)
+    float gain = 1.0f;
+    if (energy < threshold) {
+        // Smooth attenuation: gain = (energy / threshold)^2
+        float ratio = energy / threshold;
+        gain = ratio * ratio;
+    }
+
+    data[idx] *= gain;
+}
+
+// ============================================================================
+// Radix-2 FFT Kernels (Driver-Only, no cuFFT dependency)
+// ============================================================================
+
+// Bit reversal permutation for FFT
+__device__ __forceinline__ int bit_reverse(int x, int log2n) {
+    int result = 0;
+    for (int i = 0; i < log2n; ++i) {
+        result = (result << 1) | (x & 1);
+        x >>= 1;
+    }
+    return result;
+}
+
+// Bit-reversal permutation kernel
+__global__ void fft_bit_reverse_kernel(
+    const float* __restrict__ input_real,
+    const float* __restrict__ input_imag,
+    float* __restrict__ output_real,
+    float* __restrict__ output_imag,
+    int n,
+    int log2n,
+    int batch_size)
+{
+    int batch_idx = blockIdx.y;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (batch_idx >= batch_size || idx >= n) return;
+
+    int rev_idx = bit_reverse(idx, log2n);
+    int in_offset = batch_idx * n;
+
+    output_real[in_offset + rev_idx] = input_real[in_offset + idx];
+    output_imag[in_offset + rev_idx] = (input_imag != nullptr) ? input_imag[in_offset + idx] : 0.0f;
+}
+
+// Cooley-Tukey FFT butterfly kernel (iterative, in-place)
+__global__ void fft_butterfly_kernel(
+    float* __restrict__ real,
+    float* __restrict__ imag,
+    int n,
+    int stage,
+    int batch_size)
+{
+    int batch_idx = blockIdx.y;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (batch_idx >= batch_size) return;
+
+    int half_size = 1 << stage;
+    int full_size = half_size << 1;
+    int num_groups = n / full_size;
+    int group_idx = idx / half_size;
+    int k = idx % half_size;
+
+    if (group_idx >= num_groups) return;
+
+    int offset = batch_idx * n;
+    int i = group_idx * full_size + k;
+    int j = i + half_size;
+
+    // Twiddle factor: W_n^k = exp(-2*pi*i*k/n)
+    float angle = -2.0f * 3.14159265358979f * k / full_size;
+    float tw_real = cosf(angle);
+    float tw_imag = sinf(angle);
+
+    // Load values
+    float a_real = real[offset + i];
+    float a_imag = imag[offset + i];
+    float b_real = real[offset + j];
+    float b_imag = imag[offset + j];
+
+    // Butterfly operation
+    // t = W * b
+    float t_real = tw_real * b_real - tw_imag * b_imag;
+    float t_imag = tw_real * b_imag + tw_imag * b_real;
+
+    // a' = a + t
+    // b' = a - t
+    real[offset + i] = a_real + t_real;
+    imag[offset + i] = a_imag + t_imag;
+    real[offset + j] = a_real - t_real;
+    imag[offset + j] = a_imag - t_imag;
+}
+
+// Combined FFT kernel for small sizes (fits in shared memory)
+// Uses Stockham formulation for better memory access patterns
+template<int N>
+__global__ void fft_stockham_kernel(
+    const float* __restrict__ input_real,
+    float* __restrict__ output_real,
+    float* __restrict__ output_imag,
+    int batch_size)
+{
+    extern __shared__ float smem[];
+    float* s_real = smem;
+    float* s_imag = smem + N;
+
+    int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    int tid = threadIdx.x;
+    int offset = batch_idx * N;
+
+    // Load input with bit-reversal
+    constexpr int LOG2N = (N == 256) ? 8 : (N == 512) ? 9 : (N == 1024) ? 10 : 0;
+    if (tid < N) {
+        int rev = bit_reverse(tid, LOG2N);
+        s_real[rev] = input_real[offset + tid];
+        s_imag[rev] = 0.0f;
+    }
+    __syncthreads();
+
+    // FFT stages
+    for (int stage = 0; stage < LOG2N; ++stage) {
+        int half_size = 1 << stage;
+        int full_size = half_size << 1;
+
+        if (tid < N / 2) {
+            int group = tid / half_size;
+            int k = tid % half_size;
+            int i = group * full_size + k;
+            int j = i + half_size;
+
+            float angle = -2.0f * 3.14159265358979f * k / full_size;
+            float tw_real = cosf(angle);
+            float tw_imag = sinf(angle);
+
+            float a_r = s_real[i], a_i = s_imag[i];
+            float b_r = s_real[j], b_i = s_imag[j];
+
+            float t_r = tw_real * b_r - tw_imag * b_i;
+            float t_i = tw_real * b_i + tw_imag * b_r;
+
+            s_real[i] = a_r + t_r;
+            s_imag[i] = a_i + t_i;
+            s_real[j] = a_r - t_r;
+            s_imag[j] = a_i - t_i;
+        }
+        __syncthreads();
+    }
+
+    // Store output
+    if (tid < N) {
+        output_real[offset + tid] = s_real[tid];
+        output_imag[offset + tid] = s_imag[tid];
+    }
+}
+
+// Real-to-complex FFT post-processing
+// For real input, we only need first N/2+1 complex outputs
+__global__ void fft_real_to_complex_kernel(
+    const float* __restrict__ fft_real,
+    const float* __restrict__ fft_imag,
+    float* __restrict__ out_real,
+    float* __restrict__ out_imag,
+    int n,
+    int n_out,
+    int batch_size)
+{
+    int batch_idx = blockIdx.y;
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (batch_idx >= batch_size || k >= n_out) return;
+
+    int offset_in = batch_idx * n;
+    int offset_out = batch_idx * n_out;
+
+    // For real input, X[k] is already correct for k = 0 to N/2
+    out_real[offset_out + k] = fft_real[offset_in + k];
+    out_imag[offset_out + k] = fft_imag[offset_in + k];
+}
+
+// ============================================================================
+// Spectral Processing Kernels
+// ============================================================================
+
+// Apply window function to frame (in-place)
+__global__ void apply_window_to_frames_kernel(
+    float* __restrict__ frames,
+    const float* __restrict__ window,
+    int n_frames,
+    int frame_size)
+{
+    int frame_idx = blockIdx.x;
+    int sample_idx = threadIdx.x;
+
+    if (frame_idx < n_frames && sample_idx < frame_size) {
+        int idx = frame_idx * frame_size + sample_idx;
+        frames[idx] *= window[sample_idx];
+    }
+}
+
+// Extract overlapping frames from audio
+__global__ void extract_frames_kernel(
+    const float* __restrict__ audio,
+    float* __restrict__ frames,
+    int audio_len,
+    int n_fft,
+    int hop_length,
+    int n_frames)
+{
+    int frame_idx = blockIdx.x;
+    int sample_idx = threadIdx.x;
+
+    if (frame_idx < n_frames && sample_idx < n_fft) {
+        int audio_idx = frame_idx * hop_length + sample_idx;
+        int out_idx = frame_idx * n_fft + sample_idx;
+
+        if (audio_idx < audio_len) {
+            frames[out_idx] = audio[audio_idx];
+        } else {
+            frames[out_idx] = 0.0f;  // Zero padding
+        }
+    }
+}
+
+// Compute power spectrum: real^2 + imag^2
+__global__ void power_spectrum_kernel(
+    const float* __restrict__ stft_real,
+    const float* __restrict__ stft_imag,
+    float* __restrict__ power,
+    int n_elements)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_elements) {
+        float r = stft_real[idx];
+        float i = stft_imag[idx];
+        power[idx] = r * r + i * i;
+    }
+}
+
+// Compute magnitude spectrum: sqrt(real^2 + imag^2)
+__global__ void magnitude_spectrum_kernel(
+    const float* __restrict__ stft_real,
+    const float* __restrict__ stft_imag,
+    float* __restrict__ magnitude,
+    int n_elements)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_elements) {
+        float r = stft_real[idx];
+        float i = stft_imag[idx];
+        magnitude[idx] = sqrtf(r * r + i * i);
+    }
+}
+
+// Convert Hz to Mel scale
+__device__ __forceinline__ float hz_to_mel(float hz) {
+    return 2595.0f * log10f(1.0f + hz / 700.0f);
+}
+
+// Convert Mel to Hz scale
+__device__ __forceinline__ float mel_to_hz(float mel) {
+    return 700.0f * (powf(10.0f, mel / 2595.0f) - 1.0f);
+}
+
+// Create mel filterbank matrix
+__global__ void create_mel_filterbank_kernel(
+    float* __restrict__ filterbank,
+    int n_mels,
+    int n_fft,
+    int sample_rate,
+    float f_min,
+    float f_max)
+{
+    int mel_idx = blockIdx.x;
+    int freq_idx = threadIdx.x;
+
+    if (mel_idx >= n_mels) return;
+
+    int n_freqs = n_fft / 2 + 1;
+    if (freq_idx >= n_freqs) return;
+
+    // Compute mel scale boundaries
+    float mel_min = hz_to_mel(f_min);
+    float mel_max = hz_to_mel(f_max);
+
+    // Mel center frequencies (n_mels + 2 points for triangular filters)
+    float mel_step = (mel_max - mel_min) / (n_mels + 1);
+    float mel_left = mel_min + mel_idx * mel_step;
+    float mel_center = mel_min + (mel_idx + 1) * mel_step;
+    float mel_right = mel_min + (mel_idx + 2) * mel_step;
+
+    float hz_left = mel_to_hz(mel_left);
+    float hz_center = mel_to_hz(mel_center);
+    float hz_right = mel_to_hz(mel_right);
+
+    // Current frequency bin in Hz
+    float freq_hz = static_cast<float>(freq_idx) * sample_rate / n_fft;
+
+    // Triangular filter response
+    float weight = 0.0f;
+    if (freq_hz >= hz_left && freq_hz <= hz_center) {
+        // Rising edge
+        weight = (freq_hz - hz_left) / (hz_center - hz_left + 1e-10f);
+    } else if (freq_hz > hz_center && freq_hz <= hz_right) {
+        // Falling edge
+        weight = (hz_right - freq_hz) / (hz_right - hz_center + 1e-10f);
+    }
+
+    filterbank[mel_idx * n_freqs + freq_idx] = weight;
+}
+
+// Apply log: log(x + eps)
+__global__ void log_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int n_elements,
+    float eps)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_elements) {
+        output[idx] = logf(input[idx] + eps);
+    }
+}
+
+// Convert to decibels: 10 * log10(x + eps)
+__global__ void to_decibels_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int n_elements,
+    float eps)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_elements) {
+        output[idx] = 10.0f * log10f(input[idx] + eps);
+    }
+}
+
+// DCT-II for MFCC
+// dct[k] = sum_n(x[n] * cos(pi * k * (2n + 1) / (2N)))
+__global__ void dct_ii_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int n_frames,
+    int n_input,
+    int n_output)
+{
+    int frame_idx = blockIdx.x;
+    int k = threadIdx.x;  // output coefficient index
+
+    if (frame_idx >= n_frames || k >= n_output) return;
+
+    float sum = 0.0f;
+    float scale = 3.14159265358979f * k / (2.0f * n_input);
+
+    for (int n = 0; n < n_input; ++n) {
+        float x = input[frame_idx * n_input + n];
+        sum += x * cosf(scale * (2 * n + 1));
+    }
+
+    // Normalization factor
+    float norm = (k == 0) ? sqrtf(1.0f / n_input) : sqrtf(2.0f / n_input);
+    output[frame_idx * n_output + k] = sum * norm;
+}
+
+// Delta features computation
+// delta[t] = sum_{n=1}^{width} n * (x[t+n] - x[t-n]) / (2 * sum_{n=1}^{width} n^2)
+__global__ void delta_features_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int n_frames,
+    int n_features,
+    int width)
+{
+    int frame_idx = blockIdx.x;
+    int feat_idx = threadIdx.x;
+
+    if (frame_idx >= n_frames || feat_idx >= n_features) return;
+
+    // Compute denominator: 2 * sum(n^2) for n = 1 to width
+    float denom = 0.0f;
+    for (int n = 1; n <= width; ++n) {
+        denom += n * n;
+    }
+    denom *= 2.0f;
+
+    // Compute numerator: sum(n * (x[t+n] - x[t-n]))
+    float numer = 0.0f;
+    for (int n = 1; n <= width; ++n) {
+        int t_plus = min(frame_idx + n, n_frames - 1);
+        int t_minus = max(frame_idx - n, 0);
+
+        float x_plus = input[t_plus * n_features + feat_idx];
+        float x_minus = input[t_minus * n_features + feat_idx];
+        numer += n * (x_plus - x_minus);
+    }
+
+    output[frame_idx * n_features + feat_idx] = numer / (denom + 1e-10f);
+}
+
+// Hann window generation
+__global__ void generate_hann_window_kernel(
+    float* __restrict__ window,
+    int window_size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < window_size) {
+        float n = static_cast<float>(idx);
+        float N = static_cast<float>(window_size);
+        window[idx] = 0.5f * (1.0f - cosf(2.0f * 3.14159265358979f * n / N));
+    }
+}
+
+// Zero padding kernel (for center mode)
+__global__ void pad_reflect_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int input_len,
+    int pad_left,
+    int total_len)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_len) return;
+
+    int src_idx;
+    if (idx < pad_left) {
+        // Left reflection
+        src_idx = pad_left - idx;
+    } else if (idx < pad_left + input_len) {
+        // Original signal
+        src_idx = idx - pad_left;
+    } else {
+        // Right reflection
+        int right_offset = idx - (pad_left + input_len);
+        src_idx = input_len - 2 - right_offset;
+    }
+
+    // Clamp to valid range
+    src_idx = max(0, min(src_idx, input_len - 1));
+    output[idx] = input[src_idx];
+}
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

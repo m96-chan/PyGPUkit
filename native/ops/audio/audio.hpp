@@ -137,6 +137,175 @@ GPUArray vad_apply_hangover(const GPUArray& vad_input, int hangover_frames);
  */
 float vad_compute_noise_floor(const GPUArray& frame_energy);
 
+// ============================================================================
+// Audio Preprocessing (Priority: Medium)
+// ============================================================================
+
+/**
+ * Apply pre-emphasis filter to emphasize high-frequency components.
+ * y[n] = x[n] - alpha * x[n-1]
+ * @param input Input GPUArray (modified in-place)
+ * @param alpha Pre-emphasis coefficient (default 0.97)
+ */
+void preemphasis(GPUArray& input, float alpha = 0.97f);
+
+/**
+ * Apply de-emphasis filter (inverse of pre-emphasis).
+ * y[n] = x[n] + alpha * y[n-1]
+ * @param input Input GPUArray (modified in-place)
+ * @param alpha De-emphasis coefficient (default 0.97)
+ */
+void deemphasis(GPUArray& input, float alpha = 0.97f);
+
+/**
+ * Remove DC offset from audio signal.
+ * Subtracts the mean value from all samples.
+ * @param input Input GPUArray (modified in-place)
+ */
+void remove_dc(GPUArray& input);
+
+/**
+ * Apply high-pass filter for DC removal (IIR).
+ * Uses single-pole high-pass: y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+ * @param input Input GPUArray (modified in-place)
+ * @param cutoff_hz Cutoff frequency in Hz (default 20.0)
+ * @param sample_rate Sample rate in Hz (default 16000)
+ */
+void highpass_filter(GPUArray& input, float cutoff_hz = 20.0f, int sample_rate = 16000);
+
+/**
+ * Apply spectral gate for noise reduction.
+ * Attenuates samples with energy below threshold.
+ * @param input Input GPUArray (modified in-place)
+ * @param threshold Energy threshold (linear scale, default 0.01)
+ * @param attack_samples Smoothing attack in samples (default 64)
+ * @param release_samples Smoothing release in samples (default 256)
+ */
+void spectral_gate(GPUArray& input, float threshold = 0.01f,
+                   int attack_samples = 64, int release_samples = 256);
+
+/**
+ * Apply simple noise gate (hard gate).
+ * Zeros samples with absolute value below threshold.
+ * @param input Input GPUArray (modified in-place)
+ * @param threshold Amplitude threshold (default 0.01)
+ */
+void noise_gate(GPUArray& input, float threshold = 0.01f);
+
+/**
+ * Compute short-term energy for adaptive noise gating.
+ * @param input Input audio samples
+ * @param frame_size Frame size for energy computation
+ * @return GPUArray of frame energies
+ */
+GPUArray compute_short_term_energy(const GPUArray& input, int frame_size);
+
+// ============================================================================
+// Spectral Processing (Priority: High - Whisper/ASR)
+// ============================================================================
+
+/**
+ * Compute Short-Time Fourier Transform (STFT) using cuFFT.
+ * @param input Input audio samples (float32)
+ * @param n_fft FFT size (default 400 for Whisper)
+ * @param hop_length Hop size (default 160 for Whisper)
+ * @param win_length Window length (default n_fft)
+ * @param center Whether to pad input (default true)
+ * @return Complex STFT output [n_frames, n_fft/2+1, 2] (real, imag)
+ */
+GPUArray stft(const GPUArray& input, int n_fft = 400, int hop_length = 160,
+              int win_length = -1, bool center = true);
+
+/**
+ * Compute power spectrogram from STFT output.
+ * power = real^2 + imag^2
+ * @param stft_output STFT output [n_frames, n_fft/2+1, 2]
+ * @return Power spectrogram [n_frames, n_fft/2+1]
+ */
+GPUArray power_spectrum(const GPUArray& stft_output);
+
+/**
+ * Compute magnitude spectrogram from STFT output.
+ * magnitude = sqrt(real^2 + imag^2)
+ * @param stft_output STFT output [n_frames, n_fft/2+1, 2]
+ * @return Magnitude spectrogram [n_frames, n_fft/2+1]
+ */
+GPUArray magnitude_spectrum(const GPUArray& stft_output);
+
+/**
+ * Create Mel filterbank matrix.
+ * @param n_mels Number of mel bands (default 80 for Whisper)
+ * @param n_fft FFT size
+ * @param sample_rate Sample rate in Hz
+ * @param f_min Minimum frequency (default 0)
+ * @param f_max Maximum frequency (default sample_rate/2)
+ * @return Mel filterbank matrix [n_mels, n_fft/2+1]
+ */
+GPUArray create_mel_filterbank(int n_mels, int n_fft, int sample_rate,
+                                float f_min = 0.0f, float f_max = -1.0f);
+
+/**
+ * Apply Mel filterbank to power/magnitude spectrogram.
+ * @param spectrogram Input spectrogram [n_frames, n_fft/2+1]
+ * @param mel_filterbank Mel filterbank [n_mels, n_fft/2+1]
+ * @return Mel spectrogram [n_frames, n_mels]
+ */
+GPUArray apply_mel_filterbank(const GPUArray& spectrogram,
+                               const GPUArray& mel_filterbank);
+
+/**
+ * Compute log-mel spectrogram (Whisper-compatible).
+ * log_mel = log(mel + eps)
+ * @param mel_spectrogram Mel spectrogram [n_frames, n_mels]
+ * @param eps Small constant for numerical stability (default 1e-10)
+ * @return Log-mel spectrogram [n_frames, n_mels]
+ */
+GPUArray log_mel_spectrogram(const GPUArray& mel_spectrogram, float eps = 1e-10f);
+
+/**
+ * Convert to decibels.
+ * dB = 10 * log10(x + eps)
+ * @param input Input array
+ * @param eps Small constant for numerical stability (default 1e-10)
+ * @return dB values
+ */
+GPUArray to_decibels(const GPUArray& input, float eps = 1e-10f);
+
+/**
+ * Compute MFCC from log-mel spectrogram using DCT-II.
+ * @param log_mel Log-mel spectrogram [n_frames, n_mels]
+ * @param n_mfcc Number of MFCC coefficients (default 13)
+ * @return MFCC [n_frames, n_mfcc]
+ */
+GPUArray mfcc(const GPUArray& log_mel, int n_mfcc = 13);
+
+/**
+ * Compute delta (differential) features.
+ * @param features Input features [n_frames, n_features]
+ * @param order Delta order (1 for delta, 2 for delta-delta)
+ * @param width Window width for computation (default 2)
+ * @return Delta features [n_frames, n_features]
+ */
+GPUArray delta_features(const GPUArray& features, int order = 1, int width = 2);
+
+// ============================================================================
+// High-level Convenience Functions
+// ============================================================================
+
+/**
+ * Compute Whisper-compatible log-mel spectrogram in one call.
+ * Combines: STFT -> power -> mel filterbank -> log
+ * @param input Input audio (float32, 16kHz expected)
+ * @param n_fft FFT size (default 400)
+ * @param hop_length Hop size (default 160)
+ * @param n_mels Number of mel bands (default 80)
+ * @return Log-mel spectrogram [n_frames, n_mels]
+ */
+GPUArray whisper_mel_spectrogram(const GPUArray& input,
+                                  int n_fft = 400,
+                                  int hop_length = 160,
+                                  int n_mels = 80);
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit
