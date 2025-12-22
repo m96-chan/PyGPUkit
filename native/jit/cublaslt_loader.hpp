@@ -66,6 +66,25 @@ enum cublasLtMatmulDescAttributes_t {
     CUBLASLT_MATMUL_DESC_COMPUTE_TYPE = 2
 };
 
+// Matmul preference attributes
+enum cublasLtMatmulPreferenceAttributes_t {
+    CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 1
+};
+
+// Algorithm structure (64 bytes as per cuBLAS documentation)
+struct cublasLtMatmulAlgo_t {
+    uint64_t data[8];
+};
+
+// Heuristic result structure
+struct cublasLtMatmulHeuristicResult_struct {
+    cublasLtMatmulAlgo_t algo;
+    size_t workspaceSize;
+    cublasStatus_t state;
+    float wavesCount;
+    int reserved[4];
+};
+
 // Initialize the dynamic loader
 // Returns true if cuBLASLt was found and loaded successfully
 bool initialize();

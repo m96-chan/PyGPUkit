@@ -860,15 +860,15 @@ private:
 
     ~FlashDecodingWorkspace() {
         if (buffer_) {
-            cudaFree(buffer_);
+            device_free(buffer_);
         }
     }
 
     void resize(size_t new_size) {
         if (buffer_) {
-            cudaFree(buffer_);
+            device_free(buffer_);
         }
-        cudaMalloc(&buffer_, new_size);
+        buffer_ = static_cast<float*>(device_malloc(new_size));
         size_ = new_size;
     }
 

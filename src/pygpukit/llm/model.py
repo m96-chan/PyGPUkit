@@ -380,12 +380,24 @@ class CausalTransformerModel:
 
         # Pre-compute RoPE tables on GPU (full sequence)
         if self.config.use_rope:
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             cos_np, sin_np = precompute_freqs_cis(
                 self.config.head_dim, max_seq_len, self.config.rope_theta
             )
-            np_dtype = np.float16 if dtype == "float16" else np.float32
-            self._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
-            self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+            if dtype == "float16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                self._rope_cos_gpu = cast_f32_to_f16(cos_f32)
+                self._rope_sin_gpu = cast_f32_to_f16(sin_f32)
+            elif dtype == "bfloat16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                self._rope_cos_gpu = cast_f32_to_bf16(cos_f32)
+                self._rope_sin_gpu = cast_f32_to_bf16(sin_f32)
+            else:
+                self._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
+                self._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
         # ============================================================
         # Phase 1: Prefill (with reduced allocations)
@@ -420,7 +432,9 @@ class CausalTransformerModel:
         if use_graph:
             import gc
 
-            from pygpukit._pygpukit_native import CudaGraph
+            from pygpukit._native_loader import get_native_module
+
+            CudaGraph = getattr(get_native_module(), "CudaGraph")  # noqa: B009
 
             # Warm-up: Run _decode_step_zero_alloc a few times to initialize
             # all lazy state (method dispatch, CUDA kernel caching, etc.)
@@ -1653,7 +1667,9 @@ class CausalTransformerModel:
             stacklevel=2,
         )
 
-        from pygpukit._pygpukit_native import CudaGraph
+        from pygpukit._native_loader import get_native_module
+
+        CudaGraph = getattr(get_native_module(), "CudaGraph")  # noqa: B009
 
         dtype = str(self.embed_tokens.dtype)
         use_qk_norm = self.spec is not None and self.spec.use_qk_norm
@@ -1667,12 +1683,24 @@ class CausalTransformerModel:
 
         # Pre-compute RoPE tables on GPU if not already done
         if self.config.use_rope and not hasattr(self, "_rope_cos_gpu"):
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             cos_np, sin_np = precompute_freqs_cis(
                 self.config.head_dim, max_seq_len, self.config.rope_theta
             )
-            np_dtype = np.float16 if dtype == "float16" else np.float32
-            self._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
-            self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+            if dtype == "float16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                self._rope_cos_gpu = cast_f32_to_f16(cos_f32)
+                self._rope_sin_gpu = cast_f32_to_f16(sin_f32)
+            elif dtype == "bfloat16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                self._rope_cos_gpu = cast_f32_to_bf16(cos_f32)
+                self._rope_sin_gpu = cast_f32_to_bf16(sin_f32)
+            else:
+                self._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
+                self._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
         # Cache transposed lm_head for graph (if not already done)
         if not hasattr(self, "_lm_head_t_cache"):
@@ -1871,7 +1899,9 @@ class CausalTransformerModel:
             stacklevel=2,
         )
 
-        from pygpukit._pygpukit_native import CudaGraph
+        from pygpukit._native_loader import get_native_module
+
+        CudaGraph = getattr(get_native_module(), "CudaGraph")  # noqa: B009
 
         dtype = str(self.embed_tokens.dtype)
         use_qk_norm = self.spec is not None and self.spec.use_qk_norm
@@ -1897,12 +1927,24 @@ class CausalTransformerModel:
 
         # Pre-compute RoPE tables on GPU if not already done
         if self.config.use_rope and not hasattr(self, "_rope_cos_gpu"):
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             cos_np, sin_np = precompute_freqs_cis(
                 self.config.head_dim, max_seq_len, self.config.rope_theta
             )
-            np_dtype = np.float16 if dtype == "float16" else np.float32
-            self._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
-            self._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+            if dtype == "float16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                self._rope_cos_gpu = cast_f32_to_f16(cos_f32)
+                self._rope_sin_gpu = cast_f32_to_f16(sin_f32)
+            elif dtype == "bfloat16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                self._rope_cos_gpu = cast_f32_to_bf16(cos_f32)
+                self._rope_sin_gpu = cast_f32_to_bf16(sin_f32)
+            else:
+                self._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
+                self._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
         # Cache transposed lm_head for graph
         if not hasattr(self, "_lm_head_t_cache"):

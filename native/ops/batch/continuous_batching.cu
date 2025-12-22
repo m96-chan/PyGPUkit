@@ -165,7 +165,7 @@ GPUArray compute_cumsum(const GPUArray& input) {
     std::vector<int32_t> output_host(n);
 
     // Copy to host
-    cudaMemcpy(input_host.data(), input.data(), n * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    memcpy_device_to_host(input_host.data(), input.data(), n * sizeof(int32_t));
 
     // Compute cumsum (exclusive prefix sum)
     output_host[0] = 0;
@@ -175,7 +175,7 @@ GPUArray compute_cumsum(const GPUArray& input) {
 
     // Copy back
     GPUArray output({(size_t)n}, DataType::Int32);
-    cudaMemcpy(output.data(), output_host.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice);
+    memcpy_host_to_device(output.data(), output_host.data(), n * sizeof(int32_t));
 
     return output;
 }
@@ -199,8 +199,8 @@ std::pair<GPUArray, int> prepare_batch_inputs(
     }
 
     GPUArray token_ids({(size_t)total_tokens}, DataType::Int32);
-    cudaMemcpy(token_ids.data(), flat_tokens.data(),
-               total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice);
+    memcpy_host_to_device(token_ids.data(), flat_tokens.data(),
+               total_tokens * sizeof(int32_t));
 
     return {std::move(token_ids), total_tokens};
 }

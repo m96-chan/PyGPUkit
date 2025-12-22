@@ -390,7 +390,12 @@ def load_model_from_safetensors(
     # Try to import direct mmap-to-GPU transfer function
     use_direct_transfer = False
     try:
-        from pygpukit._pygpukit_native import memcpy_ptr_to_device
+        from pygpukit._native_loader import get_native_module
+
+        _native = get_native_module()
+        memcpy_ptr_to_device = getattr(_native, "memcpy_ptr_to_device", None)
+        if memcpy_ptr_to_device is None:
+            raise AttributeError("memcpy_ptr_to_device not found")
 
         first_tensor = st.tensor_names[0]
         st.tensor_data_ptr(first_tensor)

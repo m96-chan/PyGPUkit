@@ -23,12 +23,35 @@ import numpy as np
 if TYPE_CHECKING:
     from pygpukit.core.dtypes import DataType
 
-# Try to import native module
+# Try to import native module via auto-selecting loader
 _native_module: Any = None
 
 # Track NVRTC discovery status for warning
 _nvrtc_search_performed: bool = False
 _nvrtc_dll_found: str | None = None
+
+
+def _load_native_module() -> Any:
+    """Load native module using auto-selection based on driver version.
+
+    Tries to use _native_loader for auto-selection between cu129/cu131.
+    Falls back to direct import if loader or versioned modules unavailable.
+    """
+    try:
+        from pygpukit._native_loader import get_native_module
+
+        return get_native_module()
+    except ImportError:
+        # Loader not available, try direct import
+        pass
+
+    # Direct import fallback (legacy single module)
+    try:
+        from pygpukit import _pygpukit_native  # type: ignore[attr-defined]
+
+        return _pygpukit_native
+    except ImportError:
+        return None
 
 
 def _find_nvrtc_dll() -> str | None:
@@ -173,12 +196,9 @@ def _emit_nvrtc_warning() -> None:
 
 try:
     _add_cuda_dll_directories()
-    from pygpukit import _pygpukit_native  # type: ignore[attr-defined]
-
-    _native_module = _pygpukit_native
-
+    _native_module = _load_native_module()
     # Check NVRTC availability and warn if not found (deferred to first use)
-except ImportError:
+except Exception:
     pass
 
 

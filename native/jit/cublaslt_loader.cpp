@@ -2,6 +2,7 @@
 // Loads cuBLASLt at runtime using LoadLibrary (Windows) or dlopen (Linux)
 
 #include "cublaslt_loader.hpp"
+#include <cuda.h>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -639,13 +640,16 @@ GemmCachedDesc* get_cached_desc(int M, int N, int K, int dtype, cublasComputeTyp
                 cached.workspaceSize = heuristicResult.workspaceSize;
                 cached.hasAlgo = true;
 
-                // Allocate fixed workspace if needed
+                // Allocate fixed workspace if needed (using Driver API)
                 if (cached.workspaceSize > 0) {
-                    cudaError_t err = cudaMalloc(&cached.workspace, cached.workspaceSize);
-                    if (err != cudaSuccess) {
+                    CUdeviceptr dptr = 0;
+                    CUresult err = cuMemAlloc(&dptr, cached.workspaceSize);
+                    if (err != CUDA_SUCCESS) {
                         cached.workspace = nullptr;
                         cached.workspaceSize = 0;
                         // Still valid, just without workspace
+                    } else {
+                        cached.workspace = reinterpret_cast<void*>(dptr);
                     }
                 }
 

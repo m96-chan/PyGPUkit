@@ -64,8 +64,18 @@ message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 # NOTE: Do NOT use -maxrregcount for CUTLASS - it needs many registers for optimal performance
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math --ptxas-options=-v -O3")
 
+# Module name: can be overridden via PYGPUKIT_MODULE_SUFFIX for multi-CUDA builds
+# E.g., PYGPUKIT_MODULE_SUFFIX=_cu129 produces _pygpukit_native_cu129
+set(MODULE_SUFFIX "" CACHE STRING "Module name suffix (e.g., _cu129, _cu131)")
+if(DEFINED ENV{PYGPUKIT_MODULE_SUFFIX})
+    set(MODULE_SUFFIX $ENV{PYGPUKIT_MODULE_SUFFIX})
+endif()
+
+set(MODULE_NAME "_pygpukit_native${MODULE_SUFFIX}")
+message(STATUS "Building native module: ${MODULE_NAME}")
+
 # Build single pybind11 module with all sources
-pybind11_add_module(_pygpukit_native
+pybind11_add_module(${MODULE_NAME}
     # Core
     core/device.cpp
     core/device.cu
@@ -102,20 +112,20 @@ pybind11_add_module(_pygpukit_native
 # NVRTC is loaded dynamically at runtime via nvrtc_loader.cpp
 # cuBLASLt is loaded dynamically at runtime via cublaslt_loader.cpp
 # This enables single-binary distribution that works with just GPU drivers
-target_link_libraries(_pygpukit_native PRIVATE
+target_link_libraries(${MODULE_NAME} PRIVATE
     CUDA::cuda_driver
 )
 
 # IMPORTANT: Do NOT enable CUDA_SEPARABLE_COMPILATION
 # It causes 15x performance degradation for CUTLASS kernels
 # due to prevented inlining and indirect function calls
-set_target_properties(_pygpukit_native PROPERTIES
+set_target_properties(${MODULE_NAME} PROPERTIES
     CUDA_SEPARABLE_COMPILATION OFF
 )
 
 # Install the module to the correct location for scikit-build-core
 # scikit-build-core's wheel.install-dir already sets the base to pygpukit
-install(TARGETS _pygpukit_native
+install(TARGETS ${MODULE_NAME}
     LIBRARY DESTINATION .
     RUNTIME DESTINATION .
 )

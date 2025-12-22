@@ -103,8 +103,10 @@ class DecodeBatch(DecodeStrategy):
         """
         import gc
 
-        from pygpukit._pygpukit_native import CudaGraph
+        from pygpukit._native_loader import get_native_module
         from pygpukit.core import default_stream
+
+        CudaGraph = getattr(get_native_module(), "CudaGraph")  # noqa: B009
         from pygpukit.core.factory import from_numpy
         from pygpukit.llm.buffers import DecodeBuffers
         from pygpukit.llm.layers import precompute_freqs_cis
@@ -128,12 +130,24 @@ class DecodeBatch(DecodeStrategy):
 
         # Pre-compute RoPE tables
         if model.config.use_rope and not hasattr(model, "_rope_cos_gpu"):
+            from pygpukit.ops.basic import cast_f32_to_bf16, cast_f32_to_f16
+
             cos_np, sin_np = precompute_freqs_cis(
                 model.config.head_dim, max_seq_len, model.config.rope_theta
             )
-            np_dtype = np.float16 if dtype == "float16" else np.float32
-            model._rope_cos_gpu = from_numpy(cos_np.astype(np_dtype))
-            model._rope_sin_gpu = from_numpy(sin_np.astype(np_dtype))
+            if dtype == "float16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                model._rope_cos_gpu = cast_f32_to_f16(cos_f32)
+                model._rope_sin_gpu = cast_f32_to_f16(sin_f32)
+            elif dtype == "bfloat16":
+                cos_f32 = from_numpy(cos_np.astype(np.float32))
+                sin_f32 = from_numpy(sin_np.astype(np.float32))
+                model._rope_cos_gpu = cast_f32_to_bf16(cos_f32)
+                model._rope_sin_gpu = cast_f32_to_bf16(sin_f32)
+            else:
+                model._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
+                model._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
         # Cache transposed lm_head
         if not hasattr(model, "_lm_head_t_cache"):
@@ -216,6 +230,16 @@ class DecodeBatch(DecodeStrategy):
 
         self._batch_decode_graph_ready = True
         print(f"  [Batch CUDA Graph] Captured {self._batch_decode_graph.num_nodes} nodes")
+
+        # CRITICAL: Reset KV cache IN-PLACE after warmup/capture to remove pollution
+        # Warmup and capture wrote garbage values at position 0
+        # Must reset in-place to preserve pointers captured by graph
+        print("  [Batch CUDA Graph] Resetting KV cache in-place after capture...")
+        for block in model.blocks:
+            if block.attn._k_cache is not None:
+                block.attn._k_cache._get_native().fill_zeros()
+                block.attn._v_cache._get_native().fill_zeros()
+        default_stream().synchronize()
 
     def _step_batch_for_graph(
         self,

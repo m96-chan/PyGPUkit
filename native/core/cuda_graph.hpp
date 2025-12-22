@@ -87,6 +87,13 @@ public:
      */
     bool is_capturing() const;
 
+    /**
+     * Get the internal stream handle.
+     * Returns the capture/replay stream as an opaque pointer.
+     * Used for explicit stream synchronization or async operations.
+     */
+    void* get_stream_handle() const;
+
 private:
     CudaGraphImpl* impl_ = nullptr;
 };
@@ -129,11 +136,11 @@ private:
 } // namespace pygpukit
 
 // =============================================================================
-// Internal API for kernel implementations (requires cuda_runtime.h)
+// Internal API for kernel implementations (requires CUDA Driver API)
 // Include this section only in .cu files that need stream access
 // =============================================================================
 #ifdef __CUDACC__
-#include <cuda_runtime.h>
+#include <cuda.h>
 
 namespace pygpukit {
 namespace internal {
@@ -142,13 +149,28 @@ namespace internal {
  * Get the current graph capture stream (internal use only).
  * Returns the capture stream if graph capture is in progress, or nullptr otherwise.
  */
-cudaStream_t get_capture_stream();
+CUstream get_capture_stream();
 
 /**
  * Set the current graph capture stream (internal use only).
  * Called internally by CudaGraph::begin_capture() and end_capture().
  */
-void set_capture_stream(cudaStream_t stream);
+void set_capture_stream(CUstream stream);
+
+/**
+ * Check if currently in CUDA Graph capture mode.
+ */
+bool is_currently_capturing();
+
+/**
+ * Get the current operation sequence counter (for debugging).
+ */
+int get_operation_counter();
+
+/**
+ * Increment the operation counter (for debugging).
+ */
+void increment_operation_counter();
 
 } // namespace internal
 } // namespace pygpukit
@@ -156,10 +178,13 @@ void set_capture_stream(cudaStream_t stream);
 /**
  * Helper macro for kernel launch that uses capture stream when available.
  * Usage: kernel<<<grid, block, smem, PYGPUKIT_GET_LAUNCH_STREAM()>>>(args...)
+ *
+ * Note: CUstream is compatible with cudaStream_t in kernel launch syntax.
+ * The driver and runtime use the same underlying stream handle type.
  */
 #define PYGPUKIT_GET_LAUNCH_STREAM() \
     (pygpukit::internal::get_capture_stream() ? \
      pygpukit::internal::get_capture_stream() : \
-     cudaStream_t(0))
+     CUstream(0))
 
 #endif // __CUDACC__

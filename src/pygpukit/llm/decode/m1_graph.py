@@ -238,9 +238,11 @@ class DecodeM1Graph(DecodeStrategy):
         """
         import gc
 
-        from pygpukit._pygpukit_native import CudaGraph
+        from pygpukit._native_loader import get_native_module
         from pygpukit.core import default_stream
         from pygpukit.core.factory import from_numpy
+
+        CudaGraph = getattr(get_native_module(), "CudaGraph")  # noqa: B009
         from pygpukit.llm.buffers import DecodeBuffers
         from pygpukit.llm.layers import precompute_freqs_cis
 
@@ -454,7 +456,9 @@ class DecodeM1Graph(DecodeStrategy):
         # Each CudaGraph has its own cudaStreamNonBlocking stream, which doesn't
         # implicitly sync with other streams. Using device_synchronize ensures
         # all GPU work is complete and data is visible to all streams.
-        from pygpukit._pygpukit_native import device_synchronize
+        from pygpukit._native_loader import get_native_module
+
+        device_synchronize = getattr(get_native_module(), "device_synchronize")  # noqa: B009
 
         self._tok_np[0] = token_id
         self._pos_np[0] = position

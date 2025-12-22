@@ -68,19 +68,31 @@ except ImportError:
     DeviceCapabilities = FallbackDeviceCapabilities
     KernelType = None
 
-# Import CUDA Graph from native module
+# Import CUDA Graph from native module (via auto-selecting loader)
 try:
-    from pygpukit._pygpukit_native import CudaGraph
-except ImportError:
-    CudaGraph = None
+    from pygpukit._native_loader import get_native_module as _get_native
 
-# Import CUDA Event for GPU-side timing
+    _native = _get_native()
+    CudaGraph = getattr(_native, "CudaGraph", None)
+except (ImportError, AttributeError):
+    try:
+        from pygpukit._pygpukit_native import CudaGraph
+    except ImportError:
+        CudaGraph = None
+
+# Import CUDA Event for GPU-side timing (via auto-selecting loader)
 try:
-    from pygpukit._pygpukit_native import CudaEvent, event_elapsed_ms, event_elapsed_us
-except ImportError:
-    CudaEvent = None
-    event_elapsed_ms = None
-    event_elapsed_us = None
+    _native = _get_native()
+    CudaEvent = getattr(_native, "CudaEvent", None)
+    event_elapsed_ms = getattr(_native, "event_elapsed_ms", None)
+    event_elapsed_us = getattr(_native, "event_elapsed_us", None)
+except (ImportError, AttributeError, NameError):
+    try:
+        from pygpukit._pygpukit_native import CudaEvent, event_elapsed_ms, event_elapsed_us
+    except ImportError:
+        CudaEvent = None
+        event_elapsed_ms = None
+        event_elapsed_us = None
 
 __all__ = [
     # Version

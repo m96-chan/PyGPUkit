@@ -62,7 +62,7 @@ int sample_greedy(const GPUArray& logits) {
 
     // Copy result to host
     int result;
-    cudaMemcpy(&result, result_gpu.data(), sizeof(int), cudaMemcpyDeviceToHost);
+    memcpy_device_to_host(&result, result_gpu.data(), sizeof(int));
     return result;
 }
 
@@ -117,7 +117,7 @@ int sample_multinomial(const GPUArray& logits, float temperature) {
 
     // Copy result to host
     int result;
-    cudaMemcpy(&result, result_gpu.data(), sizeof(int), cudaMemcpyDeviceToHost);
+    memcpy_device_to_host(&result, result_gpu.data(), sizeof(int));
     return result;
 }
 
@@ -178,7 +178,7 @@ int sample_topk(const GPUArray& logits, int top_k, float temperature) {
 
     // Copy result to host
     int result;
-    cudaMemcpy(&result, result_gpu.data(), sizeof(int), cudaMemcpyDeviceToHost);
+    memcpy_device_to_host(&result, result_gpu.data(), sizeof(int));
     return result;
 }
 
@@ -325,7 +325,7 @@ int sample_topp(const GPUArray& logits, float top_p, float temperature) {
 
     // Copy result to host
     int result;
-    cudaMemcpy(&result, result_gpu.data(), sizeof(int), cudaMemcpyDeviceToHost);
+    memcpy_device_to_host(&result, result_gpu.data(), sizeof(int));
     return result;
 }
 
