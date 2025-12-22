@@ -180,6 +180,7 @@ cublasLt64_11.dll  // CUDA 11.x
 6. Convert Rust features to Python, Cython, Numba, or pure CUDA kernels
 7. Delete Rust tasks from roadmap
 8. Simplify architecture by removing Rust layer
+9. Use emoji or non-ASCII characters in source code or comments (cp932/Shift-JIS compatibility)
 
 ### DO
 
@@ -196,9 +197,9 @@ cublasLt64_11.dll  // CUDA 11.x
 
 ### Target Architectures
 
-- **Supported:** Ampere (SM 80–86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100)
+- **Supported:** Ampere (SM 80-86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100, 120)
 - **Unsupported:** Architectures below SM80
-- **Build default:** SM 80, 86, 89, 90, 100 (CUDA 13.1+)
+- **Build default:** SM 80, 86, 89, 90, 100, 120 (CUDA 13.1+)
 
 ### Design Philosophy
 
@@ -523,26 +524,27 @@ Edit → Build → Validate → Benchmark → Commit
 
 ### Build Instructions (IMPORTANT)
 
-**CUDA 13.1でビルドする場合（推奨）：**
+**Git Bashからビルド（推奨）：**
 
-```cmd
-:: Windows Command Prompt (cmd.exe) から実行
-:: Git Bashからは実行しないこと！環境変数が伝播しない
-cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda13.bat
+```bash
+cd /d/Projects/m96-chan/PyGPUkit
+./build.sh 86       # SM 86のみ (RTX 3090 Ti)
+./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh          # デフォルト: SM 86
 ```
 
-**CUDA 12.xでビルドする場合：**
+**Windows cmd.exeからビルド（代替）：**
 
 ```cmd
 cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda12.bat
+scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
+scripts\build_cuda13.bat 120     :: SM 120のみ (RTX 5090)
+scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100, 120)
 ```
 
 **注意事項：**
-- 必ずWindowsのcmd.exeから実行すること（Git Bash不可）
-- VS Developer Command Promptからでも可
-- ビルドスクリプトがvcvars64.batを呼び出してVS環境をセットアップする
+- RTX 5090 (SM 120) はCUDA 13.1以降が必要
+- サポートSM: 80, 86, 89, 90, 100, 120
 
 ### Pre-Commit Checks (MANDATORY)
 
@@ -645,6 +647,47 @@ python benchmark.py --tf32-version v2   # PTX mma.sync (default)
 **Environment Variables:**
 - `PYGPUKIT_ALLOW_TF32=1` - Enable TF32 TensorCore
 - `PYGPUKIT_TF32_V2=1` - Use PTX mma.sync kernel (default when TF32 enabled)
+
+---
+
+## CUDA Graph Guidelines
+
+M=1 decode separates CUDA Graph and Non-Graph versions.
+
+### Graph Version Requirements
+
+Use CUDA Graph ONLY when ALL conditions are met:
+
+1. **Fixed shapes/dtypes/RoPE tables** - No dynamic changes during replay
+2. **Identical kernel path** - warmup / capture / replay use the same code path
+3. **No KV cache pollution** - Graph must not write to real KV cache during warmup/capture
+4. **H2D copies on capture stream** - All host-to-device copies must be on the stream being captured
+
+### Fallback Rules
+
+If any condition is NOT met, fallback to Non-Graph version.
+
+### Prohibited in Graph
+
+- Conditional branches based on runtime values
+- `copy_to` operations (use direct buffer writes instead)
+- Any operation that reads from or writes to KV cache
+- SDPA (Scaled Dot-Product Attention) - always run outside graph
+
+### Implementation Pattern
+
+```python
+# Graph captures ONLY stateless operations:
+# - Embedding lookup (via GPU pointer)
+# - Linear projections (QKV, O, MLP)
+# - RMSNorm
+# - RoPE (via pre-computed GPU tables)
+
+# These run OUTSIDE graph:
+# - KV cache update
+# - SDPA attention
+# - Any operation that depends on context_len at runtime
+```
 
 ---
 
@@ -890,15 +933,16 @@ accepted_tokens = model.jacobi_decode_step(draft_tokens, position)
 
 ### Build Instructions
 
-**CUDA 13.1でビルドする場合（推奨）：**
+**Git Bashからビルド（推奨）：**
 
-```cmd
-:: Windows Command Prompt (cmd.exe) から実行
-:: Git Bashからは実行しないこと！環境変数が伝播しない
-cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
-scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100)
+```bash
+cd /d/Projects/m96-chan/PyGPUkit
+./build.sh 86       # SM 86のみ (RTX 3090 Ti)
+./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh          # デフォルト: SM 86
 ```
+
+**サポートSM:** 80, 86, 89, 90, 100, 120
 
 ### Tokenizer
 

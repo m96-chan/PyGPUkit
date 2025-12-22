@@ -49,6 +49,8 @@ endif()
 # - SM 86 (RTX 30xx): Ampere consumer, 5-stage pipeline
 # - SM 89 (RTX 40xx): Ada Lovelace, 6-stage pipeline
 # - SM 90 (H100): Hopper, WGMMA/TMA
+# - SM 100 (B100/B200): Blackwell datacenter
+# - SM 120 (RTX 5090): Blackwell consumer (GeForce)
 #
 # For SM100+ (Blackwell), use CUDA 13.x and set CMAKE_CUDA_ARCHITECTURES env var
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)

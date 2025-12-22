@@ -3,19 +3,20 @@ REM Build PyGPUkit with CUDA 13.1
 REM Run this from Windows Command Prompt (not Git Bash)
 REM
 REM Usage:
-REM   build_cuda13.bat          - Build for all SM (80, 86, 89, 90, 100)
+REM   build_cuda13.bat          - Build for all SM (80, 86, 89, 90, 100, 120)
 REM   build_cuda13.bat 86       - Build for SM 86 only (RTX 3090 Ti)
 REM   build_cuda13.bat 89       - Build for SM 89 only (RTX 4090)
 REM   build_cuda13.bat 90       - Build for SM 90 only (H100)
-REM   build_cuda13.bat 100      - Build for SM 100 only (Blackwell)
+REM   build_cuda13.bat 100      - Build for SM 100 only (Blackwell datacenter)
+REM   build_cuda13.bat 120      - Build for SM 120 only (RTX 5090)
 
 setlocal EnableDelayedExpansion
 
 REM Parse SM argument
 set SM_ARG=%1
 if "%SM_ARG%"=="" (
-    set SM_ARCH=80;86;89;90;100
-    set SM_DESC=all (80, 86, 89, 90, 100)
+    set SM_ARCH=80;86;89;90;100;120
+    set SM_DESC=all (80, 86, 89, 90, 100, 120)
 ) else (
     set SM_ARCH=%SM_ARG%
     set SM_DESC=%SM_ARG%
