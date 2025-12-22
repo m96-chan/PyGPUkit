@@ -91,9 +91,7 @@ class DecodeBatch(DecodeStrategy):
             Hidden states [seq_len, hidden_size].
         """
         # Use legacy batch decode which handles bfloat16 RoPE correctly
-        return self.model._decode_step_fixed_cache_batch(
-            token_ids, start_position, context_len
-        )
+        return self.model._decode_step_fixed_cache_batch(token_ids, start_position, context_len)
 
     def init_graph(self, max_seq_len: int = 512) -> None:
         """Initialize CUDA Graph for batch decode.

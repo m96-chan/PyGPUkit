@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "../ops/ops.cuh"
+#include "../ops/audio/audio.hpp"
 #include "../jit/cublaslt_loader.hpp"
 
 namespace py = pybind11;
@@ -564,6 +565,42 @@ void init_ops_bindings(py::module_& m) {
     m.def("set_sampling_seed", &ops::set_sampling_seed,
           py::arg("seed"),
           "Set random seed for reproducible GPU sampling.");
+
+    // ========================================================================
+    // Audio Processing Operations (#96)
+    // ========================================================================
+
+    m.def("audio_pcm_to_float32", &ops::audio::pcm_to_float32,
+          py::arg("input"),
+          "Convert int16 PCM samples to float32.\n"
+          "Input: GPUArray of int16 samples\n"
+          "Returns: GPUArray of float32 samples normalized to [-1.0, 1.0]");
+
+    m.def("audio_stereo_to_mono", &ops::audio::stereo_to_mono,
+          py::arg("input"),
+          "Convert stereo audio to mono by averaging channels.\n"
+          "Input: GPUArray of interleaved stereo samples [L,R,L,R,...]\n"
+          "Returns: GPUArray of mono samples");
+
+    m.def("audio_normalize_peak", &ops::audio::normalize_peak,
+          py::arg("input"),
+          "Peak normalize audio to [-1.0, 1.0] range (in-place).\n"
+          "Input: GPUArray of float32 samples (modified in-place)");
+
+    m.def("audio_normalize_rms", &ops::audio::normalize_rms,
+          py::arg("input"), py::arg("target_db") = -20.0f,
+          "RMS normalize audio to target dB level (in-place).\n"
+          "Input: GPUArray of float32 samples (modified in-place)\n"
+          "target_db: Target RMS level in dB (default -20.0)");
+
+    m.def("audio_resample", &ops::audio::resample,
+          py::arg("input"), py::arg("src_rate"), py::arg("dst_rate"),
+          "Resample audio from source to target sample rate.\n"
+          "Currently supports 48kHz -> 16kHz (3:1 decimation).\n"
+          "Input: GPUArray of float32 samples\n"
+          "src_rate: Source sample rate (e.g., 48000)\n"
+          "dst_rate: Target sample rate (e.g., 16000)\n"
+          "Returns: Resampled GPUArray");
 
     // ========================================================================
     // cuBLASLt debug functions

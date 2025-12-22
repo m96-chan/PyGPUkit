@@ -9,6 +9,7 @@ Submodules:
 - embedding: embedding_lookup*, kv_cache_*
 - sampling: sample_*, set_sampling_seed
 - tensor: concat_*, repeat_*, transpose_3d_*, reshape_copy, cast_*
+- audio: from_pcm, AudioBuffer (GPU audio processing)
 """
 
 from pygpukit.ops.basic import (
@@ -135,4 +136,9 @@ __all__ = [
     "cast_f32_to_f16",
     "cast_bf16_to_f32",
     "cast_f16_to_f32",
+    # Audio (submodule)
+    "audio",
 ]
+
+# Import audio submodule
+from pygpukit.ops import audio

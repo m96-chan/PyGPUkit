@@ -590,7 +590,9 @@ class Attention:
             out_np_dtype = np.uint16  # bfloat16 stored as uint16
         else:
             out_np_dtype = np.float32
-        attn_out = from_numpy(np.zeros((self.num_heads, seq_len, self.head_dim), dtype=out_np_dtype))
+        attn_out = from_numpy(
+            np.zeros((self.num_heads, seq_len, self.head_dim), dtype=out_np_dtype)
+        )
 
         sdpa_causal_fixed_cache(q_t, self._k_cache, self._v_cache, attn_out, context_len)
 

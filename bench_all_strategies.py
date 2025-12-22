@@ -162,8 +162,11 @@ def main():
 
         # Allocate batch buffers
         batch_buffers = DecodeBuffers.allocate(
-            model.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size,
-            max_batch_size=batch_size
+            model.config,
+            dtype=dtype,
+            use_qk_norm=use_qk_norm,
+            vocab_size=vocab_size,
+            max_batch_size=batch_size,
         )
 
         init_kv_caches(model, MAX_SEQ_LEN, dtype)
@@ -269,11 +272,14 @@ def main():
         tps_spec = total_tokens / t_spec
         accept_rate = total_accepted / total_drafted if total_drafted > 0 else 0
         results["DecodeSpeculative"] = {
-            "time": t_spec, "tps": tps_spec, "tokens": total_tokens,
-            "accept_rate": accept_rate, "iterations": iterations
+            "time": t_spec,
+            "tps": tps_spec,
+            "tokens": total_tokens,
+            "accept_rate": accept_rate,
+            "iterations": iterations,
         }
         print(f"  Tokens generated: {total_tokens}")
-        print(f"  Iterations: {iterations} (avg {total_tokens/iterations:.1f} tok/iter)")
+        print(f"  Iterations: {iterations} (avg {total_tokens / iterations:.1f} tok/iter)")
         print(f"  Accept rate: {accept_rate:.1%}")
         print(f"  Time: {t_spec:.3f}s")
         print(f"  Throughput: {tps_spec:.1f} tok/s")
@@ -338,11 +344,14 @@ def main():
         tps_jacobi = total_tokens / t_jacobi
         converge_rate = total_converged / iterations if iterations > 0 else 0
         results["DecodeJacobi"] = {
-            "time": t_jacobi, "tps": tps_jacobi, "tokens": total_tokens,
-            "converge_rate": converge_rate, "iterations": iterations
+            "time": t_jacobi,
+            "tps": tps_jacobi,
+            "tokens": total_tokens,
+            "converge_rate": converge_rate,
+            "iterations": iterations,
         }
         print(f"  Tokens generated: {total_tokens}")
-        print(f"  Iterations: {iterations} (avg {total_tokens/iterations:.1f} tok/iter)")
+        print(f"  Iterations: {iterations} (avg {total_tokens / iterations:.1f} tok/iter)")
         print(f"  Convergence rate: {converge_rate:.1%}")
         print(f"  Time: {t_jacobi:.3f}s")
         print(f"  Throughput: {tps_jacobi:.1f} tok/s")
@@ -366,7 +375,9 @@ def main():
             print(f"{name:<25} {'SKIPPED':<10}")
         else:
             speedup = data["tps"] / baseline_tps
-            print(f"{name:<25} {data['tokens']:<10} {data['time']:<12.3f} {data['tps']:<10.1f} {speedup:<10.2f}x")
+            print(
+                f"{name:<25} {data['tokens']:<10} {data['time']:<12.3f} {data['tps']:<10.1f} {speedup:<10.2f}x"
+            )
 
     print()
     print("Notes:")

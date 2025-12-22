@@ -7,6 +7,8 @@ model_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ER
 tokenizer_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit.core import from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -15,7 +17,6 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis, sample_token
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
 
 MAX_SEQ_LEN = 512
@@ -98,7 +99,7 @@ def main():
         position += 1
         context_len += 1
 
-    print(f"Sequential tokens: {sequential_tokens[:BATCH_SIZE+1]}")
+    print(f"Sequential tokens: {sequential_tokens[: BATCH_SIZE + 1]}")
     print(f"Sequential hidden shapes: {[h.shape for h in sequential_hiddens]}")
 
     # =========================================================================
@@ -135,7 +136,7 @@ def main():
     all_pass = True
     for i in range(BATCH_SIZE):
         seq_h = sequential_hiddens[i]
-        batch_h = batch_hidden_np[i:i+1]  # [1, hidden_size]
+        batch_h = batch_hidden_np[i : i + 1]  # [1, hidden_size]
 
         # Compare
         diff = np.abs(seq_h - batch_h)
@@ -147,7 +148,9 @@ def main():
         if status == "FAIL":
             all_pass = False
 
-        print(f"  Token {i}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, rel_error={rel_error:.6f} [{status}]")
+        print(
+            f"  Token {i}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, rel_error={rel_error:.6f} [{status}]"
+        )
 
     print("\n" + "=" * 70)
     if all_pass:

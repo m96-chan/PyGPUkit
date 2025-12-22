@@ -13,6 +13,9 @@ MODEL_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ER
 TOKENIZER_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_ms
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -21,9 +24,7 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_ms
 
 MAX_SEQ_LEN = 512
 GEN_TOKENS = 32
@@ -50,8 +51,14 @@ def generate_sequential_greedy(model, first_token, prefill_len, kv_backup, num_t
 
 
 def generate_jacobi(
-    model, first_token, prefill_len, kv_backup, num_tokens,
-    n_tokens=8, max_iter=3, init_strategy="repeat"
+    model,
+    first_token,
+    prefill_len,
+    kv_backup,
+    num_tokens,
+    n_tokens=8,
+    max_iter=3,
+    init_strategy="repeat",
 ):
     """Generate tokens using Jacobi decoding."""
     model.restore_kv_cache(kv_backup)
@@ -72,7 +79,9 @@ def generate_jacobi(
             break
 
         accepted, new_pos, stats = model.decode_step_jacobi(
-            tokens[-1], position, context_len,
+            tokens[-1],
+            position,
+            context_len,
             n_tokens=current_n,
             max_iter=max_iter,
             init_strategy=init_strategy,
@@ -153,9 +162,7 @@ def main():
     print(f"\n--- Test 1: Sequential Greedy ({GEN_TOKENS} tokens) ---")
 
     start_event.record()
-    seq_tokens = generate_sequential_greedy(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS
-    )
+    seq_tokens = generate_sequential_greedy(model, first_token, prefill_len, kv_backup, GEN_TOKENS)
     stop_event.record()
     stop_event.synchronize()
 
@@ -169,13 +176,19 @@ def main():
     # =========================================================================
     # Test 2: Jacobi with init_strategy="greedy" (should match exactly)
     # =========================================================================
-    print(f"\n--- Test 2: Jacobi (n=8, iter=3, init=greedy) ---")
+    print("\n--- Test 2: Jacobi (n=8, iter=3, init=greedy) ---")
     print("Expected: 100% match (greedy init = sequential)")
 
     start_event.record()
     jacobi_greedy_tokens, avg_iter, conv_rate = generate_jacobi(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        n_tokens=8, max_iter=3, init_strategy="greedy"
+        model,
+        first_token,
+        prefill_len,
+        kv_backup,
+        GEN_TOKENS,
+        n_tokens=8,
+        max_iter=3,
+        init_strategy="greedy",
     )
     stop_event.record()
     stop_event.synchronize()
@@ -192,12 +205,18 @@ def main():
     # =========================================================================
     # Test 3: Jacobi with init_strategy="repeat"
     # =========================================================================
-    print(f"\n--- Test 3: Jacobi (n=8, iter=3, init=repeat) ---")
+    print("\n--- Test 3: Jacobi (n=8, iter=3, init=repeat) ---")
 
     start_event.record()
     jacobi_repeat_tokens, avg_iter_r, conv_rate_r = generate_jacobi(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        n_tokens=8, max_iter=3, init_strategy="repeat"
+        model,
+        first_token,
+        prefill_len,
+        kv_backup,
+        GEN_TOKENS,
+        n_tokens=8,
+        max_iter=3,
+        init_strategy="repeat",
     )
     stop_event.record()
     stop_event.synchronize()
@@ -214,12 +233,18 @@ def main():
     # =========================================================================
     # Test 4: Jacobi with init_strategy="ngram"
     # =========================================================================
-    print(f"\n--- Test 4: Jacobi (n=8, iter=3, init=ngram) ---")
+    print("\n--- Test 4: Jacobi (n=8, iter=3, init=ngram) ---")
 
     start_event.record()
     jacobi_ngram_tokens, avg_iter_n, conv_rate_n = generate_jacobi(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        n_tokens=8, max_iter=3, init_strategy="ngram"
+        model,
+        first_token,
+        prefill_len,
+        kv_backup,
+        GEN_TOKENS,
+        n_tokens=8,
+        max_iter=3,
+        init_strategy="ngram",
     )
     stop_event.record()
     stop_event.synchronize()
@@ -236,17 +261,21 @@ def main():
     # =========================================================================
     # Test 5: KV Cache Integrity
     # =========================================================================
-    print(f"\n--- Test 5: KV Cache Integrity ---")
+    print("\n--- Test 5: KV Cache Integrity ---")
 
     # Run Jacobi, then sequential - should produce same output
     generate_jacobi(
-        model, first_token, prefill_len, kv_backup, 10,
-        n_tokens=8, max_iter=3, init_strategy="repeat"
+        model,
+        first_token,
+        prefill_len,
+        kv_backup,
+        10,
+        n_tokens=8,
+        max_iter=3,
+        init_strategy="repeat",
     )
 
-    seq_after = generate_sequential_greedy(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS
-    )
+    seq_after = generate_sequential_greedy(model, first_token, prefill_len, kv_backup, GEN_TOKENS)
     kv_integrity = seq_after == seq_tokens
     print(f"KV integrity: {'PASS' if kv_integrity else 'FAIL'}")
 
@@ -286,9 +315,15 @@ def main():
     print(f"\n{'Method':<30} {'Time (ms)':<12} {'Avg Iter':<10} {'Match'}")
     print("-" * 62)
     print(f"{'Sequential (baseline)':<30} {seq_time:<12.1f} {'N/A':<10} {'N/A'}")
-    print(f"{'Jacobi (init=greedy)':<30} {jacobi_greedy_time:<12.1f} {avg_iter:<10.2f} {'YES' if greedy_match else 'NO'}")
-    print(f"{'Jacobi (init=repeat)':<30} {jacobi_repeat_time:<12.1f} {avg_iter_r:<10.2f} {'YES' if repeat_match else 'NO'}")
-    print(f"{'Jacobi (init=ngram)':<30} {jacobi_ngram_time:<12.1f} {avg_iter_n:<10.2f} {'YES' if ngram_match else 'NO'}")
+    print(
+        f"{'Jacobi (init=greedy)':<30} {jacobi_greedy_time:<12.1f} {avg_iter:<10.2f} {'YES' if greedy_match else 'NO'}"
+    )
+    print(
+        f"{'Jacobi (init=repeat)':<30} {jacobi_repeat_time:<12.1f} {avg_iter_r:<10.2f} {'YES' if repeat_match else 'NO'}"
+    )
+    print(
+        f"{'Jacobi (init=ngram)':<30} {jacobi_ngram_time:<12.1f} {avg_iter_n:<10.2f} {'YES' if ngram_match else 'NO'}"
+    )
 
     return all_pass
 

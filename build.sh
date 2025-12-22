@@ -3,9 +3,9 @@
 # Usage: ./build.sh [SM_VERSION] [CUDA_VERSION] [MODULE_SUFFIX]
 #
 # Examples:
-#   ./build.sh 86              # SM 86, CUDA 13.1 (default)
-#   ./build.sh 120             # SM 120, CUDA 13.1
-#   ./build.sh 120 12.9        # SM 120, CUDA 12.9
+#   ./build.sh 120             # SM 120, CUDA 12.9 (default)
+#   ./build.sh 86              # SM 86, CUDA 12.9
+#   ./build.sh 120 13.1        # SM 120, CUDA 13.1
 #   ./build.sh 86 12.4         # SM 86, CUDA 12.4
 #   ./build.sh 120 12.9 _cu129 # SM 120, CUDA 12.9, module suffix _cu129
 #
@@ -13,8 +13,8 @@
 # Supported CUDA versions: 12.4, 12.9, 13.1
 # Module suffix: _cu129, _cu131, or empty for default name
 
-SM_VERSION=${1:-86}
-CUDA_VERSION=${2:-13.1}
+SM_VERSION=${1:-120}
+CUDA_VERSION=${2:-12.9}
 MODULE_SUFFIX=${3:-}
 
 echo "=== PyGPUkit Build (Git Bash) ==="
