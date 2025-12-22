@@ -211,18 +211,53 @@ jobs:
 
       - name: Build wheel (skip native build, use prebuilt)
         run: |
-          # Create a minimal wheel with just Python code and prebuilt extensions
+          # Create a minimal wheel with just Python code
           python -m build --wheel
         env:
           # Skip native build since we have prebuilt modules
           PYGPUKIT_SKIP_NATIVE_BUILD: "1"
           CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
 
+      - name: Inject prebuilt native modules into wheel
+        run: |
+          # scikit-build-core doesn't include prebuilt .so files, so we inject them manually
+          cd dist
+          WHEEL=$(ls *.whl)
+          echo "Injecting native modules into $WHEEL"
+
+          # Unzip wheel
+          unzip -q "$WHEEL" -d wheel-contents
+
+          # Copy prebuilt native modules
+          cp ../src/pygpukit/_pygpukit_native*.so wheel-contents/pygpukit/ || true
+          cp ../src/pygpukit/_pygpukit_rust*.so wheel-contents/pygpukit/ || true
+
+          # Show what we're including
+          echo "=== Files in pygpukit/ ==="
+          ls -la wheel-contents/pygpukit/
+
+          # Update RECORD file (required for valid wheel)
+          cd wheel-contents
+          find pygpukit -type f | while read f; do
+            hash=$(python -c "import hashlib, base64; print('sha256=' + base64.urlsafe_b64encode(hashlib.sha256(open('$f', 'rb').read()).digest()).rstrip(b'=').decode())")
+            size=$(stat -c%s "$f")
+            echo "$f,$hash,$size"
+          done > pygpukit-0.2.11.dist-info/RECORD
+          echo "pygpukit-0.2.11.dist-info/RECORD,," >> pygpukit-0.2.11.dist-info/RECORD
+
+          # Repack wheel
+          cd ..
+          rm "$WHEEL"
+          cd wheel-contents
+          zip -rq "../$WHEEL" .
+          cd ../..
+          rm -rf dist/wheel-contents
+
       - name: Show wheel info before repair
         run: |
           ls -la dist/
           echo "=== Extension modules in wheel ==="
-          python -m zipfile -l dist/*.whl | grep -E '\.so|\.pyd'
+          python -m zipfile -l dist/*.whl | grep -E '\.so|\.pyd' || echo "No extension modules found!"
 
       - name: Repair wheel with auditwheel
         run: |
@@ -488,6 +523,60 @@ jobs:
           python -m build --wheel
         env:
           CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
+
+      - name: Inject prebuilt native modules into wheel
+        shell: pwsh
+        run: |
+          # scikit-build-core doesn't include prebuilt .pyd files, so we inject them manually
+          cd dist
+          $wheel = Get-ChildItem *.whl | Select-Object -First 1
+          Write-Host "Injecting native modules into $($wheel.Name)"
+
+          # Unzip wheel
+          Expand-Archive -Path $wheel.FullName -DestinationPath wheel-contents -Force
+
+          # Copy prebuilt native modules
+          Get-ChildItem ../src/pygpukit/_pygpukit_native*.pyd | ForEach-Object {
+            Copy-Item $_.FullName wheel-contents/pygpukit/
+            Write-Host "Copied: $($_.Name)"
+          }
+          Get-ChildItem ../src/pygpukit/_pygpukit_rust*.pyd -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName wheel-contents/pygpukit/
+            Write-Host "Copied: $($_.Name)"
+          }
+
+          # Show what we're including
+          Write-Host "=== Files in pygpukit/ ==="
+          Get-ChildItem wheel-contents/pygpukit/
+
+          # Update RECORD file (required for valid wheel)
+          $recordPath = "wheel-contents/pygpukit-0.2.11.dist-info/RECORD"
+          $newRecord = @()
+          Get-ChildItem wheel-contents/pygpukit -File | ForEach-Object {
+            $relativePath = "pygpukit/$($_.Name)"
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+            $hashB64 = [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+            $size = $_.Length
+            $newRecord += "$relativePath,sha256=$hashB64,$size"
+          }
+          # Add dist-info files
+          Get-ChildItem "wheel-contents/pygpukit-0.2.11.dist-info" -File | Where-Object { $_.Name -ne "RECORD" } | ForEach-Object {
+            $relativePath = "pygpukit-0.2.11.dist-info/$($_.Name)"
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
+            $hashB64 = [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+            $size = $_.Length
+            $newRecord += "$relativePath,sha256=$hashB64,$size"
+          }
+          $newRecord += "pygpukit-0.2.11.dist-info/RECORD,,"
+          $newRecord | Out-File -FilePath $recordPath -Encoding utf8NoBOM
+
+          # Repack wheel
+          Remove-Item $wheel.FullName
+          Compress-Archive -Path wheel-contents/* -DestinationPath "$($wheel.Name).zip"
+          Rename-Item "$($wheel.Name).zip" $wheel.Name
+          Remove-Item wheel-contents -Recurse -Force
 
       - name: Verify wheel contents
         shell: pwsh
