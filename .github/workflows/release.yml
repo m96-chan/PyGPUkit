@@ -238,12 +238,15 @@ jobs:
 
           # Update RECORD file (required for valid wheel)
           cd wheel-contents
+          # Dynamically find dist-info folder
+          DIST_INFO=$(ls -d pygpukit-*.dist-info | head -1)
+          echo "Found dist-info folder: $DIST_INFO"
           find pygpukit -type f | while read f; do
             hash=$(python -c "import hashlib, base64; print('sha256=' + base64.urlsafe_b64encode(hashlib.sha256(open('$f', 'rb').read()).digest()).rstrip(b'=').decode())")
             size=$(stat -c%s "$f")
             echo "$f,$hash,$size"
-          done > pygpukit-0.2.11.dist-info/RECORD
-          echo "pygpukit-0.2.11.dist-info/RECORD,," >> pygpukit-0.2.11.dist-info/RECORD
+          done > "$DIST_INFO/RECORD"
+          echo "$DIST_INFO/RECORD,," >> "$DIST_INFO/RECORD"
 
           # Repack wheel
           cd ..
@@ -550,7 +553,11 @@ jobs:
           Get-ChildItem wheel-contents/pygpukit/
 
           # Update RECORD file (required for valid wheel)
-          $recordPath = "wheel-contents/pygpukit-0.2.11.dist-info/RECORD"
+          # Dynamically find dist-info folder
+          $distInfo = Get-ChildItem wheel-contents -Directory -Filter "pygpukit-*.dist-info" | Select-Object -First 1
+          $distInfoName = $distInfo.Name
+          Write-Host "Found dist-info folder: $distInfoName"
+          $recordPath = "wheel-contents/$distInfoName/RECORD"
           $newRecord = @()
           Get-ChildItem wheel-contents/pygpukit -File | ForEach-Object {
             $relativePath = "pygpukit/$($_.Name)"
@@ -561,15 +568,15 @@ jobs:
             $newRecord += "$relativePath,sha256=$hashB64,$size"
           }
           # Add dist-info files
-          Get-ChildItem "wheel-contents/pygpukit-0.2.11.dist-info" -File | Where-Object { $_.Name -ne "RECORD" } | ForEach-Object {
-            $relativePath = "pygpukit-0.2.11.dist-info/$($_.Name)"
+          Get-ChildItem "wheel-contents/$distInfoName" -File | Where-Object { $_.Name -ne "RECORD" } | ForEach-Object {
+            $relativePath = "$distInfoName/$($_.Name)"
             $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
             $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
             $hashB64 = [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+', '-').Replace('/', '_')
             $size = $_.Length
             $newRecord += "$relativePath,sha256=$hashB64,$size"
           }
-          $newRecord += "pygpukit-0.2.11.dist-info/RECORD,,"
+          $newRecord += "$distInfoName/RECORD,,"
           $newRecord | Out-File -FilePath $recordPath -Encoding utf8NoBOM
 
           # Repack wheel
