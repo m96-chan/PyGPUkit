@@ -1,4 +1,14 @@
 cmake_minimum_required(VERSION 3.18)
+
+# Check if we should skip native build (prebuilt modules are used)
+if(DEFINED ENV{PYGPUKIT_SKIP_NATIVE_BUILD})
+    message(STATUS "PYGPUKIT_SKIP_NATIVE_BUILD is set - skipping native module build")
+    message(STATUS "Prebuilt native modules should be in src/pygpukit/")
+    # Create a dummy project so cmake doesn't fail
+    project(pygpukit_native_skip LANGUAGES NONE)
+    return()
+endif()
+
 project(pygpukit_native LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
