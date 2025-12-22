@@ -1,6 +1,6 @@
 """PyGPUkit - A lightweight GPU runtime for Python."""
 
-__version__ = "0.2.9"
+__version__ = "0.2.11"
 
 # LLM support (safetensors loader)
 from pygpukit import llm, ops
