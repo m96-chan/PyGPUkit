@@ -279,6 +279,7 @@ def main():
     from pygpukit.llm import (
         ChatMessage,
         DecodeM1,
+        DecodeM1Graph,
         detect_model_spec,
         format_chat_messages,
         load_model_from_safetensors,
@@ -328,28 +329,40 @@ def main():
         config, dtype=args.dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
     )
 
-    m1 = DecodeM1()
-    m1.bind(model)
-
-    # Initialize CUDA Graph if requested (not supported for bfloat16)
+    # Initialize decode strategy
     use_cuda_graph = args.cuda_graph
-    if use_cuda_graph and args.dtype == "bfloat16":
-        print("\n[WARN] CUDA Graph not supported with bfloat16 (RoPE dtype issue)")
-        print("       Falling back to standard decode path")
-        use_cuda_graph = False
+    m1_graph = None
 
     if use_cuda_graph:
+        # Use DecodeM1Graph for CUDA Graph mode
         print("\nInitializing CUDA Graph...")
-        m1.init_graph(max_seq_len=args.max_seq_len)
+        m1_graph = DecodeM1Graph()
+        m1_graph.bind(model)
+        m1_graph.init_graph(max_seq_len=args.max_seq_len)
         print(f"  CUDA Graph ready (max_seq_len={args.max_seq_len})")
-    elif config.use_rope:
+        m1 = None  # Not used in graph mode
+    else:
+        # Use DecodeM1 for non-graph mode
+        m1 = DecodeM1()
+        m1.bind(model)
+
+    if not use_cuda_graph and config.use_rope:
         # Precompute RoPE frequencies for non-CUDA-Graph path
-        cos_np, sin_np = precompute_freqs_cis(
-            config.head_dim, args.max_seq_len, config.rope_theta
-        )
-        rope_np_dtype = np.float16 if args.dtype == "float16" else np.float32
-        model._rope_cos_gpu = from_numpy(cos_np.astype(rope_np_dtype))
-        model._rope_sin_gpu = from_numpy(sin_np.astype(rope_np_dtype))
+        cos_np, sin_np = precompute_freqs_cis(config.head_dim, args.max_seq_len, config.rope_theta)
+        if args.dtype == "float16":
+            model._rope_cos_gpu = from_numpy(cos_np.astype(np.float16))
+            model._rope_sin_gpu = from_numpy(sin_np.astype(np.float16))
+        elif args.dtype == "bfloat16":
+            # Convert float32 -> bfloat16 via bit manipulation
+            cos_u32 = cos_np.view(np.uint32)
+            sin_u32 = sin_np.view(np.uint32)
+            cos_bf16 = ((cos_u32 + 0x7FFF + ((cos_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+            sin_bf16 = ((sin_u32 + 0x7FFF + ((sin_u32 >> 16) & 1)) >> 16).astype(np.uint16)
+            model._rope_cos_gpu = from_numpy(cos_bf16)
+            model._rope_sin_gpu = from_numpy(sin_bf16)
+        else:
+            model._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
+            model._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
     default_stream().synchronize()
     print("Ready!")
@@ -465,11 +478,11 @@ def main():
         Returns:
             Logits array [1, vocab_size] or [vocab_size].
         """
-        if use_cuda_graph and m1.has_graph():
-            return m1.step_graph(token_id, position, context_len)
+        if use_cuda_graph and m1_graph is not None:
+            return m1_graph.step_graph(token_id, position, context_len)
         else:
-            hidden = m1.step(token_id, position, context_len, decode_buffers)
-            return model.get_logits(hidden)
+            # m1.step() now returns logits directly [1, vocab_size]
+            return m1.step(token_id, position, context_len, decode_buffers)
 
     def generate_m1(messages: list[ChatMessage]) -> tuple[str, float, float]:
         """Generate using M=1 decode path (baseline)."""
@@ -484,12 +497,8 @@ def main():
         hidden, past_key_values = model(input_ids, use_cache=True)
         for i, block in enumerate(model.blocks):
             past_k, past_v = past_key_values[i]
-            kv_cache_prefill_gqa(
-                past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0
-            )
-            kv_cache_prefill_gqa(
-                past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0
-            )
+            kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
+            kv_cache_prefill_gqa(past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0)
         default_stream().synchronize()
         prefill_time = time.perf_counter() - t_prefill_start
 
@@ -497,9 +506,7 @@ def main():
         t_decode_start = time.perf_counter()
         logits = model.get_logits(hidden)
         last_logits = logits_to_f32(logits)[-1]
-        next_token = sample_token(
-            last_logits, args.temperature, args.top_k, args.top_p
-        )
+        next_token = sample_token(last_logits, args.temperature, args.top_k, args.top_p)
 
         generated_ids: list[int] = []
         position = len(input_ids)
@@ -513,9 +520,7 @@ def main():
                 break
             logits = decode_one_token(next_token, position, context_len)
             logits_np = logits_to_f32(logits)[-1]
-            next_token = sample_token(
-                logits_np, args.temperature, args.top_k, args.top_p
-            )
+            next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
             position += 1
             context_len += 1
             skip_count += 1
@@ -544,9 +549,7 @@ def main():
             logits_np = apply_repetition_penalty(
                 logits_to_f32(logits)[-1], generated_ids, rep_penalty
             )
-            next_token = sample_token(
-                logits_np, args.temperature, args.top_k, args.top_p
-            )
+            next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
 
             if is_end_token(next_token):
                 break
@@ -589,12 +592,8 @@ def main():
         hidden, past_key_values = model(input_ids, use_cache=True)
         for i, block in enumerate(model.blocks):
             past_k, past_v = past_key_values[i]
-            kv_cache_prefill_gqa(
-                past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0
-            )
-            kv_cache_prefill_gqa(
-                past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0
-            )
+            kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
+            kv_cache_prefill_gqa(past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0)
         default_stream().synchronize()
         prefill_time = time.perf_counter() - t_prefill_start
 
@@ -611,9 +610,7 @@ def main():
         # Get first token from prefill
         logits = model.get_logits(hidden)
         logits_np = logits_to_f32(logits)[-1]
-        next_token = sample_token(
-            logits_np, args.temperature, args.top_k, args.top_p
-        )
+        next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
 
         # Skip special tokens at start (e.g., <|im_start|>assistant\n)
         while should_skip_token(next_token, at_start, skip_count):
@@ -621,9 +618,7 @@ def main():
                 break
             logits = decode_one_token(next_token, position, context_len)
             logits_np = logits_to_f32(logits)[-1]
-            next_token = sample_token(
-                logits_np, args.temperature, args.top_k, args.top_p
-            )
+            next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
             position += 1
             context_len += 1
             skip_count += 1
@@ -664,9 +659,7 @@ def main():
                     logits_np = apply_repetition_penalty(
                         logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
-                    next_tok = sample_token(
-                        logits_np, args.temperature, args.top_k, args.top_p
-                    )
+                    next_tok = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
 
                     if is_end_token(next_tok):
                         next_token = next_tok
@@ -689,9 +682,7 @@ def main():
                     logits_np = apply_repetition_penalty(
                         logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
-                    next_token = sample_token(
-                        logits_np, args.temperature, args.top_k, args.top_p
-                    )
+                    next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
                 else:
                     break
 
@@ -716,9 +707,7 @@ def main():
                     logits_np = apply_repetition_penalty(
                         logits_to_f32(logits)[-1], generated_ids, rep_penalty
                     )
-                    next_token = sample_token(
-                        logits_np, args.temperature, args.top_k, args.top_p
-                    )
+                    next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
 
                 break  # Done with remainder
 

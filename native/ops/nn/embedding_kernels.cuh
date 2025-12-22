@@ -70,7 +70,8 @@ __global__ void embedding_lookup_f16_kernel_ptr(
     int hidden_size,
     const int* __restrict__ token_id_ptr
 ) {
-    int token_id = *token_id_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int token_id = *reinterpret_cast<volatile const int*>(token_id_ptr);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < hidden_size) {
         out[idx] = embed_matrix[token_id * hidden_size + idx];
@@ -83,7 +84,8 @@ __global__ void embedding_lookup_bf16_kernel_ptr(
     int hidden_size,
     const int* __restrict__ token_id_ptr
 ) {
-    int token_id = *token_id_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int token_id = *reinterpret_cast<volatile const int*>(token_id_ptr);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < hidden_size) {
         out[idx] = embed_matrix[token_id * hidden_size + idx];
@@ -96,7 +98,8 @@ __global__ void embedding_lookup_f32_kernel_ptr(
     int hidden_size,
     const int* __restrict__ token_id_ptr
 ) {
-    int token_id = *token_id_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int token_id = *reinterpret_cast<volatile const int*>(token_id_ptr);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < hidden_size) {
         out[idx] = embed_matrix[token_id * hidden_size + idx];
@@ -174,7 +177,8 @@ __global__ void slice_rows_range_ptr_f16_kernel(
     int count,
     int row_dim
 ) {
-    int start_pos = *start_pos_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int start_pos = *reinterpret_cast<volatile const int*>(start_pos_ptr);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_elements = count * row_dim;
     if (idx >= total_elements) return;
@@ -192,7 +196,8 @@ __global__ void slice_rows_range_ptr_bf16_kernel(
     int count,
     int row_dim
 ) {
-    int start_pos = *start_pos_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int start_pos = *reinterpret_cast<volatile const int*>(start_pos_ptr);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_elements = count * row_dim;
     if (idx >= total_elements) return;
@@ -210,7 +215,8 @@ __global__ void slice_rows_range_ptr_f32_kernel(
     int count,
     int row_dim
 ) {
-    int start_pos = *start_pos_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int start_pos = *reinterpret_cast<volatile const int*>(start_pos_ptr);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_elements = count * row_dim;
     if (idx >= total_elements) return;

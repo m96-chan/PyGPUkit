@@ -387,8 +387,8 @@ __global__ void sdpa_causal_f16_kernel_ptr(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
-    // Read actual context_len from GPU buffer
-    int kv_len = *context_len_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int kv_len = *reinterpret_cast<volatile const int*>(context_len_ptr);
     int causal_offset = kv_len - q_len;
 
     // Use kv_stride for pointer calculations (cache may be larger than context_len)
@@ -499,8 +499,8 @@ __global__ void sdpa_causal_bf16_kernel_ptr(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
-    // Read actual context_len from GPU buffer
-    int kv_len = *context_len_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int kv_len = *reinterpret_cast<volatile const int*>(context_len_ptr);
     int causal_offset = kv_len - q_len;
 
     const __nv_bfloat16* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;
@@ -609,8 +609,8 @@ __global__ void sdpa_causal_f32_kernel_ptr(
 
     if (head_idx >= n_heads || q_pos >= q_len) return;
 
-    // Read actual context_len from GPU buffer
-    int kv_len = *context_len_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int kv_len = *reinterpret_cast<volatile const int*>(context_len_ptr);
     int causal_offset = kv_len - q_len;
 
     const float* Q_head = Q + head_idx * q_len * head_dim + q_pos * head_dim;

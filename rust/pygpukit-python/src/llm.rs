@@ -156,6 +156,15 @@ impl PySafeTensorsFile {
         Ok(tensor.data.to_vec())
     }
 
+    /// Get tensor data pointer (for zero-copy GPU transfer)
+    /// Returns (ptr, size_bytes) where ptr is the raw mmap address
+    fn tensor_data_ptr(&self, name: &str) -> PyResult<(usize, usize)> {
+        let tensor = self.inner.tensor(name).map_err(to_py_err)?;
+        let ptr = tensor.data.as_ptr() as usize;
+        let size = tensor.data.len();
+        Ok((ptr, size))
+    }
+
     /// Get tensor as numpy array (only for Float32)
     fn tensor_as_f32(&self, py: Python<'_>, name: &str) -> PyResult<Py<numpy::PyArray1<f32>>> {
         let tensor = self.inner.tensor(name).map_err(to_py_err)?;

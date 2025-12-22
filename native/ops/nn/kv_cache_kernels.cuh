@@ -263,7 +263,8 @@ __global__ void kv_cache_update_gqa_f16_kernel_ptr(
     int max_seq_len,
     const int* __restrict__ position_ptr
 ) {
-    int position = *position_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int position = *reinterpret_cast<volatile const int*>(position_ptr);
     int total_elements = num_heads * head_dim;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elements) {
@@ -286,7 +287,8 @@ __global__ void kv_cache_update_gqa_bf16_kernel_ptr(
     int max_seq_len,
     const int* __restrict__ position_ptr
 ) {
-    int position = *position_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int position = *reinterpret_cast<volatile const int*>(position_ptr);
     int total_elements = num_heads * head_dim;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elements) {
@@ -309,7 +311,8 @@ __global__ void kv_cache_update_gqa_f32_kernel_ptr(
     int max_seq_len,
     const int* __restrict__ position_ptr
 ) {
-    int position = *position_ptr;
+    // Use volatile read to ensure fresh value during CUDA Graph replay
+    int position = *reinterpret_cast<volatile const int*>(position_ptr);
     int total_elements = num_heads * head_dim;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elements) {
