@@ -306,6 +306,242 @@ GPUArray whisper_mel_spectrogram(const GPUArray& input,
                                   int hop_length = 160,
                                   int n_mels = 80);
 
+// ============================================================================
+// Inverse STFT
+// ============================================================================
+
+/**
+ * Compute Inverse Short-Time Fourier Transform (ISTFT).
+ * @param stft_output STFT output [n_frames, n_fft/2+1, 2] (real, imag)
+ * @param hop_length Hop size (default 160)
+ * @param win_length Window length (default n_fft)
+ * @param center Whether input was padded (default true)
+ * @param length Expected output length (optional, -1 for auto)
+ * @return Reconstructed audio signal
+ */
+GPUArray istft(const GPUArray& stft_output, int hop_length = 160,
+               int win_length = -1, bool center = true, int length = -1);
+
+// ============================================================================
+// Griffin-Lim Algorithm
+// ============================================================================
+
+/**
+ * Griffin-Lim phase reconstruction algorithm.
+ * Reconstructs audio from magnitude spectrogram.
+ * @param magnitude Magnitude spectrogram [n_frames, n_fft/2+1]
+ * @param n_iter Number of iterations (default 32)
+ * @param hop_length Hop size (default 160)
+ * @param win_length Window length (default n_fft * 2 - 2)
+ * @return Reconstructed audio signal
+ */
+GPUArray griffin_lim(const GPUArray& magnitude, int n_iter = 32,
+                     int hop_length = 160, int win_length = -1);
+
+// ============================================================================
+// Pitch Detection
+// ============================================================================
+
+/**
+ * Compute autocorrelation of signal.
+ * @param input Input audio samples
+ * @param max_lag Maximum lag to compute
+ * @return Autocorrelation values [max_lag]
+ */
+GPUArray autocorrelation(const GPUArray& input, int max_lag);
+
+/**
+ * Detect pitch using YIN algorithm.
+ * @param input Input audio samples (single frame)
+ * @param sample_rate Sample rate in Hz
+ * @param f_min Minimum frequency (default 50 Hz)
+ * @param f_max Maximum frequency (default 2000 Hz)
+ * @param threshold YIN threshold (default 0.1)
+ * @return Detected pitch in Hz (0 if unvoiced)
+ */
+float detect_pitch_yin(const GPUArray& input, int sample_rate,
+                       float f_min = 50.0f, float f_max = 2000.0f,
+                       float threshold = 0.1f);
+
+/**
+ * Detect pitch for multiple frames using YIN algorithm.
+ * @param input Input audio samples
+ * @param sample_rate Sample rate in Hz
+ * @param frame_size Frame size in samples
+ * @param hop_size Hop size in samples
+ * @param f_min Minimum frequency (default 50 Hz)
+ * @param f_max Maximum frequency (default 2000 Hz)
+ * @param threshold YIN threshold (default 0.1)
+ * @return Detected pitches [n_frames] in Hz (0 if unvoiced)
+ */
+GPUArray detect_pitch_yin_frames(const GPUArray& input, int sample_rate,
+                                  int frame_size, int hop_size,
+                                  float f_min = 50.0f, float f_max = 2000.0f,
+                                  float threshold = 0.1f);
+
+// ============================================================================
+// Spectral Features
+// ============================================================================
+
+/**
+ * Compute spectral centroid (center of mass of spectrum).
+ * @param spectrum Magnitude/power spectrogram [n_frames, n_freq]
+ * @param sample_rate Sample rate in Hz
+ * @return Spectral centroid per frame [n_frames] in Hz
+ */
+GPUArray spectral_centroid(const GPUArray& spectrum, int sample_rate);
+
+/**
+ * Compute spectral bandwidth.
+ * @param spectrum Magnitude/power spectrogram [n_frames, n_freq]
+ * @param centroids Pre-computed centroids [n_frames]
+ * @param sample_rate Sample rate in Hz
+ * @param p Order of the bandwidth norm (default 2)
+ * @return Spectral bandwidth per frame [n_frames] in Hz
+ */
+GPUArray spectral_bandwidth(const GPUArray& spectrum,
+                             const GPUArray& centroids,
+                             int sample_rate, int p = 2);
+
+/**
+ * Compute spectral rolloff point.
+ * @param spectrum Magnitude/power spectrogram [n_frames, n_freq]
+ * @param sample_rate Sample rate in Hz
+ * @param roll_percent Rolloff percentage (default 0.85 = 85%)
+ * @return Rolloff frequency per frame [n_frames] in Hz
+ */
+GPUArray spectral_rolloff(const GPUArray& spectrum, int sample_rate,
+                           float roll_percent = 0.85f);
+
+/**
+ * Compute spectral flatness (Wiener entropy).
+ * @param spectrum Magnitude/power spectrogram [n_frames, n_freq]
+ * @return Flatness per frame [n_frames] in [0, 1]
+ */
+GPUArray spectral_flatness(const GPUArray& spectrum);
+
+/**
+ * Compute spectral contrast.
+ * @param spectrum Magnitude/power spectrogram [n_frames, n_freq]
+ * @param n_bands Number of frequency bands (default 6)
+ * @param alpha Percentile for peak/valley (default 0.02 = 2%)
+ * @return Spectral contrast [n_frames, n_bands]
+ */
+GPUArray spectral_contrast(const GPUArray& spectrum, int n_bands = 6,
+                            float alpha = 0.02f);
+
+/**
+ * Compute zero-crossing rate.
+ * @param input Input audio samples
+ * @param frame_size Frame size in samples
+ * @param hop_size Hop size in samples
+ * @return ZCR per frame [n_frames] in [0, 1]
+ */
+GPUArray zero_crossing_rate(const GPUArray& input, int frame_size, int hop_size);
+
+// ============================================================================
+// CQT (Constant-Q Transform)
+// ============================================================================
+
+/**
+ * Compute Constant-Q Transform.
+ * @param input Input audio samples
+ * @param sample_rate Sample rate in Hz
+ * @param hop_length Hop size (default 512)
+ * @param f_min Minimum frequency (default 32.7 Hz, C1)
+ * @param n_bins Number of CQT bins (default 84, 7 octaves)
+ * @param bins_per_octave Bins per octave (default 12)
+ * @return Complex CQT output [n_frames, n_bins, 2]
+ */
+GPUArray cqt(const GPUArray& input, int sample_rate, int hop_length = 512,
+             float f_min = 32.7f, int n_bins = 84, int bins_per_octave = 12);
+
+/**
+ * Compute CQT magnitude spectrogram.
+ * @param cqt_output CQT output [n_frames, n_bins, 2]
+ * @return Magnitude spectrogram [n_frames, n_bins]
+ */
+GPUArray cqt_magnitude(const GPUArray& cqt_output);
+
+// ============================================================================
+// Chromagram
+// ============================================================================
+
+/**
+ * Compute chromagram from STFT.
+ * @param spectrum Power/magnitude spectrogram [n_frames, n_freq]
+ * @param sample_rate Sample rate in Hz
+ * @param n_chroma Number of chroma bins (default 12)
+ * @param tuning Tuning deviation from A440 in cents (default 0)
+ * @return Chromagram [n_frames, n_chroma]
+ */
+GPUArray chroma_stft(const GPUArray& spectrum, int sample_rate,
+                     int n_chroma = 12, float tuning = 0.0f);
+
+/**
+ * Compute chromagram from CQT.
+ * @param cqt_mag CQT magnitude [n_frames, n_bins]
+ * @param bins_per_octave Bins per octave (must match CQT, default 12)
+ * @return Chromagram [n_frames, 12]
+ */
+GPUArray chroma_cqt(const GPUArray& cqt_mag, int bins_per_octave = 12);
+
+// ============================================================================
+// HPSS (Harmonic-Percussive Source Separation)
+// ============================================================================
+
+/**
+ * Harmonic-percussive source separation.
+ * @param stft_magnitude STFT magnitude [n_frames, n_freq]
+ * @param kernel_size Median filter kernel size (default 31)
+ * @param power Mask power for softness (default 2.0)
+ * @param margin Margin for separation (default 1.0)
+ * @return Pair of (harmonic_magnitude, percussive_magnitude)
+ */
+std::pair<GPUArray, GPUArray> hpss(const GPUArray& stft_magnitude,
+                                    int kernel_size = 31,
+                                    float power = 2.0f,
+                                    float margin = 1.0f);
+
+/**
+ * Get harmonic component only from HPSS.
+ */
+GPUArray harmonic(const GPUArray& stft_magnitude, int kernel_size = 31,
+                  float power = 2.0f, float margin = 1.0f);
+
+/**
+ * Get percussive component only from HPSS.
+ */
+GPUArray percussive(const GPUArray& stft_magnitude, int kernel_size = 31,
+                    float power = 2.0f, float margin = 1.0f);
+
+// ============================================================================
+// Time Stretch / Pitch Shift (Phase Vocoder)
+// ============================================================================
+
+/**
+ * Time-stretch audio using phase vocoder.
+ * @param input Input audio samples
+ * @param rate Time stretch rate (>1 = slower, <1 = faster)
+ * @param n_fft FFT size (default 2048)
+ * @param hop_length Hop size (default n_fft/4)
+ * @return Time-stretched audio
+ */
+GPUArray time_stretch(const GPUArray& input, float rate,
+                      int n_fft = 2048, int hop_length = -1);
+
+/**
+ * Pitch-shift audio.
+ * @param input Input audio samples
+ * @param sample_rate Sample rate in Hz
+ * @param n_steps Number of semitones to shift
+ * @param n_fft FFT size (default 2048)
+ * @param hop_length Hop size (default n_fft/4)
+ * @return Pitch-shifted audio
+ */
+GPUArray pitch_shift(const GPUArray& input, int sample_rate, float n_steps,
+                     int n_fft = 2048, int hop_length = -1);
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

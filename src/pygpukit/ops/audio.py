@@ -1137,6 +1137,637 @@ def log_mel_spectrogram(
     return log_mel(mel, eps)
 
 
+# =============================================================================
+# Inverse STFT and Phase Reconstruction
+# =============================================================================
+
+
+def istft(
+    stft_output: GPUArray,
+    hop_length: int = 160,
+    win_length: int = -1,
+    center: bool = True,
+    length: int = -1,
+) -> GPUArray:
+    """Compute Inverse Short-Time Fourier Transform (ISTFT).
+
+    Reconstructs time-domain signal from complex STFT representation
+    using overlap-add with window sum normalization.
+
+    Args:
+        stft_output: Complex STFT [n_frames, n_freq, 2] (real, imag)
+        hop_length: Hop size (default 160)
+        win_length: Window length (default: (n_freq-1)*2)
+        center: Whether input was centered (default True)
+        length: Output length (-1 for automatic)
+
+    Returns:
+        Time-domain signal [n_samples]
+
+    Example:
+        >>> stft_out = stft(buf, n_fft=512, hop_length=160)
+        >>> reconstructed = istft(stft_out, hop_length=160)
+    """
+    native = _get_native()
+    result = native.audio_istft(stft_output._get_native(), hop_length, win_length, center, length)
+    return GPUArray._wrap_native(result)
+
+
+def griffin_lim(
+    magnitude: GPUArray,
+    n_iter: int = 32,
+    hop_length: int = 160,
+    win_length: int = -1,
+) -> GPUArray:
+    """Griffin-Lim algorithm for phase reconstruction.
+
+    Reconstructs time-domain signal from magnitude spectrogram only,
+    iteratively estimating phase using STFT/ISTFT consistency.
+
+    Args:
+        magnitude: Magnitude spectrogram [n_frames, n_freq]
+        n_iter: Number of iterations (default 32)
+        hop_length: Hop size (default 160)
+        win_length: Window length (default: (n_freq-1)*2)
+
+    Returns:
+        Reconstructed time-domain signal [n_samples]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> reconstructed = griffin_lim(mag, n_iter=32)
+    """
+    native = _get_native()
+    result = native.audio_griffin_lim(magnitude._get_native(), n_iter, hop_length, win_length)
+    return GPUArray._wrap_native(result)
+
+
+# =============================================================================
+# Pitch Detection
+# =============================================================================
+
+
+def autocorrelation(audio: AudioBuffer | GPUArray, max_lag: int) -> GPUArray:
+    """Compute autocorrelation function.
+
+    Args:
+        audio: Input audio (float32)
+        max_lag: Maximum lag in samples
+
+    Returns:
+        Autocorrelation values [max_lag]
+
+    Example:
+        >>> acf = autocorrelation(buf, max_lag=400)  # 25ms @ 16kHz
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_autocorrelation(data._get_native(), max_lag)
+    return GPUArray._wrap_native(result)
+
+
+def detect_pitch_yin(
+    audio: AudioBuffer | GPUArray,
+    sample_rate: int = 16000,
+    f_min: float = 50.0,
+    f_max: float = 500.0,
+    threshold: float = 0.1,
+) -> float:
+    """Detect pitch using YIN algorithm.
+
+    The YIN algorithm detects the fundamental frequency of a quasi-periodic
+    signal using cumulative mean normalized difference function.
+
+    Args:
+        audio: Input audio frame (float32)
+        sample_rate: Sample rate in Hz
+        f_min: Minimum frequency to detect (default 50 Hz)
+        f_max: Maximum frequency to detect (default 500 Hz)
+        threshold: YIN threshold (default 0.1)
+
+    Returns:
+        Detected pitch in Hz (0.0 if unvoiced)
+
+    Example:
+        >>> pitch = detect_pitch_yin(audio_frame, sample_rate=16000)
+        >>> if pitch > 0:
+        ...     print(f"Pitch: {pitch:.1f} Hz")
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    return native.audio_detect_pitch_yin(data._get_native(), sample_rate, f_min, f_max, threshold)
+
+
+def detect_pitch_yin_frames(
+    audio: AudioBuffer | GPUArray,
+    sample_rate: int = 16000,
+    frame_size: int = 1024,
+    hop_size: int = 256,
+    f_min: float = 50.0,
+    f_max: float = 500.0,
+    threshold: float = 0.1,
+) -> GPUArray:
+    """Detect pitch for each frame using YIN algorithm.
+
+    Args:
+        audio: Input audio (float32)
+        sample_rate: Sample rate in Hz
+        frame_size: Frame size in samples (default 1024)
+        hop_size: Hop size in samples (default 256)
+        f_min: Minimum frequency to detect (default 50 Hz)
+        f_max: Maximum frequency to detect (default 500 Hz)
+        threshold: YIN threshold (default 0.1)
+
+    Returns:
+        Pitch values for each frame [n_frames]
+
+    Example:
+        >>> pitches = detect_pitch_yin_frames(buf, sample_rate=16000)
+        >>> voiced = pitches.to_numpy() > 0
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_detect_pitch_yin_frames(
+        data._get_native(), sample_rate, frame_size, hop_size, f_min, f_max, threshold
+    )
+    return GPUArray._wrap_native(result)
+
+
+# =============================================================================
+# Spectral Features
+# =============================================================================
+
+
+def spectral_centroid(
+    spectrum: GPUArray,
+    sample_rate: int = 16000,
+) -> GPUArray:
+    """Compute spectral centroid for each frame.
+
+    The spectral centroid indicates the "center of mass" of the spectrum.
+
+    Args:
+        spectrum: Magnitude or power spectrum [n_frames, n_freq]
+        sample_rate: Sample rate in Hz
+
+    Returns:
+        Spectral centroid in Hz for each frame [n_frames]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> centroid = spectral_centroid(mag, sample_rate=16000)
+    """
+    native = _get_native()
+    result = native.audio_spectral_centroid(spectrum._get_native(), sample_rate)
+    return GPUArray._wrap_native(result)
+
+
+def spectral_bandwidth(
+    spectrum: GPUArray,
+    centroids: GPUArray,
+    sample_rate: int = 16000,
+    p: int = 2,
+) -> GPUArray:
+    """Compute spectral bandwidth for each frame.
+
+    Spectral bandwidth is the weighted standard deviation of frequencies
+    around the spectral centroid.
+
+    Args:
+        spectrum: Magnitude or power spectrum [n_frames, n_freq]
+        centroids: Pre-computed spectral centroids [n_frames]
+        sample_rate: Sample rate in Hz
+        p: Order for bandwidth computation (default 2)
+
+    Returns:
+        Spectral bandwidth in Hz for each frame [n_frames]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> centroid = spectral_centroid(mag, sample_rate=16000)
+        >>> bandwidth = spectral_bandwidth(mag, centroid, sample_rate=16000)
+    """
+    native = _get_native()
+    result = native.audio_spectral_bandwidth(
+        spectrum._get_native(), centroids._get_native(), sample_rate, p
+    )
+    return GPUArray._wrap_native(result)
+
+
+def spectral_rolloff(
+    spectrum: GPUArray,
+    sample_rate: int = 16000,
+    roll_percent: float = 0.85,
+) -> GPUArray:
+    """Compute spectral rolloff for each frame.
+
+    The rolloff frequency is the frequency below which roll_percent of
+    the total spectral energy is contained.
+
+    Args:
+        spectrum: Magnitude or power spectrum [n_frames, n_freq]
+        sample_rate: Sample rate in Hz
+        roll_percent: Percentage of energy (default 0.85)
+
+    Returns:
+        Rolloff frequency in Hz for each frame [n_frames]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> rolloff = spectral_rolloff(mag, sample_rate=16000, roll_percent=0.85)
+    """
+    native = _get_native()
+    result = native.audio_spectral_rolloff(spectrum._get_native(), sample_rate, roll_percent)
+    return GPUArray._wrap_native(result)
+
+
+def spectral_flatness(spectrum: GPUArray) -> GPUArray:
+    """Compute spectral flatness for each frame.
+
+    Spectral flatness measures how tone-like vs noise-like a sound is.
+    Values close to 1 indicate noise, values close to 0 indicate tonal content.
+
+    Computed as: geometric_mean / arithmetic_mean
+
+    Args:
+        spectrum: Magnitude or power spectrum [n_frames, n_freq]
+
+    Returns:
+        Spectral flatness for each frame [n_frames] (0 to 1)
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> flatness = spectral_flatness(mag)
+    """
+    native = _get_native()
+    result = native.audio_spectral_flatness(spectrum._get_native())
+    return GPUArray._wrap_native(result)
+
+
+def spectral_contrast(
+    spectrum: GPUArray,
+    n_bands: int = 6,
+    alpha: float = 0.2,
+) -> GPUArray:
+    """Compute spectral contrast for each frame.
+
+    Spectral contrast measures the difference between peaks and valleys
+    in the spectrum, divided into frequency bands.
+
+    Args:
+        spectrum: Magnitude or power spectrum [n_frames, n_freq]
+        n_bands: Number of frequency bands (default 6)
+        alpha: Percentile for peak/valley estimation (default 0.2)
+
+    Returns:
+        Spectral contrast [n_frames, n_bands]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> contrast = spectral_contrast(mag, n_bands=6)
+    """
+    native = _get_native()
+    result = native.audio_spectral_contrast(spectrum._get_native(), n_bands, alpha)
+    return GPUArray._wrap_native(result)
+
+
+def zero_crossing_rate(
+    audio: AudioBuffer | GPUArray,
+    frame_size: int = 512,
+    hop_size: int = 256,
+) -> GPUArray:
+    """Compute zero-crossing rate for each frame.
+
+    ZCR counts the number of times the signal crosses zero per frame,
+    normalized by frame size.
+
+    Args:
+        audio: Input audio (float32)
+        frame_size: Frame size in samples (default 512)
+        hop_size: Hop size in samples (default 256)
+
+    Returns:
+        Zero-crossing rate for each frame [n_frames]
+
+    Example:
+        >>> zcr = zero_crossing_rate(buf, frame_size=512, hop_size=256)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_zero_crossing_rate(data._get_native(), frame_size, hop_size)
+    return GPUArray._wrap_native(result)
+
+
+# =============================================================================
+# Constant-Q Transform and Chromagram
+# =============================================================================
+
+
+def cqt(
+    audio: AudioBuffer | GPUArray,
+    sample_rate: int = 16000,
+    hop_length: int = 160,
+    f_min: float = 32.7,
+    n_bins: int = 84,
+    bins_per_octave: int = 12,
+) -> GPUArray:
+    """Compute Constant-Q Transform (CQT).
+
+    CQT provides logarithmically-spaced frequency resolution, useful for
+    music analysis where notes are logarithmically distributed.
+
+    This implementation uses STFT-based approximation for efficiency.
+
+    Args:
+        audio: Input audio (float32)
+        sample_rate: Sample rate in Hz
+        hop_length: Hop size (default 160)
+        f_min: Minimum frequency (default 32.7 Hz = C1)
+        n_bins: Number of frequency bins (default 84 = 7 octaves)
+        bins_per_octave: Bins per octave (default 12)
+
+    Returns:
+        Complex CQT [n_frames, n_bins, 2] (real, imag)
+
+    Example:
+        >>> cqt_out = cqt(buf, sample_rate=16000, n_bins=84)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_cqt(
+        data._get_native(), sample_rate, hop_length, f_min, n_bins, bins_per_octave
+    )
+    return GPUArray._wrap_native(result)
+
+
+def cqt_magnitude(
+    audio: AudioBuffer | GPUArray,
+    sample_rate: int = 16000,
+    hop_length: int = 160,
+    f_min: float = 32.7,
+    n_bins: int = 84,
+    bins_per_octave: int = 12,
+) -> GPUArray:
+    """Compute CQT magnitude spectrogram.
+
+    Convenience function that computes CQT and returns magnitude.
+
+    Args:
+        audio: Input audio (float32)
+        sample_rate: Sample rate in Hz
+        hop_length: Hop size (default 160)
+        f_min: Minimum frequency (default 32.7 Hz = C1)
+        n_bins: Number of frequency bins (default 84)
+        bins_per_octave: Bins per octave (default 12)
+
+    Returns:
+        CQT magnitude [n_frames, n_bins]
+
+    Example:
+        >>> cqt_mag = cqt_magnitude(buf, sample_rate=16000)
+    """
+    cqt_out = cqt(audio, sample_rate, hop_length, f_min, n_bins, bins_per_octave)
+    return magnitude_spectrum(cqt_out)
+
+
+def chroma_stft(
+    spectrum: GPUArray,
+    sample_rate: int = 16000,
+    n_chroma: int = 12,
+    tuning: float = 0.0,
+) -> GPUArray:
+    """Compute chromagram from STFT magnitude spectrum.
+
+    Maps the spectrum to 12 pitch classes (C, C#, D, ..., B).
+
+    Args:
+        spectrum: Magnitude spectrum [n_frames, n_freq]
+        sample_rate: Sample rate in Hz
+        n_chroma: Number of chroma bins (default 12)
+        tuning: Tuning deviation in fractions of a chroma bin (default 0)
+
+    Returns:
+        Chromagram [n_frames, n_chroma]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> chroma = chroma_stft(mag, sample_rate=16000)
+    """
+    native = _get_native()
+    result = native.audio_chroma_stft(spectrum._get_native(), sample_rate, n_chroma, tuning)
+    return GPUArray._wrap_native(result)
+
+
+def chroma_cqt(
+    cqt_magnitude_input: GPUArray,
+    bins_per_octave: int = 12,
+) -> GPUArray:
+    """Compute chromagram from CQT magnitude.
+
+    Args:
+        cqt_magnitude_input: CQT magnitude [n_frames, n_bins]
+        bins_per_octave: Bins per octave in CQT (default 12)
+
+    Returns:
+        Chromagram [n_frames, bins_per_octave]
+
+    Example:
+        >>> cqt_mag = cqt_magnitude(buf, bins_per_octave=12)
+        >>> chroma = chroma_cqt(cqt_mag, bins_per_octave=12)
+    """
+    native = _get_native()
+    result = native.audio_chroma_cqt(cqt_magnitude_input._get_native(), bins_per_octave)
+    return GPUArray._wrap_native(result)
+
+
+# =============================================================================
+# Harmonic-Percussive Source Separation (HPSS)
+# =============================================================================
+
+
+def hpss(
+    stft_magnitude_input: GPUArray,
+    kernel_size: int = 31,
+    power: float = 2.0,
+    margin: float = 1.0,
+) -> tuple[GPUArray, GPUArray]:
+    """Harmonic-Percussive Source Separation using median filtering.
+
+    Separates audio into harmonic (tonal) and percussive (transient) components
+    using median filtering in time and frequency directions.
+
+    Args:
+        stft_magnitude_input: STFT magnitude [n_frames, n_freq]
+        kernel_size: Median filter kernel size (default 31)
+        power: Power for spectrogram (default 2.0)
+        margin: Margin for soft masking (default 1.0)
+
+    Returns:
+        Tuple of (harmonic_magnitude, percussive_magnitude)
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> harmonic, percussive = hpss(mag)
+    """
+    native = _get_native()
+    h, p = native.audio_hpss(stft_magnitude_input._get_native(), kernel_size, power, margin)
+    return GPUArray._wrap_native(h), GPUArray._wrap_native(p)
+
+
+def harmonic(
+    stft_magnitude_input: GPUArray,
+    kernel_size: int = 31,
+    power: float = 2.0,
+    margin: float = 1.0,
+) -> GPUArray:
+    """Extract harmonic component using HPSS.
+
+    Args:
+        stft_magnitude_input: STFT magnitude [n_frames, n_freq]
+        kernel_size: Median filter kernel size (default 31)
+        power: Power for spectrogram (default 2.0)
+        margin: Margin for soft masking (default 1.0)
+
+    Returns:
+        Harmonic magnitude [n_frames, n_freq]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> harm = harmonic(mag)
+    """
+    h, _ = hpss(stft_magnitude_input, kernel_size, power, margin)
+    return h
+
+
+def percussive(
+    stft_magnitude_input: GPUArray,
+    kernel_size: int = 31,
+    power: float = 2.0,
+    margin: float = 1.0,
+) -> GPUArray:
+    """Extract percussive component using HPSS.
+
+    Args:
+        stft_magnitude_input: STFT magnitude [n_frames, n_freq]
+        kernel_size: Median filter kernel size (default 31)
+        power: Power for spectrogram (default 2.0)
+        margin: Margin for soft masking (default 1.0)
+
+    Returns:
+        Percussive magnitude [n_frames, n_freq]
+
+    Example:
+        >>> mag = magnitude_spectrum(stft_out)
+        >>> perc = percussive(mag)
+    """
+    _, p = hpss(stft_magnitude_input, kernel_size, power, margin)
+    return p
+
+
+# =============================================================================
+# Time Stretching and Pitch Shifting
+# =============================================================================
+
+
+def time_stretch(
+    audio: AudioBuffer | GPUArray,
+    rate: float,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+) -> GPUArray:
+    """Time stretch audio using phase vocoder.
+
+    Changes the duration of audio without changing its pitch.
+
+    Args:
+        audio: Input audio (float32)
+        rate: Stretch factor (>1 = faster/shorter, <1 = slower/longer)
+        n_fft: FFT size (default 2048)
+        hop_length: Hop size (default 512)
+
+    Returns:
+        Time-stretched audio [n_samples * rate]
+
+    Example:
+        >>> # Slow down to half speed
+        >>> slow = time_stretch(buf, rate=0.5)
+        >>> # Speed up to double speed
+        >>> fast = time_stretch(buf, rate=2.0)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_time_stretch(data._get_native(), rate, n_fft, hop_length)
+    return GPUArray._wrap_native(result)
+
+
+def pitch_shift(
+    audio: AudioBuffer | GPUArray,
+    sample_rate: int,
+    n_steps: float,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+) -> GPUArray:
+    """Pitch shift audio using phase vocoder and resampling.
+
+    Changes the pitch of audio without changing its duration.
+
+    Args:
+        audio: Input audio (float32)
+        sample_rate: Sample rate in Hz
+        n_steps: Number of semitones to shift (positive = up, negative = down)
+        n_fft: FFT size (default 2048)
+        hop_length: Hop size (default 512)
+
+    Returns:
+        Pitch-shifted audio [n_samples]
+
+    Example:
+        >>> # Shift up one octave
+        >>> higher = pitch_shift(buf, sample_rate=16000, n_steps=12)
+        >>> # Shift down a perfect fifth
+        >>> lower = pitch_shift(buf, sample_rate=16000, n_steps=-7)
+    """
+    native = _get_native()
+
+    if isinstance(audio, AudioBuffer):
+        data = audio.data
+    else:
+        data = audio
+
+    result = native.audio_pitch_shift(data._get_native(), sample_rate, n_steps, n_fft, hop_length)
+    return GPUArray._wrap_native(result)
+
+
 __all__ = [
     # Classes
     "AudioBuffer",
@@ -1167,4 +1798,30 @@ __all__ = [
     # High-level functions
     "mel_spectrogram",
     "log_mel_spectrogram",
+    # Inverse STFT and phase reconstruction
+    "istft",
+    "griffin_lim",
+    # Pitch detection
+    "autocorrelation",
+    "detect_pitch_yin",
+    "detect_pitch_yin_frames",
+    # Spectral features
+    "spectral_centroid",
+    "spectral_bandwidth",
+    "spectral_rolloff",
+    "spectral_flatness",
+    "spectral_contrast",
+    "zero_crossing_rate",
+    # CQT and Chromagram
+    "cqt",
+    "cqt_magnitude",
+    "chroma_stft",
+    "chroma_cqt",
+    # HPSS
+    "hpss",
+    "harmonic",
+    "percussive",
+    # Time stretching and pitch shifting
+    "time_stretch",
+    "pitch_shift",
 ]
