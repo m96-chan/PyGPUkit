@@ -9,6 +9,9 @@ TARGET_MODEL_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen
 TOKENIZER_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_ms
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -17,9 +20,7 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis, sample_token
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_ms
 
 MAX_SEQ_LEN = 512
 DRAFT_TOKENS = 4  # Number of draft tokens to generate per step
@@ -111,10 +112,14 @@ def generate_sequential(model, first_token, prefill_len, kv_backup, num_tokens):
 
 
 def generate_speculative(
-    draft_model, target_model,
-    first_token, prefill_len,
-    draft_kv_backup, target_kv_backup,
-    num_tokens, num_draft_tokens=4
+    draft_model,
+    target_model,
+    first_token,
+    prefill_len,
+    draft_kv_backup,
+    target_kv_backup,
+    num_tokens,
+    num_draft_tokens=4,
 ):
     """Generate tokens using speculative decoding.
 
@@ -195,7 +200,9 @@ def generate_speculative(
                 accepted.append(target_token)
                 break
 
-        total_accepted += len([t for i, t in enumerate(accepted) if i < len(draft_tokens) and t == draft_tokens[i]])
+        total_accepted += len(
+            [t for i, t in enumerate(accepted) if i < len(draft_tokens) and t == draft_tokens[i]]
+        )
 
         # === Step 4: Update KV caches with only accepted tokens ===
         # Restore to before-speculation state
@@ -226,7 +233,7 @@ def generate_speculative(
 def main():
     print("=" * 70)
     print("SPECULATIVE DECODING TEST")
-    print(f"Draft: Qwen3-0.6B, Target: Qwen3-8B")
+    print("Draft: Qwen3-0.6B, Target: Qwen3-8B")
     print(f"Draft tokens per step: {DRAFT_TOKENS}")
     print("=" * 70)
 
@@ -301,10 +308,14 @@ def main():
 
     start_event.record()
     spec_tokens, acceptance_rate = generate_speculative(
-        draft_model, target_model,
-        first_token, prefill_len,
-        draft_kv_backup, target_kv_backup,
-        GEN_TOKENS, DRAFT_TOKENS
+        draft_model,
+        target_model,
+        first_token,
+        prefill_len,
+        draft_kv_backup,
+        target_kv_backup,
+        GEN_TOKENS,
+        DRAFT_TOKENS,
     )
     stop_event.record()
     stop_event.synchronize()
@@ -331,7 +342,9 @@ def main():
     print(f"\n{'Method':<25} {'Time (ms)':<12} {'tok/s':<10} {'Speedup':<10}")
     print("-" * 57)
     print(f"{'Sequential (8B only)':<25} {seq_time:<12.1f} {seq_tps:<10.2f} {'1.00x':<10}")
-    print(f"{'Speculative (0.6B+8B)':<25} {spec_time:<12.1f} {spec_tps:<10.2f} {spec_tps/seq_tps:.2f}x")
+    print(
+        f"{'Speculative (0.6B+8B)':<25} {spec_time:<12.1f} {spec_tps:<10.2f} {spec_tps / seq_tps:.2f}x"
+    )
     print(f"\nAcceptance rate: {acceptance_rate:.1%}")
     print("\nNote: Current implementation re-runs forward pass for accepted tokens.")
     print("Optimization: Use KV cache rollback instead of re-computation.")

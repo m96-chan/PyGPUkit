@@ -7,6 +7,9 @@ MODEL_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ER
 TOKENIZER_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_ms
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -15,9 +18,7 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_ms
 
 MAX_SEQ_LEN = 512
 GEN_TOKENS = 32
@@ -44,8 +45,7 @@ def generate_sequential_greedy(model, first_token, prefill_len, kv_backup, num_t
 
 
 def generate_self_speculative(
-    model, first_token, prefill_len, kv_backup, num_tokens,
-    max_draft_tokens=4, draft_layers=8
+    model, first_token, prefill_len, kv_backup, num_tokens, max_draft_tokens=4, draft_layers=8
 ):
     """Generate tokens using self-speculative decoding."""
     model.restore_kv_cache(kv_backup)
@@ -65,7 +65,9 @@ def generate_self_speculative(
             break
 
         accepted, new_pos, stats = model.decode_step_self_speculative(
-            tokens[-1], position, context_len,
+            tokens[-1],
+            position,
+            context_len,
             max_draft_tokens=current_draft,
             draft_layers=draft_layers,
         )
@@ -144,9 +146,7 @@ def main():
     # Baseline
     print(f"\n--- Sequential Baseline ({GEN_TOKENS} tokens) ---")
     start_event.record()
-    seq_tokens = generate_sequential_greedy(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS
-    )
+    seq_tokens = generate_sequential_greedy(model, first_token, prefill_len, kv_backup, GEN_TOKENS)
     stop_event.record()
     stop_event.synchronize()
     seq_time = event_elapsed_ms(start_event, stop_event)
@@ -162,8 +162,13 @@ def main():
 
         start_event.record()
         spec_tokens, acceptance_rate = generate_self_speculative(
-            model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-            max_draft_tokens=4, draft_layers=draft_layers
+            model,
+            first_token,
+            prefill_len,
+            kv_backup,
+            GEN_TOKENS,
+            max_draft_tokens=4,
+            draft_layers=draft_layers,
         )
         stop_event.record()
         stop_event.synchronize()
@@ -176,24 +181,30 @@ def main():
         print(f"Time: {spec_time:.1f} ms, {spec_tps:.2f} tok/s")
         print(f"Acceptance: {acceptance_rate:.1%}, Match: {matches}, Speedup: {speedup:.2f}x")
 
-        results.append({
-            "layers": draft_layers,
-            "time": spec_time,
-            "tps": spec_tps,
-            "acceptance": acceptance_rate,
-            "matches": matches,
-            "speedup": speedup,
-        })
+        results.append(
+            {
+                "layers": draft_layers,
+                "time": spec_time,
+                "tps": spec_tps,
+                "acceptance": acceptance_rate,
+                "matches": matches,
+                "speedup": speedup,
+            }
+        )
 
     # Summary
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    print(f"\n{'Layers':<10} {'Time (ms)':<12} {'tok/s':<10} {'Accept':<10} {'Speedup':<10} {'Match'}")
+    print(
+        f"\n{'Layers':<10} {'Time (ms)':<12} {'tok/s':<10} {'Accept':<10} {'Speedup':<10} {'Match'}"
+    )
     print("-" * 62)
     print(f"{'Baseline':<10} {seq_time:<12.1f} {seq_tps:<10.2f} {'N/A':<10} {'1.00x':<10} {'N/A'}")
     for r in results:
-        print(f"{r['layers']:<10} {r['time']:<12.1f} {r['tps']:<10.2f} {r['acceptance']*100:<9.0f}% {r['speedup']:.2f}x{'':<5} {'YES' if r['matches'] else 'NO'}")
+        print(
+            f"{r['layers']:<10} {r['time']:<12.1f} {r['tps']:<10.2f} {r['acceptance'] * 100:<9.0f}% {r['speedup']:.2f}x{'':<5} {'YES' if r['matches'] else 'NO'}"
+        )
 
     print("\nNote: Current implementation has high overhead from KV cache CPU-GPU copies.")
     print("Performance will improve with GPU-side KV cache management.")

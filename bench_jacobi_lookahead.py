@@ -52,8 +52,14 @@ def generate_sequential_greedy(model, first_token, prefill_len, kv_backup, num_t
 
 
 def generate_jacobi_original(
-    model, first_token, prefill_len, kv_backup, num_tokens,
-    n_tokens=8, max_iter=3, init_strategy="repeat"
+    model,
+    first_token,
+    prefill_len,
+    kv_backup,
+    num_tokens,
+    n_tokens=8,
+    max_iter=3,
+    init_strategy="repeat",
 ):
     """Generate tokens using Jacobi decoding (original, with CPU copies)."""
     model.restore_kv_cache(kv_backup)
@@ -74,7 +80,9 @@ def generate_jacobi_original(
             break
 
         accepted, new_pos, stats = model.decode_step_jacobi(
-            tokens[-1], position, context_len,
+            tokens[-1],
+            position,
+            context_len,
             n_tokens=current_n,
             max_iter=max_iter,
             init_strategy=init_strategy,
@@ -95,8 +103,7 @@ def generate_jacobi_original(
 
 
 def generate_jacobi_lookahead(
-    model, first_token, prefill_len, num_tokens,
-    n_tokens=8, max_iter=3, init_strategy="repeat"
+    model, first_token, prefill_len, num_tokens, n_tokens=8, max_iter=3, init_strategy="repeat"
 ):
     """Generate tokens using Jacobi decoding with lookahead KV (GPU-side)."""
     # Set confirmed position after prefill
@@ -195,9 +202,7 @@ def main():
     print(f"\n--- Sequential Baseline ({GEN_TOKENS} tokens) ---")
 
     start_event.record()
-    seq_tokens = generate_sequential_greedy(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS
-    )
+    seq_tokens = generate_sequential_greedy(model, first_token, prefill_len, kv_backup, GEN_TOKENS)
     stop_event.record()
     stop_event.synchronize()
 
@@ -215,8 +220,14 @@ def main():
 
     start_event.record()
     jacobi_orig_tokens, avg_iter_o, conv_rate_o = generate_jacobi_original(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        n_tokens=8, max_iter=3, init_strategy="repeat"
+        model,
+        first_token,
+        prefill_len,
+        kv_backup,
+        GEN_TOKENS,
+        n_tokens=8,
+        max_iter=3,
+        init_strategy="repeat",
     )
     stop_event.record()
     stop_event.synchronize()
@@ -239,8 +250,7 @@ def main():
 
     start_event.record()
     jacobi_look_tokens, avg_iter_l, conv_rate_l = generate_jacobi_lookahead(
-        model, first_token, prefill_len, GEN_TOKENS,
-        n_tokens=8, max_iter=3, init_strategy="repeat"
+        model, first_token, prefill_len, GEN_TOKENS, n_tokens=8, max_iter=3, init_strategy="repeat"
     )
     stop_event.record()
     stop_event.synchronize()
@@ -263,8 +273,7 @@ def main():
 
     start_event.record()
     jacobi_greedy_tokens, avg_iter_g, conv_rate_g = generate_jacobi_lookahead(
-        model, first_token, prefill_len, GEN_TOKENS,
-        n_tokens=8, max_iter=3, init_strategy="greedy"
+        model, first_token, prefill_len, GEN_TOKENS, n_tokens=8, max_iter=3, init_strategy="greedy"
     )
     stop_event.record()
     stop_event.synchronize()
@@ -291,9 +300,15 @@ def main():
     print(f"\n{'Method':<35} {'Time (ms)':<12} {'tok/s':<10} {'Speedup':<10} {'Match'}")
     print("-" * 77)
     print(f"{'Sequential (baseline)':<35} {seq_time:<12.1f} {seq_tps:<10.2f} {'1.00x':<10} {'N/A'}")
-    print(f"{'Jacobi Original (CPU copies)':<35} {jacobi_orig_time:<12.1f} {jacobi_orig_tps:<10.2f} {speedup_orig:.2f}x{'':<5} {'YES' if match_orig else 'NO'}")
-    print(f"{'Jacobi Lookahead (GPU-side)':<35} {jacobi_look_time:<12.1f} {jacobi_look_tps:<10.2f} {speedup_look:.2f}x{'':<5} {'YES' if match_look else 'NO'}")
-    print(f"{'Jacobi Lookahead (greedy init)':<35} {jacobi_greedy_time:<12.1f} {jacobi_greedy_tps:<10.2f} {(seq_time / jacobi_greedy_time):.2f}x{'':<5} {'YES' if match_greedy else 'NO'}")
+    print(
+        f"{'Jacobi Original (CPU copies)':<35} {jacobi_orig_time:<12.1f} {jacobi_orig_tps:<10.2f} {speedup_orig:.2f}x{'':<5} {'YES' if match_orig else 'NO'}"
+    )
+    print(
+        f"{'Jacobi Lookahead (GPU-side)':<35} {jacobi_look_time:<12.1f} {jacobi_look_tps:<10.2f} {speedup_look:.2f}x{'':<5} {'YES' if match_look else 'NO'}"
+    )
+    print(
+        f"{'Jacobi Lookahead (greedy init)':<35} {jacobi_greedy_time:<12.1f} {jacobi_greedy_tps:<10.2f} {(seq_time / jacobi_greedy_time):.2f}x{'':<5} {'YES' if match_greedy else 'NO'}"
+    )
 
     print(f"\nLookahead vs Original speedup: {speedup_look_vs_orig:.2f}x")
 

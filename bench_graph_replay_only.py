@@ -3,15 +3,17 @@
 
 import gc
 import time
+
 import numpy as np
 
 model_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/model.safetensors.index.json"
 
+from pygpukit._pygpukit_native import CudaGraph
+
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import detect_model_spec, load_model_from_safetensors, load_safetensors
 from pygpukit.llm.model import DecodeBuffers, precompute_freqs_cis
-from pygpukit.core import default_stream, from_numpy
-from pygpukit.ops.basic import kv_cache_prefill_gqa, rmsnorm, copy_to, add_inplace, embedding_lookup
-from pygpukit._pygpukit_native import CudaGraph
+from pygpukit.ops.basic import add_inplace, copy_to, embedding_lookup, kv_cache_prefill_gqa, rmsnorm
 
 MAX_SEQ_LEN = 512
 
@@ -53,6 +55,7 @@ token_id = 100
 position = 5
 context_len = 6
 
+
 # Define inline decode step
 def _inline_decode_step():
     embedding_lookup(model.embed_tokens, buffers.hidden, token_id)
@@ -60,7 +63,11 @@ def _inline_decode_step():
         rmsnorm(buffers.hidden, block.attn_norm.weight, block.attn_norm.eps, out=buffers.norm_out)
         copy_to(buffers.hidden, buffers.residual)
         model._attention_forward_zero_alloc(
-            block.attn, buffers.norm_out, position, context_len, buffers,
+            block.attn,
+            buffers.norm_out,
+            position,
+            context_len,
+            buffers,
             use_position_ptr=False,
         )
         add_inplace(buffers.hidden, buffers.residual)
@@ -70,6 +77,7 @@ def _inline_decode_step():
         add_inplace(buffers.hidden, buffers.residual)
     rmsnorm(buffers.hidden, model.final_norm.weight, model.final_norm.eps, out=buffers.norm_out)
     copy_to(buffers.norm_out, buffers.hidden)
+
 
 # ============================================================
 # Test 1: Direct kernel launches (no graph)
@@ -90,7 +98,7 @@ for i in range(10):
     default_stream().synchronize()
     elapsed = (time.perf_counter() - start) * 1000
     times_direct.append(elapsed)
-    print(f"  {i+1}: {elapsed:.2f} ms")
+    print(f"  {i + 1}: {elapsed:.2f} ms")
 
 mean_direct = np.mean(times_direct)
 print(f"  Mean: {mean_direct:.2f} ms")
@@ -126,7 +134,7 @@ for i in range(10):
     graph.synchronize()
     elapsed = (time.perf_counter() - start) * 1000
     times_graph.append(elapsed)
-    print(f"  {i+1}: {elapsed:.2f} ms")
+    print(f"  {i + 1}: {elapsed:.2f} ms")
 
 mean_graph = np.mean(times_graph)
 print(f"  Mean: {mean_graph:.2f} ms")
@@ -139,6 +147,6 @@ print("SUMMARY (Transformer blocks only, no get_logits)")
 print("=" * 60)
 print(f"Direct launches: {mean_direct:.2f} ms")
 print(f"Graph replay:    {mean_graph:.2f} ms")
-print(f"Speedup:         {mean_direct/mean_graph:.2f}x")
+print(f"Speedup:         {mean_direct / mean_graph:.2f}x")
 print(f"Saved per step:  {mean_direct - mean_graph:.2f} ms")
 print("=" * 60)

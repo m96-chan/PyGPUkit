@@ -25,6 +25,9 @@ TARGET_MODEL_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen
 TOKENIZER_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_us
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -33,9 +36,7 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis, sample_token
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_us
 
 MAX_SEQ_LEN = 512
 NUM_ITERATIONS = 20
@@ -132,7 +133,7 @@ def main():
         single_times.append(event_elapsed_us(start_event, stop_event))
 
     single_time = np.mean(single_times)
-    print(f"Single token decode: {single_time:.1f} us ({1_000_000/single_time:.1f} tok/s)")
+    print(f"Single token decode: {single_time:.1f} us ({1_000_000 / single_time:.1f} tok/s)")
 
     # Measure batch decode times for different batch sizes
     print("\n--- Measuring Batch Verification ---")
@@ -194,7 +195,9 @@ def main():
             spec_tps = tokens_per_step * 1_000_000 / time_per_step
             speedup = spec_tps / seq_tps
 
-            print(f"K={batch_size:<5} {acceptance_rate*100:>5.0f}%{'':<6} {seq_tps:<12.1f} {spec_tps:<12.1f} {speedup:<10.2f}x")
+            print(
+                f"K={batch_size:<5} {acceptance_rate * 100:>5.0f}%{'':<6} {seq_tps:<12.1f} {spec_tps:<12.1f} {speedup:<10.2f}x"
+            )
         print()
 
     print("\n" + "=" * 70)

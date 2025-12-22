@@ -2,12 +2,14 @@
 """End-to-end benchmark: Sequential vs Batch decode for text generation."""
 
 import numpy as np
-import time
 
 model_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/model.safetensors.index.json"
 tokenizer_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_ms
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -16,9 +18,7 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis, sample_token
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_ms
 
 MAX_SEQ_LEN = 512
 GEN_TOKENS = 32  # Number of tokens to generate
@@ -177,13 +177,13 @@ def generate_batch_parallel(model, tokenizer, first_token, prefill_len, kv_backu
         remaining = len(draft_tokens) - idx
         current_batch = min(batch_size, remaining)
 
-        batch_tokens = draft_tokens[idx:idx + current_batch]
+        batch_tokens = draft_tokens[idx : idx + current_batch]
 
         # Batch verify
         hidden = model._decode_step_fixed_cache_batch(
             batch_tokens,
             position,
-            context_len + current_batch  # Context includes new tokens
+            context_len + current_batch,  # Context includes new tokens
         )
 
         # Get logits for verification (would compare with draft in real speculative)
@@ -305,8 +305,12 @@ def main():
     print(f"\n{'Method':<30} {'Time (ms)':<12} {'tok/s':<10} {'Speedup':<10}")
     print("-" * 62)
     print(f"{'Sequential':<30} {seq_time:<12.1f} {seq_tps:<10.2f} {'1.00x':<10}")
-    print(f"{'Batch Verify (batch=4)':<30} {batch_time:<12.1f} {batch_tps:<10.2f} {batch_tps/seq_tps:<10.2f}x")
-    print(f"{'Batch Verify (batch=8)':<30} {batch8_time:<12.1f} {batch8_tps:<10.2f} {batch8_tps/seq_tps:<10.2f}x")
+    print(
+        f"{'Batch Verify (batch=4)':<30} {batch_time:<12.1f} {batch_tps:<10.2f} {batch_tps / seq_tps:<10.2f}x"
+    )
+    print(
+        f"{'Batch Verify (batch=8)':<30} {batch8_time:<12.1f} {batch8_tps:<10.2f} {batch8_tps / seq_tps:<10.2f}x"
+    )
 
     print("\nNote: 'Batch Verify' measures verification phase only.")
     print("Real speculative decoding would add draft model overhead.")

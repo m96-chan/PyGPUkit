@@ -129,6 +129,7 @@ def get_native_module() -> ModuleType:
     if prefer_cu131:
         try:
             from pygpukit import _pygpukit_native_cu131 as native
+
             _native_module = native
             return native
         except ImportError:
@@ -137,6 +138,7 @@ def get_native_module() -> ModuleType:
     # Try cu129 (works with CUDA 12.8+ drivers)
     try:
         from pygpukit import _pygpukit_native_cu129 as native
+
         _native_module = native
         return native
     except ImportError:
@@ -145,6 +147,7 @@ def get_native_module() -> ModuleType:
     # Try cu131 as fallback
     try:
         from pygpukit import _pygpukit_native_cu131 as native
+
         _native_module = native
         return native
     except ImportError:
@@ -153,6 +156,7 @@ def get_native_module() -> ModuleType:
     # Try the legacy single module name (for backwards compatibility)
     try:
         from pygpukit import _pygpukit_native as native
+
         _native_module = native
         return native
     except ImportError:

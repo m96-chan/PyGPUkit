@@ -16,12 +16,13 @@ using namespace pygpukit;
 void init_core_bindings(py::module_& m) {
     // DataType enum
     py::enum_<DataType>(m, "DataType")
-        .value("Float32", DataType::Float32)
         .value("Float64", DataType::Float64)
+        .value("Float32", DataType::Float32)
         .value("Float16", DataType::Float16)
         .value("BFloat16", DataType::BFloat16)
-        .value("Int32", DataType::Int32)
         .value("Int64", DataType::Int64)
+        .value("Int32", DataType::Int32)
+        .value("Int16", DataType::Int16)
         .value("Int8", DataType::Int8)
         .value("UInt8", DataType::UInt8)
         .value("Int4", DataType::Int4)
@@ -87,11 +88,11 @@ void init_core_bindings(py::module_& m) {
             py::array result;
 
             switch (self.dtype()) {
-                case DataType::Float32:
-                    result = py::array_t<float>(py_shape);
-                    break;
                 case DataType::Float64:
                     result = py::array_t<double>(py_shape);
+                    break;
+                case DataType::Float32:
+                    result = py::array_t<float>(py_shape);
                     break;
                 case DataType::Float16:
                     // NumPy has native float16 support
@@ -102,11 +103,14 @@ void init_core_bindings(py::module_& m) {
                     // Users can convert using ml_dtypes or similar libraries
                     result = py::array(py::dtype("uint16"), py_shape);
                     break;
+                case DataType::Int64:
+                    result = py::array_t<int64_t>(py_shape);
+                    break;
                 case DataType::Int32:
                     result = py::array_t<int32_t>(py_shape);
                     break;
-                case DataType::Int64:
-                    result = py::array_t<int64_t>(py_shape);
+                case DataType::Int16:
+                    result = py::array_t<int16_t>(py_shape);
                     break;
                 case DataType::Int8:
                     result = py::array_t<int8_t>(py_shape);
@@ -179,10 +183,12 @@ void init_core_bindings(py::module_& m) {
             }
         } else if (kind == 'i') {
             // Signed integer types
-            if (itemsize == 4) {
-                dtype = DataType::Int32;
-            } else if (itemsize == 8) {
+            if (itemsize == 8) {
                 dtype = DataType::Int64;
+            } else if (itemsize == 4) {
+                dtype = DataType::Int32;
+            } else if (itemsize == 2) {
+                dtype = DataType::Int16;
             } else {
                 throw std::runtime_error("Unsupported int dtype size: " + std::to_string(itemsize));
             }

@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "../ops/ops.cuh"
+#include "../ops/audio/audio.hpp"
 #include "../jit/cublaslt_loader.hpp"
 
 namespace py = pybind11;
@@ -564,6 +565,484 @@ void init_ops_bindings(py::module_& m) {
     m.def("set_sampling_seed", &ops::set_sampling_seed,
           py::arg("seed"),
           "Set random seed for reproducible GPU sampling.");
+
+    // ========================================================================
+    // Audio Processing Operations (#96)
+    // ========================================================================
+
+    m.def("audio_pcm_to_float32", &ops::audio::pcm_to_float32,
+          py::arg("input"),
+          "Convert int16 PCM samples to float32.\n"
+          "Input: GPUArray of int16 samples\n"
+          "Returns: GPUArray of float32 samples normalized to [-1.0, 1.0]");
+
+    m.def("audio_stereo_to_mono", &ops::audio::stereo_to_mono,
+          py::arg("input"),
+          "Convert stereo audio to mono by averaging channels.\n"
+          "Input: GPUArray of interleaved stereo samples [L,R,L,R,...]\n"
+          "Returns: GPUArray of mono samples");
+
+    m.def("audio_normalize_peak", &ops::audio::normalize_peak,
+          py::arg("input"),
+          "Peak normalize audio to [-1.0, 1.0] range (in-place).\n"
+          "Input: GPUArray of float32 samples (modified in-place)");
+
+    m.def("audio_normalize_rms", &ops::audio::normalize_rms,
+          py::arg("input"), py::arg("target_db") = -20.0f,
+          "RMS normalize audio to target dB level (in-place).\n"
+          "Input: GPUArray of float32 samples (modified in-place)\n"
+          "target_db: Target RMS level in dB (default -20.0)");
+
+    m.def("audio_resample", &ops::audio::resample,
+          py::arg("input"), py::arg("src_rate"), py::arg("dst_rate"),
+          "Resample audio from source to target sample rate.\n"
+          "Currently supports 48kHz -> 16kHz (3:1 decimation).\n"
+          "Input: GPUArray of float32 samples\n"
+          "src_rate: Source sample rate (e.g., 48000)\n"
+          "dst_rate: Target sample rate (e.g., 16000)\n"
+          "Returns: Resampled GPUArray");
+
+    // ========================================================================
+    // Audio Streaming Operations (#97)
+    // ========================================================================
+
+    m.def("audio_ring_buffer_write", &ops::audio::ring_buffer_write,
+          py::arg("input"), py::arg("ring_buffer"), py::arg("write_pos"),
+          "Write samples to a ring buffer with wrap-around.\n"
+          "input: GPUArray of float32 samples to write\n"
+          "ring_buffer: GPUArray ring buffer (modified in-place)\n"
+          "write_pos: Current write position in ring buffer");
+
+    m.def("audio_ring_buffer_read", &ops::audio::ring_buffer_read,
+          py::arg("ring_buffer"), py::arg("read_pos"), py::arg("num_samples"),
+          "Read samples from a ring buffer (linearized).\n"
+          "ring_buffer: GPUArray ring buffer\n"
+          "read_pos: Read position in ring buffer\n"
+          "num_samples: Number of samples to read\n"
+          "Returns: Linearized GPUArray");
+
+    m.def("audio_apply_hann_window", &ops::audio::apply_hann_window,
+          py::arg("data"),
+          "Apply Hann window to audio data (in-place).\n"
+          "data: GPUArray of float32 samples (modified in-place)");
+
+    m.def("audio_overlap_add", &ops::audio::overlap_add,
+          py::arg("input"), py::arg("output"), py::arg("output_offset"),
+          "Overlap-add: add windowed chunk to output buffer.\n"
+          "input: Windowed input chunk\n"
+          "output: Output buffer (accumulated, modified in-place)\n"
+          "output_offset: Offset in output buffer");
+
+    // ========================================================================
+    // Voice Activity Detection (VAD)
+    // ========================================================================
+
+    m.def("vad_compute_energy", &ops::audio::vad_compute_energy,
+          py::arg("audio"), py::arg("frame_size"), py::arg("hop_size"),
+          "Compute frame-level RMS energy for VAD.\n"
+          "audio: Input audio samples (float32)\n"
+          "frame_size: Frame size in samples\n"
+          "hop_size: Hop size in samples\n"
+          "Returns: GPUArray of frame energies");
+
+    m.def("vad_compute_zcr", &ops::audio::vad_compute_zcr,
+          py::arg("audio"), py::arg("frame_size"), py::arg("hop_size"),
+          "Compute frame-level zero-crossing rate for VAD.\n"
+          "audio: Input audio samples (float32)\n"
+          "frame_size: Frame size in samples\n"
+          "hop_size: Hop size in samples\n"
+          "Returns: GPUArray of frame ZCR values [0, 1]");
+
+    m.def("vad_decide", &ops::audio::vad_decide,
+          py::arg("frame_energy"), py::arg("frame_zcr"),
+          py::arg("energy_threshold"), py::arg("zcr_low"), py::arg("zcr_high"),
+          "Apply threshold-based VAD decision.\n"
+          "frame_energy: Frame energy values (float32)\n"
+          "frame_zcr: Frame ZCR values (float32)\n"
+          "energy_threshold: Energy threshold for speech detection\n"
+          "zcr_low: Lower ZCR bound for voiced speech\n"
+          "zcr_high: Upper ZCR bound\n"
+          "Returns: GPUArray of int32 VAD flags (0=silence, 1=speech)");
+
+    m.def("vad_apply_hangover", &ops::audio::vad_apply_hangover,
+          py::arg("vad_input"), py::arg("hangover_frames"),
+          "Apply hangover smoothing to VAD output.\n"
+          "Extends speech regions by hangover_frames after speech ends.\n"
+          "vad_input: Input VAD flags (int32)\n"
+          "hangover_frames: Number of frames to extend\n"
+          "Returns: Smoothed VAD flags (int32)");
+
+    m.def("vad_compute_noise_floor", &ops::audio::vad_compute_noise_floor,
+          py::arg("frame_energy"),
+          "Compute noise floor (minimum energy) for adaptive thresholding.\n"
+          "frame_energy: Frame energy values (float32)\n"
+          "Returns: Minimum energy value (float)");
+
+    // ========================================================================
+    // Audio Preprocessing Operations
+    // ========================================================================
+
+    m.def("audio_preemphasis", &ops::audio::preemphasis,
+          py::arg("input"), py::arg("alpha") = 0.97f,
+          "Apply pre-emphasis filter (in-place).\n"
+          "y[n] = x[n] - alpha * x[n-1]\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "alpha: Pre-emphasis coefficient (default 0.97)");
+
+    m.def("audio_deemphasis", &ops::audio::deemphasis,
+          py::arg("input"), py::arg("alpha") = 0.97f,
+          "Apply de-emphasis filter (in-place).\n"
+          "y[n] = x[n] + alpha * y[n-1]\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "alpha: De-emphasis coefficient (default 0.97)");
+
+    m.def("audio_remove_dc", &ops::audio::remove_dc,
+          py::arg("input"),
+          "Remove DC offset from audio signal (in-place).\n"
+          "Subtracts the mean value from all samples.\n"
+          "input: GPUArray of float32 samples (modified in-place)");
+
+    m.def("audio_highpass_filter", &ops::audio::highpass_filter,
+          py::arg("input"), py::arg("cutoff_hz") = 20.0f, py::arg("sample_rate") = 16000,
+          "Apply high-pass filter for DC removal (in-place).\n"
+          "Uses single-pole IIR filter.\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "cutoff_hz: Cutoff frequency in Hz (default 20.0)\n"
+          "sample_rate: Sample rate in Hz (default 16000)");
+
+    m.def("audio_noise_gate", &ops::audio::noise_gate,
+          py::arg("input"), py::arg("threshold") = 0.01f,
+          "Apply simple noise gate (in-place).\n"
+          "Zeros samples with absolute value below threshold.\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "threshold: Amplitude threshold (default 0.01)");
+
+    m.def("audio_spectral_gate", &ops::audio::spectral_gate,
+          py::arg("input"), py::arg("threshold") = 0.01f,
+          py::arg("attack_samples") = 64, py::arg("release_samples") = 256,
+          "Apply spectral gate for noise reduction (in-place).\n"
+          "Attenuates samples in frames with energy below threshold.\n"
+          "input: GPUArray of float32 samples (modified in-place)\n"
+          "threshold: Energy threshold (linear scale, default 0.01)\n"
+          "attack_samples: Frame size for energy computation (default 64)\n"
+          "release_samples: Smoothing release (reserved, default 256)");
+
+    m.def("audio_compute_short_term_energy", &ops::audio::compute_short_term_energy,
+          py::arg("input"), py::arg("frame_size"),
+          "Compute short-term energy for adaptive noise gating.\n"
+          "input: GPUArray of float32 audio samples\n"
+          "frame_size: Frame size in samples\n"
+          "Returns: GPUArray of frame energies");
+
+    // ========================================================================
+    // Spectral Processing Operations
+    // ========================================================================
+
+    m.def("audio_stft", &ops::audio::stft,
+          py::arg("input"), py::arg("n_fft") = 400, py::arg("hop_length") = 160,
+          py::arg("win_length") = -1, py::arg("center") = true,
+          "Compute Short-Time Fourier Transform (STFT).\n"
+          "input: GPUArray of float32 audio samples\n"
+          "n_fft: FFT size (must be power of 2, default 400 for Whisper)\n"
+          "hop_length: Hop size (default 160 for Whisper)\n"
+          "win_length: Window length (default n_fft)\n"
+          "center: Whether to pad input (default true)\n"
+          "Returns: Complex STFT output [n_frames, n_fft/2+1, 2] (real, imag)");
+
+    m.def("audio_power_spectrum", &ops::audio::power_spectrum,
+          py::arg("stft_output"),
+          "Compute power spectrogram from STFT output.\n"
+          "power = real^2 + imag^2\n"
+          "stft_output: STFT output [n_frames, n_freq, 2]\n"
+          "Returns: Power spectrogram [n_frames, n_freq]");
+
+    m.def("audio_magnitude_spectrum", &ops::audio::magnitude_spectrum,
+          py::arg("stft_output"),
+          "Compute magnitude spectrogram from STFT output.\n"
+          "magnitude = sqrt(real^2 + imag^2)\n"
+          "stft_output: STFT output [n_frames, n_freq, 2]\n"
+          "Returns: Magnitude spectrogram [n_frames, n_freq]");
+
+    m.def("audio_create_mel_filterbank", &ops::audio::create_mel_filterbank,
+          py::arg("n_mels"), py::arg("n_fft"), py::arg("sample_rate"),
+          py::arg("f_min") = 0.0f, py::arg("f_max") = -1.0f,
+          "Create Mel filterbank matrix.\n"
+          "n_mels: Number of mel bands (default 80 for Whisper)\n"
+          "n_fft: FFT size\n"
+          "sample_rate: Sample rate in Hz\n"
+          "f_min: Minimum frequency (default 0)\n"
+          "f_max: Maximum frequency (default sample_rate/2)\n"
+          "Returns: Mel filterbank matrix [n_mels, n_fft/2+1]");
+
+    m.def("audio_apply_mel_filterbank", &ops::audio::apply_mel_filterbank,
+          py::arg("spectrogram"), py::arg("mel_filterbank"),
+          "Apply Mel filterbank to power/magnitude spectrogram.\n"
+          "spectrogram: Input spectrogram [n_frames, n_fft/2+1]\n"
+          "mel_filterbank: Mel filterbank [n_mels, n_fft/2+1]\n"
+          "Returns: Mel spectrogram [n_frames, n_mels]");
+
+    m.def("audio_log_mel_spectrogram", &ops::audio::log_mel_spectrogram,
+          py::arg("mel_spectrogram"), py::arg("eps") = 1e-10f,
+          "Compute log-mel spectrogram.\n"
+          "log_mel = log(mel + eps)\n"
+          "mel_spectrogram: Mel spectrogram [n_frames, n_mels]\n"
+          "eps: Small constant for numerical stability (default 1e-10)\n"
+          "Returns: Log-mel spectrogram [n_frames, n_mels]");
+
+    m.def("audio_to_decibels", &ops::audio::to_decibels,
+          py::arg("input"), py::arg("eps") = 1e-10f,
+          "Convert to decibels.\n"
+          "dB = 10 * log10(x + eps)\n"
+          "input: Input array\n"
+          "eps: Small constant for numerical stability (default 1e-10)\n"
+          "Returns: dB values");
+
+    m.def("audio_mfcc", &ops::audio::mfcc,
+          py::arg("log_mel"), py::arg("n_mfcc") = 13,
+          "Compute MFCC from log-mel spectrogram using DCT-II.\n"
+          "log_mel: Log-mel spectrogram [n_frames, n_mels]\n"
+          "n_mfcc: Number of MFCC coefficients (default 13)\n"
+          "Returns: MFCC [n_frames, n_mfcc]");
+
+    m.def("audio_delta_features", &ops::audio::delta_features,
+          py::arg("features"), py::arg("order") = 1, py::arg("width") = 2,
+          "Compute delta (differential) features.\n"
+          "features: Input features [n_frames, n_features]\n"
+          "order: Delta order (1 for delta, 2 for delta-delta)\n"
+          "width: Window width for computation (default 2)\n"
+          "Returns: Delta features [n_frames, n_features]");
+
+    m.def("audio_whisper_mel_spectrogram", &ops::audio::whisper_mel_spectrogram,
+          py::arg("input"), py::arg("n_fft") = 400, py::arg("hop_length") = 160,
+          py::arg("n_mels") = 80,
+          "Compute Whisper-compatible log-mel spectrogram in one call.\n"
+          "Combines: STFT -> power -> mel filterbank -> log\n"
+          "input: Input audio (float32, 16kHz expected)\n"
+          "n_fft: FFT size (default 400)\n"
+          "hop_length: Hop size (default 160)\n"
+          "n_mels: Number of mel bands (default 80)\n"
+          "Returns: Log-mel spectrogram [n_frames, n_mels]");
+
+    // ========================================================================
+    // Inverse STFT
+    // ========================================================================
+
+    m.def("audio_istft", &ops::audio::istft,
+          py::arg("stft_output"), py::arg("hop_length") = 160,
+          py::arg("win_length") = -1, py::arg("center") = true,
+          py::arg("length") = -1,
+          "Compute Inverse Short-Time Fourier Transform (ISTFT).\n"
+          "stft_output: STFT output [n_frames, n_fft/2+1, 2] (real, imag)\n"
+          "hop_length: Hop size (default 160)\n"
+          "win_length: Window length (default n_fft)\n"
+          "center: Whether input was padded (default true)\n"
+          "length: Expected output length (optional, -1 for auto)\n"
+          "Returns: Reconstructed audio signal");
+
+    // ========================================================================
+    // Griffin-Lim Algorithm
+    // ========================================================================
+
+    m.def("audio_griffin_lim", &ops::audio::griffin_lim,
+          py::arg("magnitude"), py::arg("n_iter") = 32,
+          py::arg("hop_length") = 160, py::arg("win_length") = -1,
+          "Griffin-Lim phase reconstruction algorithm.\n"
+          "Reconstructs audio from magnitude spectrogram.\n"
+          "magnitude: Magnitude spectrogram [n_frames, n_fft/2+1]\n"
+          "n_iter: Number of iterations (default 32)\n"
+          "hop_length: Hop size (default 160)\n"
+          "win_length: Window length (default n_fft * 2 - 2)\n"
+          "Returns: Reconstructed audio signal");
+
+    // ========================================================================
+    // Pitch Detection
+    // ========================================================================
+
+    m.def("audio_autocorrelation", &ops::audio::autocorrelation,
+          py::arg("input"), py::arg("max_lag"),
+          "Compute autocorrelation of signal.\n"
+          "input: Input audio samples\n"
+          "max_lag: Maximum lag to compute\n"
+          "Returns: Autocorrelation values [max_lag]");
+
+    m.def("audio_detect_pitch_yin", &ops::audio::detect_pitch_yin,
+          py::arg("input"), py::arg("sample_rate"),
+          py::arg("f_min") = 50.0f, py::arg("f_max") = 2000.0f,
+          py::arg("threshold") = 0.1f,
+          "Detect pitch using YIN algorithm.\n"
+          "input: Input audio samples (single frame)\n"
+          "sample_rate: Sample rate in Hz\n"
+          "f_min: Minimum frequency (default 50 Hz)\n"
+          "f_max: Maximum frequency (default 2000 Hz)\n"
+          "threshold: YIN threshold (default 0.1)\n"
+          "Returns: Detected pitch in Hz (0 if unvoiced)");
+
+    m.def("audio_detect_pitch_yin_frames", &ops::audio::detect_pitch_yin_frames,
+          py::arg("input"), py::arg("sample_rate"),
+          py::arg("frame_size"), py::arg("hop_size"),
+          py::arg("f_min") = 50.0f, py::arg("f_max") = 2000.0f,
+          py::arg("threshold") = 0.1f,
+          "Detect pitch for multiple frames using YIN algorithm.\n"
+          "input: Input audio samples\n"
+          "sample_rate: Sample rate in Hz\n"
+          "frame_size: Frame size in samples\n"
+          "hop_size: Hop size in samples\n"
+          "f_min: Minimum frequency (default 50 Hz)\n"
+          "f_max: Maximum frequency (default 2000 Hz)\n"
+          "threshold: YIN threshold (default 0.1)\n"
+          "Returns: Detected pitches [n_frames] in Hz (0 if unvoiced)");
+
+    // ========================================================================
+    // Spectral Features
+    // ========================================================================
+
+    m.def("audio_spectral_centroid", &ops::audio::spectral_centroid,
+          py::arg("spectrum"), py::arg("sample_rate"),
+          "Compute spectral centroid (center of mass of spectrum).\n"
+          "spectrum: Magnitude/power spectrogram [n_frames, n_freq]\n"
+          "sample_rate: Sample rate in Hz\n"
+          "Returns: Spectral centroid per frame [n_frames] in Hz");
+
+    m.def("audio_spectral_bandwidth", &ops::audio::spectral_bandwidth,
+          py::arg("spectrum"), py::arg("centroids"),
+          py::arg("sample_rate"), py::arg("p") = 2,
+          "Compute spectral bandwidth.\n"
+          "spectrum: Magnitude/power spectrogram [n_frames, n_freq]\n"
+          "centroids: Pre-computed centroids [n_frames]\n"
+          "sample_rate: Sample rate in Hz\n"
+          "p: Order of the bandwidth norm (default 2)\n"
+          "Returns: Spectral bandwidth per frame [n_frames] in Hz");
+
+    m.def("audio_spectral_rolloff", &ops::audio::spectral_rolloff,
+          py::arg("spectrum"), py::arg("sample_rate"),
+          py::arg("roll_percent") = 0.85f,
+          "Compute spectral rolloff point.\n"
+          "spectrum: Magnitude/power spectrogram [n_frames, n_freq]\n"
+          "sample_rate: Sample rate in Hz\n"
+          "roll_percent: Rolloff percentage (default 0.85 = 85%)\n"
+          "Returns: Rolloff frequency per frame [n_frames] in Hz");
+
+    m.def("audio_spectral_flatness", &ops::audio::spectral_flatness,
+          py::arg("spectrum"),
+          "Compute spectral flatness (Wiener entropy).\n"
+          "spectrum: Magnitude/power spectrogram [n_frames, n_freq]\n"
+          "Returns: Flatness per frame [n_frames] in [0, 1]");
+
+    m.def("audio_spectral_contrast", &ops::audio::spectral_contrast,
+          py::arg("spectrum"), py::arg("n_bands") = 6,
+          py::arg("alpha") = 0.02f,
+          "Compute spectral contrast.\n"
+          "spectrum: Magnitude/power spectrogram [n_frames, n_freq]\n"
+          "n_bands: Number of frequency bands (default 6)\n"
+          "alpha: Percentile for peak/valley (default 0.02 = 2%)\n"
+          "Returns: Spectral contrast [n_frames, n_bands]");
+
+    m.def("audio_zero_crossing_rate", &ops::audio::zero_crossing_rate,
+          py::arg("input"), py::arg("frame_size"), py::arg("hop_size"),
+          "Compute zero-crossing rate.\n"
+          "input: Input audio samples\n"
+          "frame_size: Frame size in samples\n"
+          "hop_size: Hop size in samples\n"
+          "Returns: ZCR per frame [n_frames] in [0, 1]");
+
+    // ========================================================================
+    // CQT (Constant-Q Transform)
+    // ========================================================================
+
+    m.def("audio_cqt", &ops::audio::cqt,
+          py::arg("input"), py::arg("sample_rate"),
+          py::arg("hop_length") = 512, py::arg("f_min") = 32.7f,
+          py::arg("n_bins") = 84, py::arg("bins_per_octave") = 12,
+          "Compute Constant-Q Transform.\n"
+          "input: Input audio samples\n"
+          "sample_rate: Sample rate in Hz\n"
+          "hop_length: Hop size (default 512)\n"
+          "f_min: Minimum frequency (default 32.7 Hz, C1)\n"
+          "n_bins: Number of CQT bins (default 84, 7 octaves)\n"
+          "bins_per_octave: Bins per octave (default 12)\n"
+          "Returns: Complex CQT output [n_frames, n_bins, 2]");
+
+    m.def("audio_cqt_magnitude", &ops::audio::cqt_magnitude,
+          py::arg("cqt_output"),
+          "Compute CQT magnitude spectrogram.\n"
+          "cqt_output: CQT output [n_frames, n_bins, 2]\n"
+          "Returns: Magnitude spectrogram [n_frames, n_bins]");
+
+    // ========================================================================
+    // Chromagram
+    // ========================================================================
+
+    m.def("audio_chroma_stft", &ops::audio::chroma_stft,
+          py::arg("spectrum"), py::arg("sample_rate"),
+          py::arg("n_chroma") = 12, py::arg("tuning") = 0.0f,
+          "Compute chromagram from STFT.\n"
+          "spectrum: Power/magnitude spectrogram [n_frames, n_freq]\n"
+          "sample_rate: Sample rate in Hz\n"
+          "n_chroma: Number of chroma bins (default 12)\n"
+          "tuning: Tuning deviation from A440 in cents (default 0)\n"
+          "Returns: Chromagram [n_frames, n_chroma]");
+
+    m.def("audio_chroma_cqt", &ops::audio::chroma_cqt,
+          py::arg("cqt_mag"), py::arg("bins_per_octave") = 12,
+          "Compute chromagram from CQT.\n"
+          "cqt_mag: CQT magnitude [n_frames, n_bins]\n"
+          "bins_per_octave: Bins per octave (must match CQT, default 12)\n"
+          "Returns: Chromagram [n_frames, 12]");
+
+    // ========================================================================
+    // HPSS (Harmonic-Percussive Source Separation)
+    // ========================================================================
+
+    m.def("audio_hpss", [](const GPUArray& stft_magnitude, int kernel_size,
+                           float power, float margin) {
+              auto [h, p] = ops::audio::hpss(stft_magnitude, kernel_size, power, margin);
+              return py::make_tuple(std::move(h), std::move(p));
+          },
+          py::arg("stft_magnitude"), py::arg("kernel_size") = 31,
+          py::arg("power") = 2.0f, py::arg("margin") = 1.0f,
+          "Harmonic-percussive source separation.\n"
+          "stft_magnitude: STFT magnitude [n_frames, n_freq]\n"
+          "kernel_size: Median filter kernel size (default 31)\n"
+          "power: Mask power for softness (default 2.0)\n"
+          "margin: Margin for separation (default 1.0)\n"
+          "Returns: Tuple of (harmonic_magnitude, percussive_magnitude)");
+
+    m.def("audio_harmonic", &ops::audio::harmonic,
+          py::arg("stft_magnitude"), py::arg("kernel_size") = 31,
+          py::arg("power") = 2.0f, py::arg("margin") = 1.0f,
+          "Get harmonic component from HPSS.\n"
+          "Returns: Harmonic magnitude [n_frames, n_freq]");
+
+    m.def("audio_percussive", &ops::audio::percussive,
+          py::arg("stft_magnitude"), py::arg("kernel_size") = 31,
+          py::arg("power") = 2.0f, py::arg("margin") = 1.0f,
+          "Get percussive component from HPSS.\n"
+          "Returns: Percussive magnitude [n_frames, n_freq]");
+
+    // ========================================================================
+    // Time Stretch / Pitch Shift
+    // ========================================================================
+
+    m.def("audio_time_stretch", &ops::audio::time_stretch,
+          py::arg("input"), py::arg("rate"),
+          py::arg("n_fft") = 2048, py::arg("hop_length") = -1,
+          "Time-stretch audio using phase vocoder.\n"
+          "input: Input audio samples\n"
+          "rate: Time stretch rate (>1 = slower, <1 = faster)\n"
+          "n_fft: FFT size (default 2048)\n"
+          "hop_length: Hop size (default n_fft/4)\n"
+          "Returns: Time-stretched audio");
+
+    m.def("audio_pitch_shift", &ops::audio::pitch_shift,
+          py::arg("input"), py::arg("sample_rate"), py::arg("n_steps"),
+          py::arg("n_fft") = 2048, py::arg("hop_length") = -1,
+          "Pitch-shift audio.\n"
+          "input: Input audio samples\n"
+          "sample_rate: Sample rate in Hz\n"
+          "n_steps: Number of semitones to shift\n"
+          "n_fft: FFT size (default 2048)\n"
+          "hop_length: Hop size (default n_fft/4)\n"
+          "Returns: Pitch-shifted audio");
 
     // ========================================================================
     // cuBLASLt debug functions

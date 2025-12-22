@@ -2,12 +2,14 @@
 """Benchmark batch decode vs sequential decode performance."""
 
 import numpy as np
-import time
 
 model_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/model.safetensors.index.json"
 tokenizer_path = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_us
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -16,9 +18,7 @@ from pygpukit.llm import (
     load_safetensors,
 )
 from pygpukit.llm.model import precompute_freqs_cis, sample_token
-from pygpukit.core import default_stream, from_numpy
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_us
 
 MAX_SEQ_LEN = 512
 NUM_ITERATIONS = 10

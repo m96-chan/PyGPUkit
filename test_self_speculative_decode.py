@@ -14,6 +14,9 @@ MODEL_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ER
 TOKENIZER_PATH = "C:/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/tokenizer.json"
 
 from tokenizers import Tokenizer
+
+from pygpukit import CudaEvent, event_elapsed_ms
+from pygpukit.core import default_stream, from_numpy
 from pygpukit.llm import (
     ChatMessage,
     detect_model_spec,
@@ -21,10 +24,8 @@ from pygpukit.llm import (
     load_model_from_safetensors,
     load_safetensors,
 )
-from pygpukit.llm.model import precompute_freqs_cis, sample_token
-from pygpukit.core import default_stream, from_numpy
+from pygpukit.llm.model import precompute_freqs_cis
 from pygpukit.ops.basic import kv_cache_prefill_gqa
-from pygpukit import CudaEvent, event_elapsed_ms
 
 MAX_SEQ_LEN = 512
 GEN_TOKENS = 32
@@ -52,8 +53,7 @@ def generate_sequential_greedy(model, first_token, prefill_len, kv_backup, num_t
 
 
 def generate_self_speculative(
-    model, first_token, prefill_len, kv_backup, num_tokens,
-    max_draft_tokens=4, draft_layers=8
+    model, first_token, prefill_len, kv_backup, num_tokens, max_draft_tokens=4, draft_layers=8
 ):
     """Generate tokens using self-speculative decoding."""
     # Restore KV cache
@@ -74,7 +74,9 @@ def generate_self_speculative(
             break
 
         accepted, new_pos, stats = model.decode_step_self_speculative(
-            tokens[-1], position, context_len,
+            tokens[-1],
+            position,
+            context_len,
             max_draft_tokens=current_draft,
             draft_layers=draft_layers,
         )
@@ -156,9 +158,7 @@ def main():
     stop_event = CudaEvent()
 
     start_event.record()
-    seq_tokens = generate_sequential_greedy(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS
-    )
+    seq_tokens = generate_sequential_greedy(model, first_token, prefill_len, kv_backup, GEN_TOKENS)
     stop_event.record()
     stop_event.synchronize()
 
@@ -177,8 +177,13 @@ def main():
 
     start_event.record()
     spec_full_tokens, spec_full_acceptance = generate_self_speculative(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        max_draft_tokens=4, draft_layers=num_layers
+        model,
+        first_token,
+        prefill_len,
+        kv_backup,
+        GEN_TOKENS,
+        max_draft_tokens=4,
+        draft_layers=num_layers,
     )
     stop_event.record()
     stop_event.synchronize()
@@ -194,12 +199,11 @@ def main():
     # =========================================================================
     # Test 3: Self-Speculative with draft_layers = 8
     # =========================================================================
-    print(f"\n--- Test 3: Self-Speculative (draft_layers=8) ---")
+    print("\n--- Test 3: Self-Speculative (draft_layers=8) ---")
 
     start_event.record()
     spec8_tokens, spec8_acceptance = generate_self_speculative(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        max_draft_tokens=4, draft_layers=8
+        model, first_token, prefill_len, kv_backup, GEN_TOKENS, max_draft_tokens=4, draft_layers=8
     )
     stop_event.record()
     stop_event.synchronize()
@@ -215,12 +219,11 @@ def main():
     # =========================================================================
     # Test 4: Self-Speculative with draft_layers = 12
     # =========================================================================
-    print(f"\n--- Test 4: Self-Speculative (draft_layers=12) ---")
+    print("\n--- Test 4: Self-Speculative (draft_layers=12) ---")
 
     start_event.record()
     spec12_tokens, spec12_acceptance = generate_self_speculative(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-        max_draft_tokens=4, draft_layers=12
+        model, first_token, prefill_len, kv_backup, GEN_TOKENS, max_draft_tokens=4, draft_layers=12
     )
     stop_event.record()
     stop_event.synchronize()
@@ -236,13 +239,12 @@ def main():
     # =========================================================================
     # Test 5: KV Cache Integrity Check
     # =========================================================================
-    print(f"\n--- Test 5: KV Cache Integrity Check ---")
+    print("\n--- Test 5: KV Cache Integrity Check ---")
     print("Running sequential after speculative to check KV cache...")
 
     # Run speculative first
     generate_self_speculative(
-        model, first_token, prefill_len, kv_backup, 10,
-        max_draft_tokens=4, draft_layers=8
+        model, first_token, prefill_len, kv_backup, 10, max_draft_tokens=4, draft_layers=8
     )
 
     # Now run sequential - should produce same output as baseline
@@ -270,7 +272,9 @@ def main():
 
     # Check 1: Full layers should give identical output
     test1_pass = spec_full_tokens == seq_tokens
-    print(f"\n1. Full layers (draft={num_layers}) matches baseline: {'PASS' if test1_pass else 'FAIL'}")
+    print(
+        f"\n1. Full layers (draft={num_layers}) matches baseline: {'PASS' if test1_pass else 'FAIL'}"
+    )
     if not test1_pass:
         all_pass = False
         print(f"   Baseline: {seq_tokens[:10]}...")
@@ -278,7 +282,9 @@ def main():
 
     # Check 2: Full layers should have ~100% acceptance
     test2_pass = spec_full_acceptance > 0.95
-    print(f"2. Full layers acceptance > 95%: {'PASS' if test2_pass else 'FAIL'} ({spec_full_acceptance:.1%})")
+    print(
+        f"2. Full layers acceptance > 95%: {'PASS' if test2_pass else 'FAIL'} ({spec_full_acceptance:.1%})"
+    )
     if not test2_pass:
         all_pass = False
 
@@ -310,9 +316,15 @@ def main():
     print(f"\n{'Method':<30} {'Time (ms)':<12} {'Acceptance':<12} {'Match':<10}")
     print("-" * 64)
     print(f"{'Sequential (baseline)':<30} {seq_time:<12.1f} {'N/A':<12} {'N/A':<10}")
-    print(f"{'Self-Spec (layers=ALL)':<30} {spec_full_time:<12.1f} {spec_full_acceptance*100:<11.0f}% {'YES' if test1_pass else 'NO':<10}")
-    print(f"{'Self-Spec (layers=8)':<30} {spec8_time:<12.1f} {spec8_acceptance*100:<11.0f}% {'YES' if test4a_pass else 'NO':<10}")
-    print(f"{'Self-Spec (layers=12)':<30} {spec12_time:<12.1f} {spec12_acceptance*100:<11.0f}% {'YES' if test4b_pass else 'NO':<10}")
+    print(
+        f"{'Self-Spec (layers=ALL)':<30} {spec_full_time:<12.1f} {spec_full_acceptance * 100:<11.0f}% {'YES' if test1_pass else 'NO':<10}"
+    )
+    print(
+        f"{'Self-Spec (layers=8)':<30} {spec8_time:<12.1f} {spec8_acceptance * 100:<11.0f}% {'YES' if test4a_pass else 'NO':<10}"
+    )
+    print(
+        f"{'Self-Spec (layers=12)':<30} {spec12_time:<12.1f} {spec12_acceptance * 100:<11.0f}% {'YES' if test4b_pass else 'NO':<10}"
+    )
 
     return all_pass
 

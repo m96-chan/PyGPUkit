@@ -52,8 +52,7 @@ def generate_sequential_greedy(model, first_token, prefill_len, kv_backup, num_t
 
 
 def generate_self_spec_original(
-    model, first_token, prefill_len, kv_backup, num_tokens,
-    max_draft_tokens=4, draft_layers=8
+    model, first_token, prefill_len, kv_backup, num_tokens, max_draft_tokens=4, draft_layers=8
 ):
     """Generate using self-speculative decoding (original, with CPU copies)."""
     model.restore_kv_cache(kv_backup)
@@ -73,7 +72,9 @@ def generate_self_spec_original(
             break
 
         accepted, new_pos, stats = model.decode_step_self_speculative(
-            tokens[-1], position, context_len,
+            tokens[-1],
+            position,
+            context_len,
             max_draft_tokens=current_draft,
             draft_layers=draft_layers,
         )
@@ -90,8 +91,7 @@ def generate_self_spec_original(
 
 
 def generate_self_spec_lookahead(
-    model, first_token, prefill_len, num_tokens,
-    max_draft_tokens=4, draft_layers=8
+    model, first_token, prefill_len, num_tokens, max_draft_tokens=4, draft_layers=8
 ):
     """Generate using self-speculative decoding with lookahead KV (GPU-side)."""
     # Set confirmed position after prefill
@@ -193,9 +193,7 @@ def main():
     print(f"\n--- Sequential Baseline ({GEN_TOKENS} tokens) ---")
 
     start_event.record()
-    seq_tokens = generate_sequential_greedy(
-        model, first_token, prefill_len, kv_backup, GEN_TOKENS
-    )
+    seq_tokens = generate_sequential_greedy(model, first_token, prefill_len, kv_backup, GEN_TOKENS)
     stop_event.record()
     stop_event.synchronize()
 
@@ -214,8 +212,13 @@ def main():
 
         start_event.record()
         orig_tokens, orig_accept = generate_self_spec_original(
-            model, first_token, prefill_len, kv_backup, GEN_TOKENS,
-            max_draft_tokens=4, draft_layers=draft_layers
+            model,
+            first_token,
+            prefill_len,
+            kv_backup,
+            GEN_TOKENS,
+            max_draft_tokens=4,
+            draft_layers=draft_layers,
         )
         stop_event.record()
         stop_event.synchronize()
@@ -237,8 +240,12 @@ def main():
 
         start_event.record()
         look_tokens, look_accept = generate_self_spec_lookahead(
-            model, first_token, prefill_len, GEN_TOKENS,
-            max_draft_tokens=4, draft_layers=draft_layers
+            model,
+            first_token,
+            prefill_len,
+            GEN_TOKENS,
+            max_draft_tokens=4,
+            draft_layers=draft_layers,
         )
         stop_event.record()
         stop_event.synchronize()
@@ -252,16 +259,18 @@ def main():
 
         speedup = orig_time / look_time if look_time > 0 else 0
 
-        results.append({
-            "layers": draft_layers,
-            "orig_time": orig_time,
-            "look_time": look_time,
-            "orig_accept": orig_accept,
-            "look_accept": look_accept,
-            "match_orig": match_orig,
-            "match_look": match_look,
-            "speedup": speedup,
-        })
+        results.append(
+            {
+                "layers": draft_layers,
+                "orig_time": orig_time,
+                "look_time": look_time,
+                "orig_accept": orig_accept,
+                "look_accept": look_accept,
+                "match_orig": match_orig,
+                "match_look": match_look,
+                "speedup": speedup,
+            }
+        )
 
     # =========================================================================
     # Summary
@@ -270,7 +279,9 @@ def main():
     print("SUMMARY")
     print("=" * 70)
 
-    print(f"\n{'Draft Layers':<15} {'Original (ms)':<15} {'Lookahead (ms)':<15} {'Speedup':<10} {'Match'}")
+    print(
+        f"\n{'Draft Layers':<15} {'Original (ms)':<15} {'Lookahead (ms)':<15} {'Speedup':<10} {'Match'}"
+    )
     print("-" * 65)
     print(f"{'Sequential':<15} {seq_time:<15.1f} {'-':<15} {'-':<10} {'N/A'}")
 
@@ -279,7 +290,9 @@ def main():
         match_str = "YES" if (r["match_orig"] and r["match_look"]) else "NO"
         if not (r["match_orig"] and r["match_look"]):
             all_pass = False
-        print(f"{r['layers']:<15} {r['orig_time']:<15.1f} {r['look_time']:<15.1f} {r['speedup']:.2f}x{'':<5} {match_str}")
+        print(
+            f"{r['layers']:<15} {r['orig_time']:<15.1f} {r['look_time']:<15.1f} {r['speedup']:.2f}x{'':<5} {match_str}"
+        )
 
     print("\n" + "=" * 70)
     if all_pass:

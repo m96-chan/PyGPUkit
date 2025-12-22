@@ -62,24 +62,34 @@ class GPUArray:
         This is the fast path for GPU operations - no data copying.
         """
         from pygpukit.core.backend import get_native_module
-        from pygpukit.core.dtypes import bfloat16, float16, float32, float64, int32, int64
+        from pygpukit.core.dtypes import (
+            bfloat16,
+            float16,
+            float32,
+            float64,
+            int16,
+            int32,
+            int64,
+        )
 
         native = get_native_module()
 
         # Map native DataType to Python DataType
         native_dtype = native_array.dtype
-        if native_dtype == native.DataType.Float32:
-            dtype = float32
-        elif native_dtype == native.DataType.Float64:
+        if native_dtype == native.DataType.Float64:
             dtype = float64
+        elif native_dtype == native.DataType.Float32:
+            dtype = float32
         elif native_dtype == native.DataType.Float16:
             dtype = float16
         elif native_dtype == native.DataType.BFloat16:
             dtype = bfloat16
-        elif native_dtype == native.DataType.Int32:
-            dtype = int32
         elif native_dtype == native.DataType.Int64:
             dtype = int64
+        elif native_dtype == native.DataType.Int32:
+            dtype = int32
+        elif native_dtype == native.DataType.Int16:
+            dtype = int16
         else:
             raise ValueError(f"Unknown native dtype: {native_dtype}")
 
@@ -404,8 +414,7 @@ class GPUArray:
 
         if new_size != self.size:
             raise ValueError(
-                f"Cannot view array of size {self.size} as shape {new_shape} "
-                f"(size {new_size})"
+                f"Cannot view array of size {self.size} as shape {new_shape} (size {new_size})"
             )
 
         # Get source native array
@@ -444,14 +453,10 @@ class GPUArray:
             raise RuntimeError("slice_rows() requires native backend")
 
         if self.ndim != 2:
-            raise ValueError(
-                f"slice_rows() requires 2D array, got {self.ndim}D"
-            )
+            raise ValueError(f"slice_rows() requires 2D array, got {self.ndim}D")
 
         if num_rows > self.shape[0]:
-            raise ValueError(
-                f"num_rows ({num_rows}) exceeds batch dimension ({self.shape[0]})"
-            )
+            raise ValueError(f"num_rows ({num_rows}) exceeds batch dimension ({self.shape[0]})")
 
         from pygpukit.core.backend import get_native_module
 

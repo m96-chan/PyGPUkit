@@ -30,9 +30,7 @@ def embedding_lookup(embed_matrix: GPUArray, out: GPUArray, token_id: int) -> No
     native.embedding_lookup(embed_native, out_native, token_id)
 
 
-def embedding_lookup_ptr(
-    embed_matrix: GPUArray, out: GPUArray, token_id_buf: GPUArray
-) -> None:
+def embedding_lookup_ptr(embed_matrix: GPUArray, out: GPUArray, token_id_buf: GPUArray) -> None:
     """Lookup embedding reading index from GPU buffer.
 
     For CUDA Graph replay: index is read from GPU memory, allowing

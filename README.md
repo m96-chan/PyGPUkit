@@ -33,6 +33,58 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.12
+
+### GPU Audio Processing (Driver-Only)
+Comprehensive audio processing operations with custom Radix-2 FFT - no cuFFT dependency.
+
+| Category | Operations |
+|----------|------------|
+| **Time-Frequency** | `stft`, `istft`, `griffin_lim` |
+| **Spectral Features** | `spectral_centroid`, `spectral_bandwidth`, `spectral_rolloff`, `spectral_flatness`, `spectral_contrast` |
+| **Pitch Detection** | `detect_pitch_yin`, `detect_pitch_yin_frames`, `autocorrelation` |
+| **Music Analysis** | `cqt`, `chroma_stft`, `chroma_cqt`, `zero_crossing_rate` |
+| **Source Separation** | `hpss`, `harmonic`, `percussive` |
+| **Time/Pitch** | `time_stretch`, `pitch_shift` |
+
+```python
+from pygpukit.ops import audio
+import numpy as np
+
+# Load audio
+samples = np.random.randn(16000).astype(np.float32)  # 1 sec @ 16kHz
+buf = audio.from_pcm(samples, sample_rate=16000)
+
+# STFT -> Magnitude -> ISTFT roundtrip
+stft_out = audio.stft(buf, n_fft=512, hop_length=160)
+mag = audio.magnitude_spectrum(stft_out)
+reconstructed = audio.griffin_lim(mag, n_iter=32)
+
+# Spectral features
+centroid = audio.spectral_centroid(mag, sample_rate=16000)
+flatness = audio.spectral_flatness(mag)
+
+# HPSS (Harmonic-Percussive Separation)
+harmonic, percussive = audio.hpss(mag, kernel_size=17)
+
+# Time stretch (slow down to half speed)
+slow = audio.time_stretch(buf, rate=0.5)
+
+# Pitch shift (+12 semitones = 1 octave up)
+higher = audio.pitch_shift(buf, sample_rate=16000, n_steps=12)
+```
+
+### Previous Audio Features (v0.2.11)
+| Feature | Description |
+|---------|-------------|
+| **STFT** | Custom Radix-2 FFT (no cuFFT) |
+| **Mel Filterbank** | Whisper-compatible preprocessing |
+| **MFCC** | DCT-II based extraction |
+| **VAD** | Voice Activity Detection |
+| **Streaming** | Ring buffer, windowing |
+
+---
+
 ## What's New in v0.2.11
 
 ### Batch Decode Support
@@ -624,6 +676,7 @@ PyGPUkit/
 | **v0.2.9** | **Unified LLM interface** (CausalTransformerModel), ModelSpec abstraction, GPT-2/LLaMA/Qwen3 support |
 | **v0.2.10** | **Dynamic cuBLASLt loading**, CUDA Graph optimizations, descriptor caching |
 | **v0.2.11** | **Batch decode** (6.8x speedup), Decode Strategy framework, Driver API async, Dual CUDA builds, RTX 5090 (SM120) |
+| **v0.2.12** | **Advanced audio processing** (ISTFT, Griffin-Lim, HPSS, CQT, pitch detection, time stretch) |
 
 ### Planned
 

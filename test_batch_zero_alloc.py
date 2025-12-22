@@ -27,7 +27,7 @@ def main():
     lm_head = model._lm_head if model._lm_head is not None else model.embed_tokens
     vocab_size = lm_head.shape[0]
 
-    print(f"\nModel: Qwen3-8B")
+    print("\nModel: Qwen3-8B")
     print(f"  Layers: {model.config.num_layers}")
 
     # Initialize KV cache
@@ -59,7 +59,9 @@ def main():
         max_batch_size=MAX_BATCH_SIZE,
     )
     print(f"  max_batch_size: {batch_buffers.max_batch_size}")
-    print(f"  hidden_batch shape: {batch_buffers.hidden_batch.shape if batch_buffers.hidden_batch else None}")
+    print(
+        f"  hidden_batch shape: {batch_buffers.hidden_batch.shape if batch_buffers.hidden_batch else None}"
+    )
 
     # Test with different batch sizes
     test_batch_sizes = [2, 4, 8]

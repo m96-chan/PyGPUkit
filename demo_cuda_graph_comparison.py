@@ -21,6 +21,7 @@ print("=" * 70)
 
 try:
     from tokenizers import Tokenizer
+
     tokenizer = Tokenizer.from_file(tokenizer_path)
 except Exception as e:
     print(f"Error loading tokenizer: {e}")
@@ -88,7 +89,7 @@ for i in range(NUM_RUNS):
 
     if i == 0:
         # Decode output for first run
-        output_text = tokenizer.decode(tokens[len(input_ids):])
+        output_text = tokenizer.decode(tokens[len(input_ids) :])
         print(f"  Output: {output_text[:100]}...")
 
 avg_standard = sum(times_standard) / len(times_standard)
