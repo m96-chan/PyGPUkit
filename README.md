@@ -33,6 +33,83 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.11
+
+### Batch Decode Support
+Batch decoding enables processing multiple tokens in parallel, achieving near-linear speedup with TensorCore utilization.
+
+| Batch Size | Per Token (us) | Throughput | Speedup |
+|------------|---------------|------------|---------|
+| 1 | 381,303 | 2.6 tok/s | 1.00x |
+| 2 | 205,030 | 4.9 tok/s | 1.86x |
+| 4 | 108,521 | 9.2 tok/s | 3.51x |
+| 8 | 55,845 | 17.9 tok/s | **6.83x** |
+
+### Decode Strategy Framework
+Modular decode strategies for different use cases:
+
+```python
+from pygpukit.llm import DecodeM1, DecodeM1Graph, DecodeBatch, DecodeJacobi
+
+# Standard single-token decode
+m1 = DecodeM1()
+m1.bind(model)
+
+# CUDA Graph accelerated decode
+m1_graph = DecodeM1Graph()
+m1_graph.bind(model)
+m1_graph.init_graph(max_seq_len=512)
+
+# Batch decode for high throughput
+batch = DecodeBatch(batch_size=8)
+batch.bind(model)
+```
+
+| Strategy | Throughput | Use Case |
+|----------|-----------|----------|
+| DecodeM1 | 3.2 tok/s | Simple, low memory |
+| DecodeM1Graph | 2.2 tok/s | Reduced kernel launch overhead |
+| DecodeBatch (batch=8) | **19.6 tok/s** | High throughput |
+
+### CUDA Graph Improvements
+- Volatile reads for proper graph replay (attention, embedding, KV cache kernels)
+- Separate `DecodeM1Graph` strategy for cleaner architecture
+- Fixed stream handling for RoPE and SDPA operations
+
+### Driver API Async Memory Operations
+New async memory transfer functions using CUDA Driver API:
+
+```python
+from pygpukit.core import memcpy_host_to_device_async, pinned_malloc, pinned_free
+
+# Pinned memory for faster transfers
+pinned_ptr = pinned_malloc(size_bytes)
+memcpy_host_to_device_async(device_ptr, pinned_ptr, size_bytes, stream)
+```
+
+### Dual CUDA Build Support
+Release wheels now include modules for both CUDA 12.x and 13.x:
+
+| Module | CUDA Version | SM Support |
+|--------|-------------|------------|
+| `_pygpukit_native_cu129` | CUDA 12.9 | SM 80-90 |
+| `_pygpukit_native_cu131` | CUDA 13.1 | SM 80-120 (Blackwell) |
+
+### RTX 5090 Support
+Full support for NVIDIA Blackwell consumer GPUs (SM120) via CUDA 13.x build.
+
+### Qwen2 Architecture Support
+Added `QWEN2_SPEC` for Qwen2/Qwen2.5 model family:
+
+```python
+from pygpukit.llm import detect_model_spec, QWEN2_SPEC
+
+spec = detect_model_spec(tensor_names)  # Auto-detects Qwen2
+# Or explicitly: spec = QWEN2_SPEC
+```
+
+---
+
 ## What's New in v0.2.10
 
 ### Dynamic cuBLASLt Loading
@@ -71,6 +148,7 @@ A single `CausalTransformerModel` now supports multiple architectures through th
 |--------------|----------|--------|
 | **GPT-2** | LayerNorm, GELU, Position Embedding | ✅ Tested |
 | **LLaMA 2/3** | RMSNorm, SiLU, RoPE, GQA | ✅ Tested |
+| **Qwen2/2.5** | RMSNorm, SiLU, RoPE, GQA | ✅ Tested |
 | **Qwen3** | RMSNorm, SiLU, RoPE, GQA, QK-Norm | ✅ Tested |
 
 ```python
@@ -544,12 +622,13 @@ PyGPUkit/
 | **v0.2.7** | **Epilogue fusion** (linear+bias+gelu), Multi-SM kernels, API review |
 | **v0.2.8** | CUTLASS v4.3.3 update, auto-update workflow |
 | **v0.2.9** | **Unified LLM interface** (CausalTransformerModel), ModelSpec abstraction, GPT-2/LLaMA/Qwen3 support |
+| **v0.2.10** | **Dynamic cuBLASLt loading**, CUDA Graph optimizations, descriptor caching |
+| **v0.2.11** | **Batch decode** (6.8x speedup), Decode Strategy framework, Driver API async, Dual CUDA builds, RTX 5090 (SM120) |
 
 ### Planned
 
 | Version | Goals |
 |---------|-------|
-| **v0.2.9** | **General LLM Execution** — Attention layer, GPT-2 E2E inference, GPT-2/GPT-Neo/LLaMA architecture support |
 | **v0.3** | Triton backend, advanced ops (softmax), MPS/MIG |
 
 ---

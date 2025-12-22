@@ -36,6 +36,31 @@ void device_free(DevicePtr ptr) {
     }
 }
 
+// =============================================================================
+// Pinned (Page-Locked) Host Memory
+// =============================================================================
+
+void* pinned_malloc(size_t size_bytes) {
+    driver::DriverContext::instance().set_current();
+
+    void* ptr = nullptr;
+    check_driver_error(
+        cuMemAllocHost(&ptr, size_bytes),
+        "Failed to allocate pinned host memory"
+    );
+    return ptr;
+}
+
+void pinned_free(void* ptr) {
+    if (ptr != nullptr) {
+        cuMemFreeHost(ptr);
+    }
+}
+
+// =============================================================================
+// Synchronous Memory Transfers
+// =============================================================================
+
 void memcpy_host_to_device(DevicePtr dst, const void* src, size_t size_bytes) {
     check_driver_error(
         cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(dst), src, size_bytes),
@@ -54,6 +79,34 @@ void memcpy_device_to_device(DevicePtr dst, DevicePtr src, size_t size_bytes) {
     check_driver_error(
         cuMemcpyDtoD(reinterpret_cast<CUdeviceptr>(dst), reinterpret_cast<CUdeviceptr>(src), size_bytes),
         "Failed to copy device to device"
+    );
+}
+
+// =============================================================================
+// Asynchronous Memory Transfers (using CUDA Driver API)
+// =============================================================================
+
+void memcpy_host_to_device_async(DevicePtr dst, const void* src, size_t size_bytes,
+                                  StreamHandle stream) {
+    check_driver_error(
+        cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(dst), src, size_bytes, stream),
+        "Failed to copy host to device (async)"
+    );
+}
+
+void memcpy_device_to_host_async(void* dst, DevicePtr src, size_t size_bytes,
+                                  StreamHandle stream) {
+    check_driver_error(
+        cuMemcpyDtoHAsync(dst, reinterpret_cast<CUdeviceptr>(src), size_bytes, stream),
+        "Failed to copy device to host (async)"
+    );
+}
+
+void memcpy_device_to_device_async(DevicePtr dst, DevicePtr src, size_t size_bytes,
+                                    StreamHandle stream) {
+    check_driver_error(
+        cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(dst), reinterpret_cast<CUdeviceptr>(src), size_bytes, stream),
+        "Failed to copy device to device (async)"
     );
 }
 

@@ -50,6 +50,7 @@ def test_model_specs_exist():
         GPT2_SPEC,
         LLAMA_SPEC,
         MODEL_SPECS,
+        QWEN2_SPEC,
         QWEN3_SPEC,
         ModelSpec,
     )
@@ -57,11 +58,13 @@ def test_model_specs_exist():
     # All specs should be ModelSpec instances
     assert isinstance(GPT2_SPEC, ModelSpec)
     assert isinstance(LLAMA_SPEC, ModelSpec)
+    assert isinstance(QWEN2_SPEC, ModelSpec)
     assert isinstance(QWEN3_SPEC, ModelSpec)
 
     # Check names
     assert GPT2_SPEC.name == "gpt2"
     assert LLAMA_SPEC.name == "llama"
+    assert QWEN2_SPEC.name == "qwen2"
     assert QWEN3_SPEC.name == "qwen3"
 
     # Check architecture flags
@@ -75,6 +78,13 @@ def test_model_specs_exist():
     assert LLAMA_SPEC.use_rope is True
     assert LLAMA_SPEC.use_qk_norm is False
 
+    assert QWEN2_SPEC.norm_type == "rmsnorm"
+    assert QWEN2_SPEC.activation == "silu"
+    assert QWEN2_SPEC.use_rope is True
+    assert QWEN2_SPEC.use_qk_norm is False
+    assert QWEN2_SPEC.default_norm_eps == 1e-6
+    assert QWEN2_SPEC.default_rope_theta == 1000000.0
+
     assert QWEN3_SPEC.norm_type == "rmsnorm"
     assert QWEN3_SPEC.activation == "silu"
     assert QWEN3_SPEC.use_rope is True
@@ -85,8 +95,8 @@ def test_model_specs_exist():
     # Check MODEL_SPECS registry
     assert MODEL_SPECS["gpt2"] is GPT2_SPEC
     assert MODEL_SPECS["llama"] is LLAMA_SPEC
+    assert MODEL_SPECS["qwen2"] is QWEN2_SPEC
     assert MODEL_SPECS["qwen3"] is QWEN3_SPEC
-    assert MODEL_SPECS["qwen2"] is LLAMA_SPEC  # Qwen2 uses LLaMA structure
 
 
 def test_detect_model_spec():

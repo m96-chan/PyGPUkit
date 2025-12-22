@@ -2,6 +2,7 @@
 // Loads cuBLASLt at runtime using LoadLibrary (Windows) or dlopen (Linux)
 
 #include "cublaslt_loader.hpp"
+#include <cuda.h>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -62,6 +63,19 @@ using PFN_cublasLtMatmul = cublasStatus_t (CUBLASAPI *)(
     const void*, void*, size_t, cudaStream_t
 );
 
+// Preference and heuristic function pointers (for CUDA Graph compatibility)
+using PFN_cublasLtMatmulPreferenceCreate = cublasStatus_t (CUBLASAPI *)(cublasLtMatmulPreference_t*);
+using PFN_cublasLtMatmulPreferenceDestroy = cublasStatus_t (CUBLASAPI *)(cublasLtMatmulPreference_t);
+using PFN_cublasLtMatmulPreferenceSetAttribute = cublasStatus_t (CUBLASAPI *)(
+    cublasLtMatmulPreference_t, cublasLtMatmulPreferenceAttributes_t, const void*, size_t
+);
+using PFN_cublasLtMatmulAlgoGetHeuristic = cublasStatus_t (CUBLASAPI *)(
+    cublasLtHandle_t, cublasLtMatmulDesc_t,
+    cublasLtMatrixLayout_t, cublasLtMatrixLayout_t,
+    cublasLtMatrixLayout_t, cublasLtMatrixLayout_t,
+    cublasLtMatmulPreference_t, int, cublasLtMatmulHeuristicResult_struct*, int*
+);
+
 // Global state
 struct CublasLtState {
     std::atomic<bool> initialized{false};
@@ -85,6 +99,12 @@ struct CublasLtState {
     PFN_cublasLtMatrixLayoutCreate pfn_matrix_layout_create{nullptr};
     PFN_cublasLtMatrixLayoutDestroy pfn_matrix_layout_destroy{nullptr};
     PFN_cublasLtMatmul pfn_matmul{nullptr};
+
+    // Preference and heuristic function pointers (for CUDA Graph compatibility)
+    PFN_cublasLtMatmulPreferenceCreate pfn_pref_create{nullptr};
+    PFN_cublasLtMatmulPreferenceDestroy pfn_pref_destroy{nullptr};
+    PFN_cublasLtMatmulPreferenceSetAttribute pfn_pref_set_attr{nullptr};
+    PFN_cublasLtMatmulAlgoGetHeuristic pfn_algo_get_heuristic{nullptr};
 };
 
 CublasLtState g_state;
@@ -123,6 +143,8 @@ std::vector<std::string> get_search_paths() {
     paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1\\bin\\x64");
     paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\bin\\x64");
     // CUDA 12.x uses bin directly
+    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin");
+    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin");
     paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin");
     paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin");
     paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin");
@@ -254,12 +276,23 @@ bool try_load(const std::string& path) {
     auto pfn_matrix_layout_destroy = (PFN_cublasLtMatrixLayoutDestroy)GET_PROC(handle, "cublasLtMatrixLayoutDestroy");
     auto pfn_matmul = (PFN_cublasLtMatmul)GET_PROC(handle, "cublasLtMatmul");
 
+    // Preference and heuristic functions (for CUDA Graph compatibility)
+    auto pfn_pref_create = (PFN_cublasLtMatmulPreferenceCreate)GET_PROC(handle, "cublasLtMatmulPreferenceCreate");
+    auto pfn_pref_destroy = (PFN_cublasLtMatmulPreferenceDestroy)GET_PROC(handle, "cublasLtMatmulPreferenceDestroy");
+    auto pfn_pref_set_attr = (PFN_cublasLtMatmulPreferenceSetAttribute)GET_PROC(handle, "cublasLtMatmulPreferenceSetAttribute");
+    auto pfn_algo_get_heuristic = (PFN_cublasLtMatmulAlgoGetHeuristic)GET_PROC(handle, "cublasLtMatmulAlgoGetHeuristic");
+
     // All core functions must be present
     if (!pfn_create || !pfn_destroy || !pfn_matmul_desc_create ||
         !pfn_matmul_desc_destroy || !pfn_matmul_desc_set_attr ||
         !pfn_matrix_layout_create || !pfn_matrix_layout_destroy || !pfn_matmul) {
         FREE_LIBRARY(handle);
         return false;
+    }
+
+    // Heuristic functions are required for CUDA Graph compatibility
+    if (!pfn_pref_create || !pfn_pref_destroy || !pfn_pref_set_attr || !pfn_algo_get_heuristic) {
+        fprintf(stderr, "[cuBLASLt] WARNING: Heuristic functions not found, CUDA Graph may not work\n");
     }
 
     // Get version (optional, may fail on old versions)
@@ -282,6 +315,12 @@ bool try_load(const std::string& path) {
     g_state.pfn_matrix_layout_create = pfn_matrix_layout_create;
     g_state.pfn_matrix_layout_destroy = pfn_matrix_layout_destroy;
     g_state.pfn_matmul = pfn_matmul;
+
+    // Preference and heuristic function pointers
+    g_state.pfn_pref_create = pfn_pref_create;
+    g_state.pfn_pref_destroy = pfn_pref_destroy;
+    g_state.pfn_pref_set_attr = pfn_pref_set_attr;
+    g_state.pfn_algo_get_heuristic = pfn_algo_get_heuristic;
 
     return true;
 }
@@ -493,12 +532,19 @@ struct GemmCacheKeyHash {
     }
 };
 
-// Cached GEMM configuration
+// Cached GEMM configuration with fixed algo + workspace for CUDA Graph compatibility
 struct GemmCachedDesc {
     cublasLtMatmulDesc_t operationDesc = nullptr;
     cublasLtMatrixLayout_t Adesc = nullptr;
     cublasLtMatrixLayout_t Bdesc = nullptr;
     cublasLtMatrixLayout_t Cdesc = nullptr;
+
+    // Fixed algorithm and workspace for CUDA Graph compatibility
+    cublasLtMatmulAlgo_t algo;
+    void* workspace = nullptr;
+    size_t workspaceSize = 0;
+    bool hasAlgo = false;
+
     bool valid = false;
 };
 
@@ -560,6 +606,61 @@ GemmCachedDesc* get_cached_desc(int M, int N, int K, int dtype, cublasComputeTyp
     status = matrix_layout_create(&cached.Cdesc, dtype, N, M, N);
     if (status != CUBLAS_STATUS_SUCCESS) { cached.valid = false; return nullptr; }
 
+    // =========================================================================
+    // Select algorithm and allocate workspace for CUDA Graph compatibility
+    // =========================================================================
+    cublasLtHandle_t handle = get_handle();
+    if (handle && g_state.pfn_pref_create && g_state.pfn_algo_get_heuristic) {
+        // Create preference
+        cublasLtMatmulPreference_t preference = nullptr;
+        status = g_state.pfn_pref_create(&preference);
+        if (status == CUBLAS_STATUS_SUCCESS && preference) {
+            // Set maximum workspace size (32MB should be enough for most cases)
+            constexpr size_t MAX_WORKSPACE = 32 * 1024 * 1024;
+            g_state.pfn_pref_set_attr(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                      &MAX_WORKSPACE, sizeof(MAX_WORKSPACE));
+
+            // Get best algorithm
+            cublasLtMatmulHeuristicResult_struct heuristicResult;
+            int returnedResults = 0;
+
+            status = g_state.pfn_algo_get_heuristic(
+                handle, cached.operationDesc,
+                cached.Bdesc, cached.Adesc,  // Swapped for row-major
+                cached.Cdesc, cached.Cdesc,
+                preference, 1, &heuristicResult, &returnedResults
+            );
+
+            fprintf(stderr, "[cuBLASLt] AlgoGetHeuristic: status=%d, returnedResults=%d\n",
+                    static_cast<int>(status), returnedResults);
+
+            if (status == CUBLAS_STATUS_SUCCESS && returnedResults > 0) {
+                // Store the selected algorithm
+                cached.algo = heuristicResult.algo;
+                cached.workspaceSize = heuristicResult.workspaceSize;
+                cached.hasAlgo = true;
+
+                // Allocate fixed workspace if needed (using Driver API)
+                if (cached.workspaceSize > 0) {
+                    CUdeviceptr dptr = 0;
+                    CUresult err = cuMemAlloc(&dptr, cached.workspaceSize);
+                    if (err != CUDA_SUCCESS) {
+                        cached.workspace = nullptr;
+                        cached.workspaceSize = 0;
+                        // Still valid, just without workspace
+                    } else {
+                        cached.workspace = reinterpret_cast<void*>(dptr);
+                    }
+                }
+
+                fprintf(stderr, "[cuBLASLt] Cached algo for M=%d N=%d K=%d, workspace=%zu bytes\n",
+                        M, N, K, cached.workspaceSize);
+            }
+
+            g_state.pfn_pref_destroy(preference);
+        }
+    }
+
     cached.valid = true;
     return &cached;
 }
@@ -592,6 +693,12 @@ cudaError_t gemm_fp16(
     __half alpha = __float2half(1.0f);
     __half beta = __float2half(0.0f);
 
+    // Use cached algorithm and workspace for CUDA Graph compatibility
+    // If no algorithm was cached, pass nullptr (cuBLASLt will pick one)
+    const cublasLtMatmulAlgo_t* algo_ptr = cached->hasAlgo ? &cached->algo : nullptr;
+    void* workspace = cached->workspace;
+    size_t workspaceSize = cached->workspaceSize;
+
     // Direct function pointer call for maximum performance
     cublasStatus_t status = g_state.pfn_matmul(
         handle, cached->operationDesc,
@@ -601,7 +708,7 @@ cudaError_t gemm_fp16(
         &beta,
         C, cached->Cdesc,
         C, cached->Cdesc,
-        nullptr, nullptr, 0, stream
+        algo_ptr, workspace, workspaceSize, stream
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
@@ -639,6 +746,11 @@ cudaError_t gemm_fp32(
     float alpha = 1.0f;
     float beta = 0.0f;
 
+    // Use cached algorithm and workspace for CUDA Graph compatibility
+    const cublasLtMatmulAlgo_t* algo_ptr = cached->hasAlgo ? &cached->algo : nullptr;
+    void* workspace = cached->workspace;
+    size_t workspaceSize = cached->workspaceSize;
+
     // Direct function pointer call for maximum performance
     cublasStatus_t status = g_state.pfn_matmul(
         handle, cached->operationDesc,
@@ -648,7 +760,7 @@ cudaError_t gemm_fp32(
         &beta,
         C, cached->Cdesc,
         C, cached->Cdesc,
-        nullptr, nullptr, 0, stream
+        algo_ptr, workspace, workspaceSize, stream
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
@@ -686,6 +798,11 @@ cudaError_t gemm_bf16(
     float alpha = 1.0f;
     float beta = 0.0f;
 
+    // Use cached algorithm and workspace for CUDA Graph compatibility
+    const cublasLtMatmulAlgo_t* algo_ptr = cached->hasAlgo ? &cached->algo : nullptr;
+    void* workspace = cached->workspace;
+    size_t workspaceSize = cached->workspaceSize;
+
     // Direct function pointer call for maximum performance
     cublasStatus_t status = g_state.pfn_matmul(
         handle, cached->operationDesc,
@@ -695,7 +812,7 @@ cudaError_t gemm_bf16(
         &beta,
         C, cached->Cdesc,
         C, cached->Cdesc,
-        nullptr, nullptr, 0, stream
+        algo_ptr, workspace, workspaceSize, stream
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {

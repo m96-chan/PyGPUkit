@@ -191,6 +191,21 @@ void init_ops_bindings(py::module_& m) {
           "k: [seq_len, n_heads_k, head_dim]\n"
           "cos, sin: [seq_len, head_dim]");
 
+    // RoPE with FP32 cos/sin tables (higher precision for bf16/f16)
+    m.def("rope_inplace_f32table", &ops::rope_inplace_f32table,
+          py::arg("q"), py::arg("k"), py::arg("cos"), py::arg("sin"),
+          "Apply RoPE with FP32 cos/sin tables (higher precision).\n"
+          "q: [seq_len, n_heads_q, head_dim] (bf16 or f16)\n"
+          "k: [seq_len, n_heads_k, head_dim] (bf16 or f16)\n"
+          "cos, sin: [seq_len, head_dim] (f32)");
+
+    // Split fused QKV projection output into separate Q, K, V tensors
+    m.def("split_qkv_batch", &ops::split_qkv_batch,
+          py::arg("qkv"), py::arg("q_out"), py::arg("k_out"), py::arg("v_out"),
+          py::arg("q_dim"), py::arg("k_dim"), py::arg("v_dim"),
+          "Split fused QKV projection [seq_len, q_dim+k_dim+v_dim] into Q, K, V.\n"
+          "Output buffers must be pre-allocated for CUDA Graph compatibility.");
+
     // Scaled Dot-Product Attention with Causal Mask
     m.def("sdpa_causal", py::overload_cast<const GPUArray&, const GPUArray&, const GPUArray&, float>(&ops::sdpa_causal),
           py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("scale") = 0.0f,
@@ -212,6 +227,13 @@ void init_ops_bindings(py::module_& m) {
           py::arg("context_len"), py::arg("scale") = 0.0f,
           "SDPA with fixed-length KV cache support.\n"
           "K/V are pre-allocated to max_seq_len, context_len specifies actual valid tokens.");
+
+    m.def("sdpa_causal_fixed_cache_ptr", &ops::sdpa_causal_fixed_cache_ptr,
+          py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("out"),
+          py::arg("context_len_buf"), py::arg("max_kv_len"), py::arg("scale") = 0.0f,
+          "SDPA with pointer-based context_len for CUDA Graph support.\n"
+          "context_len_buf: GPU int32 buffer containing actual context_len.\n"
+          "max_kv_len: Max context length (for shared memory allocation at graph capture).");
 
     // ========================================================================
     // Tensor Manipulation Operations
@@ -304,6 +326,18 @@ void init_ops_bindings(py::module_& m) {
           "Lookup embedding reading index from GPU buffer.\n"
           "token_id_buf: GPUArray[1] int32 containing token/position value");
 
+    m.def("embedding_lookup_batch", &ops::embedding_lookup_batch,
+          py::arg("embed_matrix"), py::arg("out"), py::arg("token_ids_buf"),
+          py::arg("batch_size"),
+          "Batch embedding lookup from GPU token ID array.\n"
+          "Looks up multiple rows: out[i, :] = embed_matrix[token_ids[i], :]");
+
+    m.def("slice_rows_range_ptr", &ops::slice_rows_range_ptr,
+          py::arg("table"), py::arg("out"), py::arg("start_pos_buf"),
+          py::arg("count"),
+          "Slice consecutive rows from table using GPU-stored start position.\n"
+          "Copies `count` rows: out[i, :] = table[start_pos + i, :]");
+
     // In-place addition (for CUDA Graph)
     m.def("add_inplace", &ops::add_inplace,
           py::arg("a"), py::arg("b"),
@@ -318,6 +352,30 @@ void init_ops_bindings(py::module_& m) {
     m.def("copy_to", &ops::copy_to,
           py::arg("src"), py::arg("dst"),
           "Copy src to dst on GPU");
+
+    // ========================================================================
+    // Dtype Cast Operations
+    // ========================================================================
+
+    m.def("cast_f32_to_bf16", py::overload_cast<const GPUArray&>(&ops::cast_f32_to_bf16),
+          py::arg("src"),
+          "Cast float32 to bfloat16 on GPU (round to nearest even)");
+
+    m.def("cast_f32_to_bf16_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::cast_f32_to_bf16),
+          py::arg("src"), py::arg("dst"),
+          "Cast float32 to bfloat16 on GPU (in-place version)");
+
+    m.def("cast_f32_to_f16", &ops::cast_f32_to_f16,
+          py::arg("src"),
+          "Cast float32 to float16 on GPU");
+
+    m.def("cast_bf16_to_f32", &ops::cast_bf16_to_f32,
+          py::arg("src"),
+          "Cast bfloat16 to float32 on GPU");
+
+    m.def("cast_f16_to_f32", &ops::cast_f16_to_f32,
+          py::arg("src"),
+          "Cast float16 to float32 on GPU");
 
     // ========================================================================
     // Quantization Operations (#85)

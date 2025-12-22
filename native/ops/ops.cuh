@@ -122,6 +122,28 @@ void silu(const GPUArray& input, GPUArray& out);
 // cos, sin: [seq_len, head_dim]
 void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
 
+// RoPE with FP32 cos/sin tables (higher precision for bf16/f16 Q/K)
+// q: [seq_len, n_heads_q, head_dim] (bf16 or f16)
+// k: [seq_len, n_heads_k, head_dim] (bf16 or f16)
+// cos, sin: [seq_len, head_dim] (f32)
+void rope_inplace_f32table(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
+
+// Split fused QKV projection output into separate Q, K, V tensors
+// qkv: [seq_len, q_dim + k_dim + v_dim]
+// q_out: [seq_len, q_dim] (can be pre-allocated buffer)
+// k_out: [seq_len, k_dim]
+// v_out: [seq_len, v_dim]
+// Note: Output buffers must be pre-allocated for CUDA Graph compatibility
+void split_qkv_batch(
+    const GPUArray& qkv,
+    GPUArray& q_out,
+    GPUArray& k_out,
+    GPUArray& v_out,
+    int q_dim,
+    int k_dim,
+    int v_dim
+);
+
 // Scaled Dot-Product Attention with Causal Mask
 // Q: [n_heads, q_len, head_dim]
 // K: [n_heads, kv_len, head_dim]
@@ -137,6 +159,13 @@ void sdpa_causal(const GPUArray& Q, const GPUArray& K, const GPUArray& V, GPUArr
 // K/V are pre-allocated to max_seq_len, context_len specifies actual valid tokens
 void sdpa_causal_fixed_cache(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
                               GPUArray& out, int context_len, float scale = 0.0f);
+
+// SDPA with pointer-based context_len (for CUDA Graph replay with dynamic context)
+// context_len_buf: GPU int32 buffer containing actual context length
+// max_kv_len: Maximum context length (for shared memory allocation at graph capture)
+void sdpa_causal_fixed_cache_ptr(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                                   GPUArray& out, const GPUArray& context_len_buf,
+                                   int max_kv_len, float scale = 0.0f);
 
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
@@ -196,6 +225,12 @@ void kv_cache_prefill_gqa(const GPUArray& new_kv, GPUArray& cache, int num_heads
 // embed_matrix: [vocab_size, hidden_size], out: [1, hidden_size], token_id: row index
 void embedding_lookup(const GPUArray& embed_matrix, GPUArray& out, int token_id);
 void embedding_lookup_ptr(const GPUArray& embed_matrix, GPUArray& out, const GPUArray& token_id_buf);
+void embedding_lookup_batch(const GPUArray& embed_matrix, GPUArray& out, const GPUArray& token_ids_buf, int batch_size);
+
+// Slice consecutive rows from table using GPU-stored start position
+// Copies `count` rows starting from start_pos (read from GPU buffer)
+// out[i, :] = table[start_pos + i, :]
+void slice_rows_range_ptr(const GPUArray& table, GPUArray& out, const GPUArray& start_pos_buf, int count);
 
 // In-place addition: a += b
 void add_inplace(GPUArray& a, const GPUArray& b);
@@ -205,6 +240,23 @@ void mul_inplace(GPUArray& a, const GPUArray& b);
 
 // GPU-to-GPU copy
 void copy_to(const GPUArray& src, GPUArray& dst);
+
+// ============================================================================
+// Dtype Cast Operations
+// ============================================================================
+
+// Cast float32 to bfloat16 (round to nearest even)
+GPUArray cast_f32_to_bf16(const GPUArray& src);
+void cast_f32_to_bf16(const GPUArray& src, GPUArray& dst);
+
+// Cast float32 to float16
+GPUArray cast_f32_to_f16(const GPUArray& src);
+
+// Cast bfloat16 to float32
+GPUArray cast_bf16_to_f32(const GPUArray& src);
+
+// Cast float16 to float32
+GPUArray cast_f16_to_f32(const GPUArray& src);
 
 // ============================================================================
 // Quantization Operations (#85)

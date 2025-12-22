@@ -132,11 +132,24 @@ Python loads a shared library:
 
 ### DLL Loading Model (Windows)
 
-**v0.1.x (Current):**
+**v0.1.x:**
 - Requires CUDA Toolkit installation
 - Loads DLLs from `CUDA_PATH/bin`
 
-**v0.2+ (Planned - Driver-Only Mode):**
+**v0.2.x (Current):**
+- cuBLASLt loaded dynamically at runtime
+- Searches: `CUDA_PATH/bin/x64` → `CUDA_PATH/bin` → system PATH
+- Descriptor caching for matmul performance
+- Falls back gracefully if cuBLASLt unavailable
+
+```cpp
+// Dynamic loading sequence
+cublasLt64_13.dll  // CUDA 13.x
+cublasLt64_12.dll  // CUDA 12.x
+cublasLt64_11.dll  // CUDA 11.x
+```
+
+**Future (Driver-Only Mode):**
 - NVRTC DLL shipped inside the wheel
 - CUDA Driver (`nvcuda.dll`) provided by NVIDIA GPU drivers
 - No cudart dependency
@@ -167,6 +180,7 @@ Python loads a shared library:
 6. Convert Rust features to Python, Cython, Numba, or pure CUDA kernels
 7. Delete Rust tasks from roadmap
 8. Simplify architecture by removing Rust layer
+9. Use emoji or non-ASCII characters in source code or comments (cp932/Shift-JIS compatibility)
 
 ### DO
 
@@ -183,8 +197,9 @@ Python loads a shared library:
 
 ### Target Architectures
 
-- **Supported:** Ampere (SM 80–86), Ada (SM 89), Hopper (SM 90)
+- **Supported:** Ampere (SM 80-86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100, 120)
 - **Unsupported:** Architectures below SM80
+- **Build default:** SM 80, 86, 89, 90, 100, 120 (CUDA 13.1+)
 
 ### Design Philosophy
 
@@ -235,12 +250,54 @@ Block sizes: `(16, 16)` or `(32, 8)` - do NOT increase to 32×32 unless profiler
 
 ### Benchmark Targets
 
+#### MatMul Performance
+
 | GPU | FP32 | TF32 TensorCore |
 |-----|------|-----------------|
 | RTX 3090 Ti | 18 TFLOPS | 27+ TFLOPS |
 | A100 | 5.5+ TFLOPS | 156 TFLOPS |
 
 **Achieved (v0.2.3):** TF32 on RTX 3090 Ti: **27.38 TFLOPS** (8192×8192×8192)
+
+#### LLM Inference (Qwen3-8B, RTX 3090 Ti, FP16)
+
+**Single Token Decode (M=1):**
+
+| Mode | Tokens/sec | ms/token |
+|------|-----------|----------|
+| Non-graph decode | 1.84 | 544 |
+| CUDA Graph decode | 2.19 | 457 |
+| Speedup | **1.19x** | - |
+
+**Batch Decode (v0.2.11):**
+
+| Batch Size | Per Token (us) | Throughput | Speedup |
+|------------|---------------|------------|---------|
+| 1 | 381,303 | 2.6 tok/s | 1.00x |
+| 2 | 205,030 | 4.9 tok/s | 1.86x |
+| 4 | 108,521 | 9.2 tok/s | 3.51x |
+| 8 | 55,845 | 17.9 tok/s | **6.83x** |
+
+**E2E Batch Verification (32 tokens):**
+
+| Method | Time (ms) | tok/s | Speedup |
+|--------|----------|-------|---------|
+| Sequential | 14,541 | 2.13 | 1.00x |
+| Batch Verify (batch=4) | 4,082 | 7.59 | 3.56x |
+| Batch Verify (batch=8) | 2,147 | 14.44 | **6.77x** |
+
+**Decode Strategy Benchmark (v0.2.11):**
+
+Model: Qwen2.5-7B-Instruct (bfloat16), RTX 3090 Ti
+
+| Strategy | tok/s | Speedup | Notes |
+|----------|-------|---------|-------|
+| DecodeM1 (baseline) | 3.2 | 1.00x | Single token per step |
+| DecodeBatch (batch=8) | 19.6 | **6.06x** | TensorCore efficient |
+| DecodeSpeculative | 1.4 | 0.42x | Self-speculative (early layers) |
+| DecodeJacobi | 1.7 | 0.53x | Parallel iterative |
+
+**Note:** Large models (8B+) are GPU compute-bound; CUDA Graph benefit is modest. Batch decode shows near-linear scaling with TensorCore utilization.
 
 ### CMake Flags
 
@@ -467,26 +524,27 @@ Edit → Build → Validate → Benchmark → Commit
 
 ### Build Instructions (IMPORTANT)
 
-**CUDA 13.1でビルドする場合（推奨）：**
+**Git Bashからビルド（推奨）：**
 
-```cmd
-:: Windows Command Prompt (cmd.exe) から実行
-:: Git Bashからは実行しないこと！環境変数が伝播しない
-cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda13.bat
+```bash
+cd /d/Projects/m96-chan/PyGPUkit
+./build.sh 86       # SM 86のみ (RTX 3090 Ti)
+./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh          # デフォルト: SM 86
 ```
 
-**CUDA 12.xでビルドする場合：**
+**Windows cmd.exeからビルド（代替）：**
 
 ```cmd
 cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda12.bat
+scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
+scripts\build_cuda13.bat 120     :: SM 120のみ (RTX 5090)
+scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100, 120)
 ```
 
 **注意事項：**
-- 必ずWindowsのcmd.exeから実行すること（Git Bash不可）
-- VS Developer Command Promptからでも可
-- ビルドスクリプトがvcvars64.batを呼び出してVS環境をセットアップする
+- RTX 5090 (SM 120) はCUDA 13.1以降が必要
+- サポートSM: 80, 86, 89, 90, 100, 120
 
 ### Pre-Commit Checks (MANDATORY)
 
@@ -592,6 +650,47 @@ python benchmark.py --tf32-version v2   # PTX mma.sync (default)
 
 ---
 
+## CUDA Graph Guidelines
+
+M=1 decode separates CUDA Graph and Non-Graph versions.
+
+### Graph Version Requirements
+
+Use CUDA Graph ONLY when ALL conditions are met:
+
+1. **Fixed shapes/dtypes/RoPE tables** - No dynamic changes during replay
+2. **Identical kernel path** - warmup / capture / replay use the same code path
+3. **No KV cache pollution** - Graph must not write to real KV cache during warmup/capture
+4. **H2D copies on capture stream** - All host-to-device copies must be on the stream being captured
+
+### Fallback Rules
+
+If any condition is NOT met, fallback to Non-Graph version.
+
+### Prohibited in Graph
+
+- Conditional branches based on runtime values
+- `copy_to` operations (use direct buffer writes instead)
+- Any operation that reads from or writes to KV cache
+- SDPA (Scaled Dot-Product Attention) - always run outside graph
+
+### Implementation Pattern
+
+```python
+# Graph captures ONLY stateless operations:
+# - Embedding lookup (via GPU pointer)
+# - Linear projections (QKV, O, MLP)
+# - RMSNorm
+# - RoPE (via pre-computed GPU tables)
+
+# These run OUTSIDE graph:
+# - KV cache update
+# - SDPA attention
+# - Any operation that depends on context_len at runtime
+```
+
+---
+
 ## Design Principles
 
 ### 1. GPU Systems Toolkit, Not ML Framework
@@ -648,6 +747,122 @@ Leveraging vendor or OSS-optimized kernels is acceptable and encouraged.
 
 ---
 
+## LLM Inference Architecture
+
+### Overview
+
+PyGPUkit includes a minimal LLM inference engine for SafeTensors models (Qwen, LLaMA, etc.).
+
+```
+SafeTensors → Model Loading → Prefill → Decode Loop → Token Output
+                                ↓
+                         CUDA Graph (optional)
+```
+
+### Decode Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| **Standard** | `model.forward()` with allocation | Simple usage |
+| **Zero-Alloc** | `_decode_step_zero_alloc()` | Low-latency |
+| **CUDA Graph** | `_decode_step_graph_replay()` | Reduced kernel launch overhead |
+| **Jacobi** | Parallel iterative decode | Speculative execution |
+
+### CUDA Graph Implementation
+
+#### Capture Stream
+
+All kernels must use `internal::get_capture_stream()` for CUDA Graph compatibility:
+
+```cpp
+cudaStream_t stream = internal::get_capture_stream();
+my_kernel<<<grid, block, 0, stream>>>(...);
+```
+
+**Critical**: Kernels launched without stream parameter will NOT be captured in the graph.
+
+#### Pointer-Based Kernels
+
+For dynamic values during graph replay, use `_ptr` kernel variants:
+
+```cpp
+// Static value (captured at graph creation)
+sdpa_causal_fixed_cache(..., context_len, ...);
+
+// Pointer-based (read from GPU buffer at runtime)
+sdpa_causal_fixed_cache_ptr(..., context_len_buf, max_kv_len, ...);
+```
+
+#### DecodeBuffers
+
+Pre-allocated buffers for zero-allocation decode:
+
+```python
+@dataclass
+class DecodeBuffers:
+    hidden: GPUArray       # [1, hidden_size]
+    q: GPUArray            # [1, num_heads, head_dim]
+    k: GPUArray            # [1, num_kv_heads, head_dim]
+    v: GPUArray            # [1, num_kv_heads, head_dim]
+    attn_out: GPUArray     # [num_heads, 1, head_dim]
+    # ... (layer-shared, reused across all layers)
+```
+
+#### Graph Capture Flow
+
+```python
+model.init_decode_graph(max_seq_len=512)  # Capture graph
+
+# Replay loop
+for i in range(num_tokens):
+    logits = model._decode_step_graph_replay(token_id, position, context_len)
+    next_token = sample(logits)
+```
+
+#### Performance Notes
+
+| Scenario | CUDA Graph Speedup |
+|----------|-------------------|
+| Full decode loop (with D2H) | ~1.2x |
+| Kernel-only (large model) | ~1.0x (GPU-bound) |
+| Small model / many kernels | Higher benefit |
+
+**Limitation**: Current implementation has 2 device syncs per replay (H2D visibility + completion wait), which reduces benefit for large models.
+
+### KV Cache
+
+Fixed-length KV cache with GQA support:
+
+```python
+# Initialize
+for block in model.blocks:
+    block.attn.init_fixed_cache(max_seq_len, dtype="float16")
+
+# Prefill
+hidden, past_kv = model(input_ids, use_cache=True)
+for i, block in enumerate(model.blocks):
+    kv_cache_prefill_gqa(past_kv[i][0], block.attn._k_cache, num_heads, start_pos=0)
+    kv_cache_prefill_gqa(past_kv[i][1], block.attn._v_cache, num_heads, start_pos=0)
+
+# Backup/Restore for benchmarking
+kv_backup = model.snapshot_kv_cache()
+model.restore_kv_cache(kv_backup)
+```
+
+### Jacobi Decoding
+
+Parallel iterative generation for speculative execution:
+
+```python
+# Initialize Jacobi buffers
+model.init_jacobi_decode(lookahead_k=4, max_seq_len=512)
+
+# Parallel decode
+accepted_tokens = model.jacobi_decode_step(draft_tokens, position)
+```
+
+---
+
 ## Non-goals
 
 1. **Full Training Framework** - No optimizers, training loops, dataset pipelines, autograd engines
@@ -693,6 +908,20 @@ Leveraging vendor or OSS-optimized kernels is acceptable and encouraged.
 - ✅ SM >= 80 runtime check
 - ✅ 106 Rust tests
 
+### v0.2.10 (Released)
+- ✅ CUDA Graph for single-token decode (M=1)
+- ✅ cuBLASLt dynamic loading with descriptor caching
+- ✅ Top-k sampling in graph capture
+- ✅ Zero-allocation decode path (DecodeBuffers)
+
+### v0.2.11 (Current)
+- ✅ CUDA Graph stream fix (RoPE/SDPA now properly captured)
+- ✅ Batch decode support (seq_len > 1)
+- ✅ Jacobi decoding for parallel iterative generation
+- ✅ Self-Speculative decoding framework
+- ✅ GPU-side Lookahead KV Cache
+- ✅ CUDA Events API
+
 ### Remaining Work
 - Rust-side async memory transfer engine
 - Rust-side kernel dispatch controller
@@ -704,15 +933,16 @@ Leveraging vendor or OSS-optimized kernels is acceptable and encouraged.
 
 ### Build Instructions
 
-**CUDA 13.1でビルドする場合（推奨）：**
+**Git Bashからビルド（推奨）：**
 
-```cmd
-:: Windows Command Prompt (cmd.exe) から実行
-:: Git Bashからは実行しないこと！環境変数が伝播しない
-cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
-scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100)
+```bash
+cd /d/Projects/m96-chan/PyGPUkit
+./build.sh 86       # SM 86のみ (RTX 3090 Ti)
+./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh          # デフォルト: SM 86
 ```
+
+**サポートSM:** 80, 86, 89, 90, 100, 120
 
 ### Tokenizer
 

@@ -143,27 +143,30 @@ void bias_add_inplace(GPUArray& output, const GPUArray& bias) {
     const int block_size = 256;
     const int grid_size = (n + block_size - 1) / block_size;
 
+    // Use capture stream for CUDA Graph compatibility
+    cudaStream_t stream = internal::get_capture_stream();
+
     switch (output.dtype()) {
         case DataType::Float32:
-            bias_add_f32_kernel<<<grid_size, block_size>>>(
+            bias_add_f32_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<float*>(output.data()),
                 static_cast<const float*>(bias.data()),
                 batch_size, features);
             break;
         case DataType::Float64:
-            bias_add_f64_kernel<<<grid_size, block_size>>>(
+            bias_add_f64_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<double*>(output.data()),
                 static_cast<const double*>(bias.data()),
                 batch_size, features);
             break;
         case DataType::Float16:
-            bias_add_f16_kernel<<<grid_size, block_size>>>(
+            bias_add_f16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__half*>(output.data()),
                 static_cast<const __half*>(bias.data()),
                 batch_size, features);
             break;
         case DataType::BFloat16:
-            bias_add_bf16_kernel<<<grid_size, block_size>>>(
+            bias_add_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__nv_bfloat16*>(output.data()),
                 static_cast<const __nv_bfloat16*>(bias.data()),
                 batch_size, features);
@@ -575,9 +578,12 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
     const int block_size = 256;
     const int grid_size = (total_work + block_size - 1) / block_size;
 
+    // Use capture stream if available (for CUDA Graph support)
+    cudaStream_t stream = internal::get_capture_stream();
+
     switch (q.dtype()) {
         case DataType::Float32:
-            nn::rope_f32_kernel<<<grid_size, block_size>>>(
+            nn::rope_f32_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<float*>(q.data()),
                 static_cast<float*>(k.data()),
                 static_cast<const float*>(cos.data()),
@@ -585,7 +591,7 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
                 seq_len, n_heads_q, n_heads_k, head_dim);
             break;
         case DataType::Float16:
-            nn::rope_f16_kernel<<<grid_size, block_size>>>(
+            nn::rope_f16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__half*>(q.data()),
                 static_cast<__half*>(k.data()),
                 static_cast<const __half*>(cos.data()),
@@ -593,7 +599,7 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
                 seq_len, n_heads_q, n_heads_k, head_dim);
             break;
         case DataType::BFloat16:
-            nn::rope_bf16_kernel<<<grid_size, block_size>>>(
+            nn::rope_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
                 static_cast<__nv_bfloat16*>(q.data()),
                 static_cast<__nv_bfloat16*>(k.data()),
                 static_cast<const __nv_bfloat16*>(cos.data()),
@@ -605,6 +611,138 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
     }
 
     sync_and_check("rope kernel failed");
+}
+
+// RoPE with FP32 cos/sin tables (for bf16/f16 Q/K with higher precision)
+void rope_inplace_f32table(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin) {
+    // q: [seq_len, n_heads_q, head_dim] (bf16 or f16)
+    // k: [seq_len, n_heads_k, head_dim] (bf16 or f16)
+    // cos, sin: [seq_len, head_dim] (f32)
+
+    if (q.ndim() != 3 || k.ndim() != 3 || cos.ndim() != 2 || sin.ndim() != 2) {
+        throw std::runtime_error("rope_f32table: invalid dimensions");
+    }
+    if (q.dtype() != k.dtype()) {
+        throw std::runtime_error("rope_f32table: q and k dtype mismatch");
+    }
+    if (cos.dtype() != DataType::Float32 || sin.dtype() != DataType::Float32) {
+        throw std::runtime_error("rope_f32table: cos/sin must be float32");
+    }
+    if (q.dtype() != DataType::Float16 && q.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("rope_f32table: q/k must be float16 or bfloat16");
+    }
+
+    int seq_len = q.shape()[0];
+    int n_heads_q = q.shape()[1];
+    int n_heads_k = k.shape()[1];
+    int head_dim = q.shape()[2];
+
+    if (k.shape()[0] != seq_len || k.shape()[2] != head_dim) {
+        throw std::runtime_error("rope_f32table: q and k shape mismatch");
+    }
+    if (cos.shape()[0] != seq_len || cos.shape()[1] != head_dim) {
+        throw std::runtime_error("rope_f32table: cos shape mismatch");
+    }
+    if (sin.shape()[0] != seq_len || sin.shape()[1] != head_dim) {
+        throw std::runtime_error("rope_f32table: sin shape mismatch");
+    }
+
+    int half_dim = head_dim / 2;
+    int total_q = seq_len * n_heads_q * half_dim;
+    int total_k = seq_len * n_heads_k * half_dim;
+    int total_work = std::max(total_q, total_k);
+
+    const int block_size = 256;
+    const int grid_size = (total_work + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (q.dtype()) {
+        case DataType::Float16:
+            nn::rope_f16_f32table_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<__half*>(q.data()),
+                static_cast<__half*>(k.data()),
+                static_cast<const float*>(cos.data()),
+                static_cast<const float*>(sin.data()),
+                seq_len, n_heads_q, n_heads_k, head_dim);
+            break;
+        case DataType::BFloat16:
+            nn::rope_bf16_f32table_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<__nv_bfloat16*>(q.data()),
+                static_cast<__nv_bfloat16*>(k.data()),
+                static_cast<const float*>(cos.data()),
+                static_cast<const float*>(sin.data()),
+                seq_len, n_heads_q, n_heads_k, head_dim);
+            break;
+        default:
+            break;
+    }
+
+    sync_and_check("rope_f32table kernel failed");
+}
+
+// ============================================================================
+// Split QKV Batch
+// Splits fused QKV projection output [seq_len, q_dim + k_dim + v_dim]
+// into separate Q, K, V tensors for batch decode
+// ============================================================================
+
+void split_qkv_batch(
+    const GPUArray& qkv,
+    GPUArray& q_out,
+    GPUArray& k_out,
+    GPUArray& v_out,
+    int q_dim,
+    int k_dim,
+    int v_dim
+) {
+    if (qkv.ndim() != 2) {
+        throw std::runtime_error("split_qkv_batch: qkv must be 2D [seq_len, total_dim]");
+    }
+
+    int seq_len = static_cast<int>(qkv.shape()[0]);
+    int total_dim = q_dim + k_dim + v_dim;
+
+    if (static_cast<int>(qkv.shape()[1]) != total_dim) {
+        throw std::runtime_error("split_qkv_batch: qkv dim mismatch");
+    }
+
+    int total_elements = seq_len * total_dim;
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (qkv.dtype()) {
+        case DataType::Float16:
+            nn::split_qkv_batch_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(qkv.data()),
+                static_cast<__half*>(q_out.data()),
+                static_cast<__half*>(k_out.data()),
+                static_cast<__half*>(v_out.data()),
+                seq_len, q_dim, k_dim, v_dim);
+            break;
+        case DataType::Float32:
+            nn::split_qkv_batch_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(qkv.data()),
+                static_cast<float*>(q_out.data()),
+                static_cast<float*>(k_out.data()),
+                static_cast<float*>(v_out.data()),
+                seq_len, q_dim, k_dim, v_dim);
+            break;
+        case DataType::BFloat16:
+            nn::split_qkv_batch_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(qkv.data()),
+                static_cast<__nv_bfloat16*>(q_out.data()),
+                static_cast<__nv_bfloat16*>(k_out.data()),
+                static_cast<__nv_bfloat16*>(v_out.data()),
+                seq_len, q_dim, k_dim, v_dim);
+            break;
+        default:
+            throw std::runtime_error("split_qkv_batch: unsupported dtype");
+    }
+
+    sync_and_check("split_qkv_batch kernel failed");
 }
 
 // ============================================================================
@@ -722,15 +860,15 @@ private:
 
     ~FlashDecodingWorkspace() {
         if (buffer_) {
-            cudaFree(buffer_);
+            device_free(buffer_);
         }
     }
 
     void resize(size_t new_size) {
         if (buffer_) {
-            cudaFree(buffer_);
+            device_free(buffer_);
         }
-        cudaMalloc(&buffer_, new_size);
+        buffer_ = static_cast<float*>(device_malloc(new_size));
         size_ = new_size;
     }
 
@@ -999,6 +1137,93 @@ void sdpa_causal_fixed_cache(
 
     sdpa_causal_dispatch(Q, K, V, out, scale, context_len);
     sync_and_check("sdpa kernel failed");
+}
+
+// SDPA with fixed-length KV cache using pointer-based context_len (for CUDA Graph)
+// context_len_buf: GPU buffer containing actual context_len (read at runtime)
+// max_kv_len: Maximum KV length (for shared memory allocation during graph capture)
+void sdpa_causal_fixed_cache_ptr(
+    const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+    GPUArray& out, const GPUArray& context_len_buf, int max_kv_len, float scale
+) {
+    if (Q.ndim() != 3 || K.ndim() != 3 || V.ndim() != 3 || out.ndim() != 3) {
+        throw std::runtime_error("sdpa expects 3D inputs [n_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype() || Q.dtype() != out.dtype()) {
+        throw std::runtime_error("sdpa: dtype mismatch");
+    }
+    if (context_len_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("sdpa: context_len_buf must be int32");
+    }
+
+    int n_heads = Q.shape()[0];
+    int q_len = Q.shape()[1];
+    int head_dim = Q.shape()[2];
+    int kv_stride = static_cast<int>(K.shape()[1]);
+
+    if (K.shape()[0] != n_heads || V.shape()[0] != n_heads) {
+        throw std::runtime_error("sdpa: n_heads mismatch");
+    }
+    if (K.shape()[2] != head_dim || V.shape()[2] != head_dim) {
+        throw std::runtime_error("sdpa: head_dim mismatch");
+    }
+    if (K.shape()[1] != V.shape()[1]) {
+        throw std::runtime_error("sdpa: K and V seq_len mismatch");
+    }
+    if (out.shape()[0] != n_heads || out.shape()[1] != q_len || out.shape()[2] != head_dim) {
+        throw std::runtime_error("sdpa: output shape mismatch");
+    }
+    if (max_kv_len <= 0 || max_kv_len > kv_stride) {
+        throw std::runtime_error("sdpa: invalid max_kv_len");
+    }
+
+    // Compute scale if not provided
+    if (scale <= 0.0f) {
+        scale = 1.0f / sqrtf((float)head_dim);
+    }
+
+    // Grid: one block per (head, query_position) pair
+    dim3 grid(n_heads, q_len);
+    int block_size = 128;
+
+    // Allocate shared memory for max_kv_len (allows dynamic context_len at runtime)
+    size_t shared_mem_size = max_kv_len * sizeof(float);
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (Q.dtype()) {
+        case DataType::Float32:
+            nn::sdpa_causal_f32_kernel_ptr<<<grid, block_size, shared_mem_size, stream>>>(
+                static_cast<const float*>(Q.data()),
+                static_cast<const float*>(K.data()),
+                static_cast<const float*>(V.data()),
+                static_cast<float*>(out.data()),
+                static_cast<const int*>(context_len_buf.data()),
+                n_heads, q_len, kv_stride, head_dim, scale);
+            break;
+        case DataType::Float16:
+            nn::sdpa_causal_f16_kernel_ptr<<<grid, block_size, shared_mem_size, stream>>>(
+                static_cast<const __half*>(Q.data()),
+                static_cast<const __half*>(K.data()),
+                static_cast<const __half*>(V.data()),
+                static_cast<__half*>(out.data()),
+                static_cast<const int*>(context_len_buf.data()),
+                n_heads, q_len, kv_stride, head_dim, scale);
+            break;
+        case DataType::BFloat16:
+            nn::sdpa_causal_bf16_kernel_ptr<<<grid, block_size, shared_mem_size, stream>>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                static_cast<const int*>(context_len_buf.data()),
+                n_heads, q_len, kv_stride, head_dim, scale);
+            break;
+        default:
+            throw std::runtime_error("sdpa: unsupported dtype");
+    }
+
+    sync_and_check("sdpa_causal_fixed_cache_ptr kernel failed");
 }
 
 // ============================================================================
@@ -1683,6 +1908,112 @@ void embedding_lookup_ptr(
     sync_and_check("embedding_lookup_ptr kernel failed");
 }
 
+// Batch embedding lookup from GPU token ID array (for batch CUDA Graph)
+void embedding_lookup_batch(
+    const GPUArray& embed_matrix, GPUArray& out,
+    const GPUArray& token_ids_buf, int batch_size
+) {
+    if (embed_matrix.ndim() != 2) {
+        throw std::runtime_error("embedding_lookup_batch: embed_matrix must be 2D");
+    }
+    if (embed_matrix.dtype() != out.dtype()) {
+        throw std::runtime_error("embedding_lookup_batch: dtype mismatch");
+    }
+    if (token_ids_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("embedding_lookup_batch: token_ids_buf must be int32");
+    }
+
+    int hidden_size = static_cast<int>(embed_matrix.shape()[1]);
+    int total_elements = batch_size * hidden_size;
+
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (embed_matrix.dtype()) {
+        case DataType::Float16:
+            nn::embedding_lookup_batch_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(embed_matrix.data()),
+                static_cast<__half*>(out.data()),
+                static_cast<const int*>(token_ids_buf.data()),
+                batch_size, hidden_size);
+            break;
+        case DataType::BFloat16:
+            nn::embedding_lookup_batch_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(embed_matrix.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                static_cast<const int*>(token_ids_buf.data()),
+                batch_size, hidden_size);
+            break;
+        case DataType::Float32:
+            nn::embedding_lookup_batch_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(embed_matrix.data()),
+                static_cast<float*>(out.data()),
+                static_cast<const int*>(token_ids_buf.data()),
+                batch_size, hidden_size);
+            break;
+        default:
+            throw std::runtime_error("embedding_lookup_batch: unsupported dtype");
+    }
+
+    sync_and_check("embedding_lookup_batch kernel failed");
+}
+
+// Slice consecutive rows from table using GPU-stored start position
+void slice_rows_range_ptr(
+    const GPUArray& table,
+    GPUArray& out,
+    const GPUArray& start_pos_buf,
+    int count
+) {
+    if (table.ndim() != 2) {
+        throw std::runtime_error("slice_rows_range_ptr: table must be 2D");
+    }
+    if (table.dtype() != out.dtype()) {
+        throw std::runtime_error("slice_rows_range_ptr: dtype mismatch");
+    }
+    if (start_pos_buf.dtype() != DataType::Int32) {
+        throw std::runtime_error("slice_rows_range_ptr: start_pos_buf must be int32");
+    }
+
+    int row_dim = static_cast<int>(table.shape()[1]);
+    int total_elements = count * row_dim;
+
+    const int block_size = 256;
+    const int grid_size = (total_elements + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (table.dtype()) {
+        case DataType::Float16:
+            nn::slice_rows_range_ptr_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(table.data()),
+                static_cast<__half*>(out.data()),
+                static_cast<const int*>(start_pos_buf.data()),
+                count, row_dim);
+            break;
+        case DataType::BFloat16:
+            nn::slice_rows_range_ptr_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(table.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                static_cast<const int*>(start_pos_buf.data()),
+                count, row_dim);
+            break;
+        case DataType::Float32:
+            nn::slice_rows_range_ptr_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(table.data()),
+                static_cast<float*>(out.data()),
+                static_cast<const int*>(start_pos_buf.data()),
+                count, row_dim);
+            break;
+        default:
+            throw std::runtime_error("slice_rows_range_ptr: unsupported dtype");
+    }
+
+    sync_and_check("slice_rows_range_ptr kernel failed");
+}
+
 // In-place addition: a += b
 void add_inplace(GPUArray& a, const GPUArray& b) {
     if (a.dtype() != b.dtype()) {
@@ -1810,6 +2141,113 @@ void copy_to(const GPUArray& src, GPUArray& dst) {
     }
 
     sync_and_check("copy_to kernel failed");
+}
+
+// ============================================================================
+// Dtype Cast Operations
+// ============================================================================
+
+GPUArray cast_f32_to_bf16(const GPUArray& src) {
+    if (src.dtype() != DataType::Float32) {
+        throw std::runtime_error("cast_f32_to_bf16: input must be float32");
+    }
+
+    GPUArray dst(src.shape(), DataType::BFloat16);
+    size_t n = src.size();
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    nn::cast_f32_to_bf16_kernel<<<grid_size, block_size>>>(
+        static_cast<const float*>(src.data()),
+        static_cast<__nv_bfloat16*>(dst.data()),
+        n);
+
+    sync_and_check("cast_f32_to_bf16 kernel failed");
+    return dst;
+}
+
+void cast_f32_to_bf16(const GPUArray& src, GPUArray& dst) {
+    if (src.dtype() != DataType::Float32) {
+        throw std::runtime_error("cast_f32_to_bf16: input must be float32");
+    }
+    if (dst.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("cast_f32_to_bf16: output must be bfloat16");
+    }
+    if (src.size() != dst.size()) {
+        throw std::runtime_error("cast_f32_to_bf16: size mismatch");
+    }
+
+    size_t n = src.size();
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    nn::cast_f32_to_bf16_kernel<<<grid_size, block_size>>>(
+        static_cast<const float*>(src.data()),
+        static_cast<__nv_bfloat16*>(dst.data()),
+        n);
+
+    sync_and_check("cast_f32_to_bf16 kernel failed");
+}
+
+GPUArray cast_f32_to_f16(const GPUArray& src) {
+    if (src.dtype() != DataType::Float32) {
+        throw std::runtime_error("cast_f32_to_f16: input must be float32");
+    }
+
+    GPUArray dst(src.shape(), DataType::Float16);
+    size_t n = src.size();
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    nn::cast_f32_to_f16_kernel<<<grid_size, block_size>>>(
+        static_cast<const float*>(src.data()),
+        static_cast<__half*>(dst.data()),
+        n);
+
+    sync_and_check("cast_f32_to_f16 kernel failed");
+    return dst;
+}
+
+GPUArray cast_bf16_to_f32(const GPUArray& src) {
+    if (src.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("cast_bf16_to_f32: input must be bfloat16");
+    }
+
+    GPUArray dst(src.shape(), DataType::Float32);
+    size_t n = src.size();
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    nn::cast_bf16_to_f32_kernel<<<grid_size, block_size>>>(
+        static_cast<const __nv_bfloat16*>(src.data()),
+        static_cast<float*>(dst.data()),
+        n);
+
+    sync_and_check("cast_bf16_to_f32 kernel failed");
+    return dst;
+}
+
+GPUArray cast_f16_to_f32(const GPUArray& src) {
+    if (src.dtype() != DataType::Float16) {
+        throw std::runtime_error("cast_f16_to_f32: input must be float16");
+    }
+
+    GPUArray dst(src.shape(), DataType::Float32);
+    size_t n = src.size();
+
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    nn::cast_f16_to_f32_kernel<<<grid_size, block_size>>>(
+        static_cast<const __half*>(src.data()),
+        static_cast<float*>(dst.data()),
+        n);
+
+    sync_and_check("cast_f16_to_f32 kernel failed");
+    return dst;
 }
 
 } // namespace ops

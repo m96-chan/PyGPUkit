@@ -1,10 +1,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <cstdint>
+#include <cuda.h>
 
 #include "../core/device.hpp"
 #include "../core/memory.hpp"
 #include "../core/stream.hpp"
+#include "../core/event.hpp"
 #include "../core/cuda_graph.hpp"
 
 namespace py = pybind11;
@@ -131,6 +134,9 @@ void init_core_bindings(py::module_& m) {
         })
         .def_property_readonly("owns_memory", &GPUArray::owns_memory,
             "Whether this array owns its memory (False for views)")
+        .def("data_ptr", [](const GPUArray& self) {
+            return reinterpret_cast<uintptr_t>(self.data());
+        }, "Get the raw device pointer as an integer")
         .def_static("narrow", &GPUArray::narrow,
             py::arg("source"), py::arg("offset_elements"), py::arg("new_shape"),
             "Create a zero-copy view into source array.\n\n"
@@ -206,6 +212,117 @@ void init_core_bindings(py::module_& m) {
                    (self.priority() == StreamPriority::High ? "High" : "Low") + ")";
         });
 
+    // CudaEvent class for GPU-side timing
+    py::class_<CudaEvent>(m, "CudaEvent")
+        .def(py::init<bool>(), py::arg("blocking_sync") = false,
+             "Create a CUDA event for GPU-side timing.\n\n"
+             "Args:\n"
+             "    blocking_sync: If True, synchronize() will block CPU. Default False.\n\n"
+             "Usage for timing:\n"
+             "    start = CudaEvent()\n"
+             "    stop = CudaEvent()\n"
+             "    start.record()\n"
+             "    # ... GPU operations ...\n"
+             "    stop.record()\n"
+             "    stop.synchronize()\n"
+             "    elapsed_ms = event_elapsed_ms(start, stop)")
+        .def("record", py::overload_cast<const Stream&>(&CudaEvent::record),
+             py::arg("stream"),
+             "Record event in the specified stream.")
+        .def("record", py::overload_cast<>(&CudaEvent::record),
+             "Record event in the default stream.")
+        .def("synchronize", &CudaEvent::synchronize,
+             "Wait for the event to complete.")
+        .def("query", &CudaEvent::query,
+             "Check if the event has completed (non-blocking).")
+        .def("__repr__", [](const CudaEvent& self) {
+            return std::string("CudaEvent()");
+        });
+
+    // Event timing functions
+    m.def("event_elapsed_ms", &event_elapsed_ms,
+          py::arg("start"), py::arg("stop"),
+          "Get elapsed time between two events in milliseconds.\n"
+          "Both events must have been recorded and stop must be synchronized.");
+    m.def("event_elapsed_us", &event_elapsed_us,
+          py::arg("start"), py::arg("stop"),
+          "Get elapsed time between two events in microseconds.\n"
+          "Both events must have been recorded and stop must be synchronized.");
+
+    // Async memory transfer from host pointer to GPUArray
+    m.def("memcpy_to_device_async", [](GPUArray& dst, py::buffer src, const Stream& stream) {
+        py::buffer_info info = src.request();
+        if (static_cast<size_t>(info.size * info.itemsize) != dst.nbytes()) {
+            throw std::runtime_error("Buffer size mismatch");
+        }
+        memcpy_host_to_device_async(dst.data(), info.ptr, dst.nbytes(), stream.handle());
+    }, py::arg("dst"), py::arg("src"), py::arg("stream"),
+    "Async copy from host buffer to GPUArray. src must be pinned memory for true async.");
+
+    // Async memcpy from raw pointer (integer address) to GPUArray
+    m.def("memcpy_ptr_to_device_async",
+        [](GPUArray& dst, uintptr_t src_ptr, size_t size_bytes, const Stream& stream) {
+            if (size_bytes > dst.nbytes()) {
+                throw std::runtime_error("Size exceeds destination capacity");
+            }
+            memcpy_host_to_device_async(dst.data(), reinterpret_cast<const void*>(src_ptr),
+                                        size_bytes, stream.handle());
+        },
+        py::arg("dst"), py::arg("src_ptr"), py::arg("size_bytes"), py::arg("stream"),
+        "Async copy from raw host pointer to GPUArray.\n"
+        "Note: For true async behavior, src_ptr should point to pinned memory.");
+
+    // Async memcpy using raw stream handle (for CUDA Graph stream)
+    m.def("memcpy_ptr_to_device_async_raw_stream",
+        [](GPUArray& dst, uintptr_t src_ptr, size_t size_bytes, uintptr_t stream_handle) {
+            if (size_bytes > dst.nbytes()) {
+                throw std::runtime_error("Size exceeds destination capacity");
+            }
+            CUstream stream = reinterpret_cast<CUstream>(stream_handle);
+            memcpy_host_to_device_async(dst.data(), reinterpret_cast<const void*>(src_ptr),
+                                        size_bytes, stream);
+        },
+        py::arg("dst"), py::arg("src_ptr"), py::arg("size_bytes"), py::arg("stream_handle"),
+        "Async copy from raw host pointer to GPUArray using raw stream handle.\n"
+        "Used for CUDA Graph's internal stream.");
+
+    // Sync memcpy from raw pointer (for mmap'd data)
+    m.def("memcpy_ptr_to_device",
+        [](GPUArray& dst, uintptr_t src_ptr, size_t size_bytes) {
+            if (size_bytes > dst.nbytes()) {
+                throw std::runtime_error("Size exceeds destination capacity");
+            }
+            memcpy_host_to_device(dst.data(), reinterpret_cast<const void*>(src_ptr), size_bytes);
+        },
+        py::arg("dst"), py::arg("src_ptr"), py::arg("size_bytes"),
+        "Copy from raw host pointer (e.g., mmap'd memory) to GPUArray.");
+
+    // Device-to-device async
+    m.def("memcpy_device_to_device_async",
+        [](GPUArray& dst, const GPUArray& src, const Stream& stream) {
+            if (dst.nbytes() != src.nbytes()) {
+                throw std::runtime_error("Array size mismatch");
+            }
+            memcpy_device_to_device_async(dst.data(), src.data(), src.nbytes(), stream.handle());
+        },
+        py::arg("dst"), py::arg("src"), py::arg("stream"),
+        "Async copy between GPUArrays on the same device.");
+
+    // Synchronize a raw stream handle (using Driver API)
+    m.def("stream_synchronize_raw",
+        [](uintptr_t stream_handle) {
+            CUstream stream = reinterpret_cast<CUstream>(stream_handle);
+            CUresult err = cuStreamSynchronize(stream);
+            if (err != CUDA_SUCCESS) {
+                const char* error_str = nullptr;
+                cuGetErrorString(err, &error_str);
+                throw std::runtime_error(std::string("Stream synchronize failed: ") +
+                                         (error_str ? error_str : "unknown error"));
+            }
+        },
+        py::arg("stream_handle"),
+        "Synchronize a stream using its raw handle.");
+
     // CudaGraph class for optimized decode
     py::class_<CudaGraph>(m, "CudaGraph")
         .def(py::init<>(),
@@ -240,6 +357,9 @@ void init_core_bindings(py::module_& m) {
              "Check if the graph is currently capturing operations.")
         .def_property_readonly("num_nodes", &CudaGraph::num_nodes,
              "Get the number of nodes in the captured graph.")
+        .def("get_stream_handle", [](const CudaGraph& self) {
+            return reinterpret_cast<uintptr_t>(self.get_stream_handle());
+        }, "Get the internal stream handle as an integer for async operations.")
         .def("__repr__", [](const CudaGraph& self) {
             if (self.is_ready()) {
                 return "CudaGraph(ready, nodes=" + std::to_string(self.num_nodes()) + ")";

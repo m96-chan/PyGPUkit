@@ -1,10 +1,11 @@
 /**
  * Error handling and validation helpers
+ *
+ * PyGPUkit v0.2.12+: Using CUDA Driver API only
  */
 #pragma once
 
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
 #include "../../core/memory.hpp"
@@ -26,13 +27,10 @@ inline void check_driver_error(CUresult result, const char* msg) {
 // Skip synchronization during CUDA Graph capture (not allowed)
 inline void sync_and_check(const char* msg) {
     // Check if we're capturing - if so, skip sync (not allowed during capture)
-    cudaStream_t capture_stream = internal::get_capture_stream();
+    CUstream capture_stream = internal::get_capture_stream();
     if (capture_stream != nullptr) {
-        // During capture, just check the last error without syncing
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            throw CudaError(std::string(msg) + ": " + cudaGetErrorString(err));
-        }
+        // During capture, synchronization is not allowed.
+        // Errors will be detected when graph capture ends.
         return;
     }
     check_driver_error(cuCtxSynchronize(), msg);
