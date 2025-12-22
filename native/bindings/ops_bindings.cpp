@@ -603,6 +603,37 @@ void init_ops_bindings(py::module_& m) {
           "Returns: Resampled GPUArray");
 
     // ========================================================================
+    // Audio Streaming Operations (#97)
+    // ========================================================================
+
+    m.def("audio_ring_buffer_write", &ops::audio::ring_buffer_write,
+          py::arg("input"), py::arg("ring_buffer"), py::arg("write_pos"),
+          "Write samples to a ring buffer with wrap-around.\n"
+          "input: GPUArray of float32 samples to write\n"
+          "ring_buffer: GPUArray ring buffer (modified in-place)\n"
+          "write_pos: Current write position in ring buffer");
+
+    m.def("audio_ring_buffer_read", &ops::audio::ring_buffer_read,
+          py::arg("ring_buffer"), py::arg("read_pos"), py::arg("num_samples"),
+          "Read samples from a ring buffer (linearized).\n"
+          "ring_buffer: GPUArray ring buffer\n"
+          "read_pos: Read position in ring buffer\n"
+          "num_samples: Number of samples to read\n"
+          "Returns: Linearized GPUArray");
+
+    m.def("audio_apply_hann_window", &ops::audio::apply_hann_window,
+          py::arg("data"),
+          "Apply Hann window to audio data (in-place).\n"
+          "data: GPUArray of float32 samples (modified in-place)");
+
+    m.def("audio_overlap_add", &ops::audio::overlap_add,
+          py::arg("input"), py::arg("output"), py::arg("output_offset"),
+          "Overlap-add: add windowed chunk to output buffer.\n"
+          "input: Windowed input chunk\n"
+          "output: Output buffer (accumulated, modified in-place)\n"
+          "output_offset: Offset in output buffer");
+
+    // ========================================================================
     // cuBLASLt debug functions
     // ========================================================================
 

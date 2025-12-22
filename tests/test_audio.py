@@ -166,5 +166,126 @@ class TestAudioBuffer:
         np.testing.assert_allclose(max_abs, 1.0, rtol=0.01)
 
 
+class TestAudioRingBuffer:
+    """Tests for AudioRingBuffer."""
+
+    def test_ring_buffer_creation(self, skip_if_no_cuda):
+        """Test ring buffer creation."""
+        ring = audio.AudioRingBuffer(capacity=16000, sample_rate=16000)
+        assert ring.capacity == 16000
+        assert ring.sample_rate == 16000
+        assert ring.samples_available == 0
+
+    def test_ring_buffer_write_read(self, skip_if_no_cuda):
+        """Test writing and reading from ring buffer."""
+        ring = audio.AudioRingBuffer(capacity=1000, sample_rate=16000)
+
+        # Write samples
+        samples = np.arange(100, dtype=np.float32)
+        ring.write(samples)
+
+        assert ring.samples_available == 100
+
+        # Read samples back
+        result = ring.read(100)
+        np.testing.assert_allclose(result.to_numpy(), samples, rtol=1e-5)
+
+    def test_ring_buffer_wrap_around(self, skip_if_no_cuda):
+        """Test ring buffer wrap-around behavior."""
+        ring = audio.AudioRingBuffer(capacity=100, sample_rate=16000)
+
+        # Write 150 samples (should wrap)
+        samples1 = np.ones(80, dtype=np.float32)
+        samples2 = np.ones(70, dtype=np.float32) * 2
+
+        ring.write(samples1)
+        ring.write(samples2)
+
+        # Buffer should be full
+        assert ring.samples_available == 100
+
+    def test_ring_buffer_clear(self, skip_if_no_cuda):
+        """Test clearing the ring buffer."""
+        ring = audio.AudioRingBuffer(capacity=1000, sample_rate=16000)
+
+        samples = np.ones(500, dtype=np.float32)
+        ring.write(samples)
+
+        ring.clear()
+        assert ring.samples_available == 0
+
+
+class TestAudioStream:
+    """Tests for AudioStream."""
+
+    def test_stream_creation(self, skip_if_no_cuda):
+        """Test stream creation."""
+        stream = audio.AudioStream(chunk_size=480, sample_rate=16000)
+        assert stream.chunk_size == 480
+        assert stream.hop_size == 240  # Default 50% overlap
+        assert stream.sample_rate == 16000
+
+    def test_stream_push_and_has_chunk(self, skip_if_no_cuda):
+        """Test pushing audio and checking for chunks."""
+        stream = audio.AudioStream(chunk_size=480, hop_size=240, sample_rate=16000)
+
+        # No chunk initially
+        assert not stream.has_chunk()
+
+        # Push 480 samples (one full chunk)
+        samples = np.random.randn(480).astype(np.float32)
+        stream.push(samples)
+
+        # Now we should have one chunk
+        assert stream.has_chunk()
+
+    def test_stream_pop_chunk(self, skip_if_no_cuda):
+        """Test popping chunks from stream."""
+        stream = audio.AudioStream(chunk_size=480, hop_size=240, sample_rate=16000)
+
+        # Push enough for 2 chunks (480 + 240 = 720 samples)
+        samples = np.random.randn(720).astype(np.float32)
+        stream.push(samples)
+
+        # Should have 2 chunks available
+        assert stream.chunks_available == 2
+
+        # Pop first chunk
+        chunk1 = stream.pop_chunk(apply_window=False)
+        assert chunk1.shape[0] == 480
+
+        # Pop second chunk
+        chunk2 = stream.pop_chunk(apply_window=False)
+        assert chunk2.shape[0] == 480
+
+    def test_stream_windowing(self, skip_if_no_cuda):
+        """Test Hann windowing on chunks."""
+        stream = audio.AudioStream(chunk_size=480, sample_rate=16000)
+
+        # Push constant signal
+        samples = np.ones(480, dtype=np.float32)
+        stream.push(samples)
+
+        # Pop with windowing
+        chunk = stream.pop_chunk(apply_window=True)
+        result = chunk.to_numpy()
+
+        # Hann window should taper the edges
+        assert result[0] < 0.1  # Near zero at start
+        assert result[-1] < 0.1  # Near zero at end
+        assert result[240] > 0.9  # Near 1 at center
+
+    def test_stream_reset(self, skip_if_no_cuda):
+        """Test resetting the stream."""
+        stream = audio.AudioStream(chunk_size=480, sample_rate=16000)
+
+        samples = np.random.randn(1000).astype(np.float32)
+        stream.push(samples)
+
+        stream.reset()
+        assert not stream.has_chunk()
+        assert stream.chunks_available == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -48,6 +48,41 @@ void normalize_rms(GPUArray& input, float target_db = -20.0f);
  */
 GPUArray resample(const GPUArray& input, int src_rate, int dst_rate);
 
+// ============================================================================
+// Streaming Operations
+// ============================================================================
+
+/**
+ * Write samples to a ring buffer with wrap-around.
+ * @param input Input samples to write
+ * @param ring_buffer Ring buffer GPUArray
+ * @param write_pos Current write position (updated after write)
+ */
+void ring_buffer_write(const GPUArray& input, GPUArray& ring_buffer, int write_pos);
+
+/**
+ * Read samples from a ring buffer (linearized).
+ * @param ring_buffer Ring buffer GPUArray
+ * @param read_pos Read position
+ * @param num_samples Number of samples to read
+ * @return Linearized GPUArray
+ */
+GPUArray ring_buffer_read(const GPUArray& ring_buffer, int read_pos, int num_samples);
+
+/**
+ * Apply Hann window to audio data (in-place).
+ * @param data Audio data to window (modified in-place)
+ */
+void apply_hann_window(GPUArray& data);
+
+/**
+ * Overlap-add: add windowed chunk to output buffer.
+ * @param input Windowed input chunk
+ * @param output Output buffer (accumulated)
+ * @param output_offset Offset in output buffer
+ */
+void overlap_add(const GPUArray& input, GPUArray& output, int output_offset);
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

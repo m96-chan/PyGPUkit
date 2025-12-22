@@ -178,6 +178,68 @@ __global__ void resample_polyphase_kernel(
     output[out_idx] = sum;
 }
 
+// ============================================================================
+// Ring Buffer Operations (for streaming)
+// ============================================================================
+
+// Write samples to ring buffer with wrap-around
+__global__ void ring_buffer_write_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ ring_buffer,
+    int ring_size,
+    int write_pos,
+    int num_samples)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_samples) {
+        int dst_idx = (write_pos + idx) % ring_size;
+        ring_buffer[dst_idx] = input[idx];
+    }
+}
+
+// Read samples from ring buffer (linearize with wrap-around)
+__global__ void ring_buffer_read_kernel(
+    const float* __restrict__ ring_buffer,
+    float* __restrict__ output,
+    int ring_size,
+    int read_pos,
+    int num_samples)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < num_samples) {
+        int src_idx = (read_pos + idx) % ring_size;
+        output[idx] = ring_buffer[src_idx];
+    }
+}
+
+// Apply Hann window for overlap-add
+__global__ void apply_hann_window_kernel(
+    float* __restrict__ data,
+    int window_size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < window_size) {
+        // Hann window: 0.5 * (1 - cos(2*pi*n/(N-1)))
+        float n = static_cast<float>(idx);
+        float N = static_cast<float>(window_size - 1);
+        float window = 0.5f * (1.0f - cosf(2.0f * 3.14159265358979f * n / N));
+        data[idx] *= window;
+    }
+}
+
+// Overlap-add: add windowed chunk to output buffer
+__global__ void overlap_add_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int output_offset,
+    int chunk_size)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < chunk_size) {
+        atomicAdd(&output[output_offset + idx], input[idx]);
+    }
+}
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

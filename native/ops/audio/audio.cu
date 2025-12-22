@@ -208,6 +208,104 @@ GPUArray resample(const GPUArray& input, int src_rate, int dst_rate) {
     return output;
 }
 
+// ============================================================================
+// Streaming Operations
+// ============================================================================
+
+void ring_buffer_write(const GPUArray& input, GPUArray& ring_buffer, int write_pos) {
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("ring_buffer_write: input must be Float32");
+    }
+    if (ring_buffer.dtype() != DataType::Float32) {
+        throw std::runtime_error("ring_buffer_write: ring_buffer must be Float32");
+    }
+
+    int num_samples = static_cast<int>(input.size());
+    int ring_size = static_cast<int>(ring_buffer.size());
+
+    const int block_size = 256;
+    int num_blocks = (num_samples + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    ring_buffer_write_kernel<<<num_blocks, block_size, 0, stream>>>(
+        static_cast<const float*>(input.data()),
+        static_cast<float*>(ring_buffer.data()),
+        ring_size,
+        write_pos,
+        num_samples);
+
+    sync_and_check("ring_buffer_write kernel failed");
+}
+
+GPUArray ring_buffer_read(const GPUArray& ring_buffer, int read_pos, int num_samples) {
+    if (ring_buffer.dtype() != DataType::Float32) {
+        throw std::runtime_error("ring_buffer_read: ring_buffer must be Float32");
+    }
+
+    int ring_size = static_cast<int>(ring_buffer.size());
+
+    GPUArray output({static_cast<size_t>(num_samples)}, DataType::Float32);
+
+    const int block_size = 256;
+    int num_blocks = (num_samples + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    ring_buffer_read_kernel<<<num_blocks, block_size, 0, stream>>>(
+        static_cast<const float*>(ring_buffer.data()),
+        static_cast<float*>(output.data()),
+        ring_size,
+        read_pos,
+        num_samples);
+
+    sync_and_check("ring_buffer_read kernel failed");
+    return output;
+}
+
+void apply_hann_window(GPUArray& data) {
+    if (data.dtype() != DataType::Float32) {
+        throw std::runtime_error("apply_hann_window: data must be Float32");
+    }
+
+    int window_size = static_cast<int>(data.size());
+
+    const int block_size = 256;
+    int num_blocks = (window_size + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    apply_hann_window_kernel<<<num_blocks, block_size, 0, stream>>>(
+        static_cast<float*>(data.data()),
+        window_size);
+
+    sync_and_check("apply_hann_window kernel failed");
+}
+
+void overlap_add(const GPUArray& input, GPUArray& output, int output_offset) {
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("overlap_add: input must be Float32");
+    }
+    if (output.dtype() != DataType::Float32) {
+        throw std::runtime_error("overlap_add: output must be Float32");
+    }
+
+    int chunk_size = static_cast<int>(input.size());
+
+    const int block_size = 256;
+    int num_blocks = (chunk_size + block_size - 1) / block_size;
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    overlap_add_kernel<<<num_blocks, block_size, 0, stream>>>(
+        static_cast<const float*>(input.data()),
+        static_cast<float*>(output.data()),
+        output_offset,
+        chunk_size);
+
+    sync_and_check("overlap_add kernel failed");
+}
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit
