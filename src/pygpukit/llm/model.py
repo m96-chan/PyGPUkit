@@ -77,6 +77,7 @@ class CausalTransformerModel:
 
     # Type hints for dynamically added attributes
     _batch_decode_buffers: DecodeBuffers | None
+    _batch_token_ids_np: np.ndarray
 
     def __init__(
         self,
