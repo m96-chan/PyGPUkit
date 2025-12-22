@@ -75,6 +75,9 @@ class CausalTransformerModel:
     Model-specific behavior is controlled by the spec attribute.
     """
 
+    # Type hints for dynamically added attributes
+    _batch_decode_buffers: DecodeBuffers | None
+
     def __init__(
         self,
         config: TransformerConfig,
@@ -1854,6 +1857,7 @@ class CausalTransformerModel:
                 f"Error: {e}"
             ) from e
 
+        assert buffers.logits is not None, "Logits buffer not initialized"
         return buffers.logits
 
     # =========================================================================
