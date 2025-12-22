@@ -1,9 +1,14 @@
 #pragma once
 
 #include "types.hpp"
+#include "stream.hpp"
 #include <vector>
 
 namespace pygpukit {
+
+// =============================================================================
+// Device Memory Allocation
+// =============================================================================
 
 // Allocate device memory
 DevicePtr device_malloc(size_t size_bytes);
@@ -11,14 +16,44 @@ DevicePtr device_malloc(size_t size_bytes);
 // Free device memory
 void device_free(DevicePtr ptr);
 
-// Copy host to device
+// =============================================================================
+// Pinned (Page-Locked) Host Memory - for faster H2D transfers
+// =============================================================================
+
+// Allocate pinned host memory
+void* pinned_malloc(size_t size_bytes);
+
+// Free pinned host memory
+void pinned_free(void* ptr);
+
+// =============================================================================
+// Synchronous Memory Transfers
+// =============================================================================
+
+// Copy host to device (synchronous)
 void memcpy_host_to_device(DevicePtr dst, const void* src, size_t size_bytes);
 
-// Copy device to host
+// Copy device to host (synchronous)
 void memcpy_device_to_host(void* dst, DevicePtr src, size_t size_bytes);
 
-// Copy device to device
+// Copy device to device (synchronous)
 void memcpy_device_to_device(DevicePtr dst, DevicePtr src, size_t size_bytes);
+
+// =============================================================================
+// Asynchronous Memory Transfers (for pipelined loading)
+// =============================================================================
+
+// Copy host to device (asynchronous on stream)
+void memcpy_host_to_device_async(DevicePtr dst, const void* src, size_t size_bytes,
+                                  StreamHandle stream);
+
+// Copy device to host (asynchronous on stream)
+void memcpy_device_to_host_async(void* dst, DevicePtr src, size_t size_bytes,
+                                  StreamHandle stream);
+
+// Copy device to device (asynchronous on stream)
+void memcpy_device_to_device_async(DevicePtr dst, DevicePtr src, size_t size_bytes,
+                                    StreamHandle stream);
 
 // Set device memory
 void device_memset(DevicePtr ptr, int value, size_t size_bytes);
