@@ -62,7 +62,7 @@ def pad_or_trim(
         pad_length = length - current_length
         padding = from_numpy(np.zeros(pad_length, dtype=np.float32))
         # Concatenate on GPU
-        result_np = np.concatenate([audio_data.numpy(), padding.numpy()])
+        result_np = np.concatenate([audio_data.to_numpy(), padding.to_numpy()])
         return from_numpy(result_np)
 
 
@@ -168,7 +168,7 @@ def preprocess_audio(
     # Transpose to [n_mels, n_frames] for encoder input
     # Current shape: [n_frames, n_mels]
     # Target shape: [n_mels, n_frames]
-    result_np = normalized.numpy().T
+    result_np = normalized.to_numpy().T
     return from_numpy(result_np.astype(np.float32))
 
 
@@ -190,7 +190,7 @@ def preprocess_audio_batch(
     mels = []
     for audio_input in audio_list:
         mel = preprocess_audio(audio_input, sample_rate, n_mels)
-        mels.append(mel.numpy())
+        mels.append(mel.to_numpy())
 
     batch = np.stack(mels, axis=0)
     return from_numpy(batch)
