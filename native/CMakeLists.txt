@@ -83,6 +83,26 @@ endif()
 
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
+# Enable SM120 (Blackwell GeForce) CUTLASS support if building for SM120+
+# Note: Use 120a for full accelerated features (tensor cores, block-scaled MMA)
+# _SUPPORTED macros enable host-side type definitions
+# _ENABLED macros are auto-defined by CUTLASS based on __CUDA_ARCH__ during device compilation
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120" SM120_POS)
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "100" SM100_POS)
+if(NOT SM120_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM120 (Blackwell GeForce) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM120_SUPPORTED=1)
+    # For SM120a (full accelerated features), also enable feature macros
+    string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120a" SM120A_POS)
+    if(NOT SM120A_POS EQUAL -1)
+        message(STATUS "  SM120a: Full accelerated features enabled")
+    endif()
+endif()
+if(NOT SM100_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM100 (Blackwell datacenter) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM100_SUPPORTED=1)
+endif()
+
 # Ampere-optimized compiler flags
 # Add -v for verbose ptxas output to check register usage
 # NOTE: Do NOT use -maxrregcount for CUTLASS - it needs many registers for optimal performance
@@ -120,6 +140,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
+    ops/matmul/matmul_fp8_sm120.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu

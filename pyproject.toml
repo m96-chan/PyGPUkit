@@ -59,10 +59,11 @@ build.targets = []
 sdist.include = ["native/*", "rust/*"]
 sdist.exclude = ["native/build/*", "rust/target/*"]
 
-[tool.scikit-build.cmake.define]
-# PyGPUkit requires SM >= 80 (Ampere and newer) for cp.async support
-# Default: SM80-90 (CUDA 12.x), SM100+ requires CUDA 13.x and env override
-CMAKE_CUDA_ARCHITECTURES = "80;86;89;90"
+# [tool.scikit-build.cmake.define]
+# SM architectures are controlled via CMAKE_CUDA_ARCHITECTURES:
+# - CMakeLists.txt default: "80;86;89;90" (CUDA 12.x compatible)
+# - Override via CMAKE_ARGS env var: CMAKE_ARGS=-DCMAKE_CUDA_ARCHITECTURES=120
+# - SM100+ (Blackwell) requires CUDA 12.8+ or 13.x
 
 [tool.cibuildwheel]
 # Skip PyPy, 32-bit builds, and musllinux

@@ -47,8 +47,10 @@ from pygpukit.ops.embedding import (
 # Re-export matmul operations
 from pygpukit.ops.matmul import (
     batched_matmul,
+    fp8_sm120_available,
     linear_bias_gelu,
     matmul,
+    matmul_fp8_sm120,
     transpose,
 )
 
@@ -134,6 +136,8 @@ __all__ = [
     "batched_matmul",
     "transpose",
     "linear_bias_gelu",
+    "matmul_fp8_sm120",
+    "fp8_sm120_available",
     # Neural Network
     "gelu",
     "silu",

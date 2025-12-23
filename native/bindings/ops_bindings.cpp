@@ -8,6 +8,17 @@
 namespace py = pybind11;
 using namespace pygpukit;
 
+// Extern declarations for FP8 SM120 functions (must be at global scope)
+extern "C" {
+    cudaError_t pygpukit_gemm_fp8_sm120(
+        const float* A, const float* B, float* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    );
+    bool pygpukit_fp8_sm120_available();
+}
+
 void init_ops_bindings(py::module_& m) {
     // ========================================================================
     // Binary Element-wise operations
@@ -1107,4 +1118,46 @@ void init_ops_bindings(py::module_& m) {
        py::arg("M"), py::arg("N"), py::arg("K"), py::arg("batch_count"),
        py::arg("strideA"), py::arg("strideB"), py::arg("strideC"),
        "Strided batched GEMM: C[b] = A[b] @ B[b] for b in [0, batch_count)");
+
+    // ========================================================================
+    // FP8 GEMM for SM120 (Blackwell GeForce)
+    // ========================================================================
+
+    m.def("fp8_sm120_available", []() {
+        return pygpukit_fp8_sm120_available();
+    }, "Check if FP8 GEMM is available on SM120");
+
+    m.def("gemm_fp8_sm120", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
+        if (A.dtype() != DataType::Float32 || B.dtype() != DataType::Float32 || D.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemm_fp8_sm120: all inputs must be float32");
+        }
+        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
+            throw std::runtime_error("gemm_fp8_sm120: all inputs must be 2D");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B.shape()[1];
+
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemm_fp8_sm120: A.shape[1] must equal B.shape[0]");
+        }
+        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemm_fp8_sm120: D shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemm_fp8_sm120(
+            static_cast<const float*>(A.data()),
+            static_cast<const float*>(B.data()),
+            static_cast<float*>(D.data()),
+            M, N, K,
+            1.0f, 0.0f,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemm_fp8_sm120 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("D"),
+       "FP8 GEMM for SM120: D = A @ B (with FP8 quantization internally)");
 }
