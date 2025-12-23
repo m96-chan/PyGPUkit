@@ -98,7 +98,8 @@ if(NOT SM90_POS EQUAL -1 OR NOT SM100_POS EQUAL -1 OR NOT SM120_POS EQUAL -1)
 endif()
 
 # SM100 (Blackwell datacenter)
-if(NOT SM100_POS EQUAL -1)
+# Also enable for SM120 since they are both Blackwell architecture
+if(NOT SM100_POS EQUAL -1 OR NOT SM120_POS EQUAL -1)
     message(STATUS "Enabling CUTLASS SM100 (Blackwell datacenter) support")
     add_definitions(-DCUTLASS_ARCH_MMA_SM100_SUPPORTED=1)
 endif()
@@ -153,6 +154,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
     ops/matmul/matmul_fp8_sm90.cu
+    ops/matmul/matmul_fp8_sm100.cu
     ops/matmul/matmul_fp8_sm120.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu

@@ -533,6 +533,26 @@ def fp8_sm90_available() -> bool:
         return False
 
 
+def fp8_sm100_available() -> bool:
+    """Check if FP8 GEMM is available on SM100 (Blackwell datacenter).
+
+    This may work on SM120 (Blackwell GeForce) as a fallback since both
+    are Blackwell architecture.
+
+    Returns:
+        True if FP8 GEMM is available (requires SM100+ and CUTLASS SM100 support).
+    """
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return native.fp8_sm100_available()
+    else:
+        return False
+
+
 def fp8_sm120_available() -> bool:
     """Check if FP8 GEMM is available on SM120 (Blackwell GeForce).
 
@@ -550,6 +570,100 @@ def fp8_sm120_available() -> bool:
         return native.fp8_sm120_available()
     else:
         return False
+
+
+def matmul_fp8_sm100(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """FP8 matrix multiplication for SM100 (Blackwell datacenter).
+
+    This function takes FP32 inputs, internally quantizes them to FP8,
+    performs the GEMM using CUTLASS FP8 kernels with BF16 accumulation,
+    and returns the result as FP32.
+
+    This may work on SM120 (Blackwell GeForce) as a fallback since both
+    are Blackwell architecture.
+
+    Args:
+        a: First input array (M x K), FP32.
+        b: Second input array (K x N), FP32.
+        out: Optional output array (M x N), FP32. If provided, result is
+            written to this array instead of allocating a new one.
+
+    Returns:
+        The result GPUArray (M x N), FP32.
+
+    Raises:
+        ValueError: If arrays are not 2D, not FP32, or dimensions don't match.
+        RuntimeError: If FP8 SM100 GEMM is not available or kernel fails.
+
+    Example:
+        >>> import pygpukit as gk
+        >>> A = gk.from_numpy(np.random.randn(1024, 1024).astype(np.float32) * 0.1)
+        >>> B = gk.from_numpy(np.random.randn(1024, 1024).astype(np.float32) * 0.1)
+        >>> C = gk.ops.matmul_fp8_sm100(A, B)
+    """
+    from pygpukit.core.dtypes import float32
+
+    if a.ndim != 2:
+        raise ValueError(f"matmul_fp8_sm100 requires 2D arrays, got {a.ndim}D for first argument")
+    if b.ndim != 2:
+        raise ValueError(f"matmul_fp8_sm100 requires 2D arrays, got {b.ndim}D for second argument")
+
+    if a.shape[1] != b.shape[0]:
+        raise ValueError(
+            f"matmul_fp8_sm100 dimension mismatch: {a.shape} @ {b.shape} "
+            f"(inner dimensions {a.shape[1]} and {b.shape[0]} must match)"
+        )
+
+    if a.dtype != float32 or b.dtype != float32:
+        raise ValueError("matmul_fp8_sm100 requires float32 inputs")
+
+    if not fp8_sm100_available():
+        raise RuntimeError(
+            "FP8 SM100 GEMM is not available. "
+            "Requires SM100+ GPU and CUTLASS SM100 support."
+        )
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _matmul_fp8_sm100_native(a, b, out=out)
+    else:
+        raise RuntimeError("FP8 SM100 GEMM requires native backend")
+
+
+def _matmul_fp8_sm100_native(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Native C++ implementation of FP8 GEMM for SM100."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+
+    # Get native arrays
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Allocate output if needed
+    if out is None:
+        M, K = a.shape
+        N = b.shape[1]
+        out_native = native.empty([M, N], native.DataType.Float32)
+        out = GPUArray._wrap_native(out_native)
+    else:
+        out_native = out._get_native()
+
+    # Call FP8 GEMM
+    native.gemm_fp8_sm100(a_native, b_native, out_native)
+
+    return out
 
 
 def matmul_fp8_sm120(

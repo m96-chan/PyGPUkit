@@ -19,6 +19,15 @@ extern "C" {
     );
     bool pygpukit_fp8_sm90_available();
 
+    // SM100 (Blackwell datacenter) - FP8 with blockwise scaling
+    cudaError_t pygpukit_gemm_fp8_sm100(
+        const float* A, const float* B, float* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    );
+    bool pygpukit_fp8_sm100_available();
+
     // SM120 (Blackwell GeForce) - FP8 with blockwise scaling (disabled due to CUTLASS bug #2902)
     cudaError_t pygpukit_gemm_fp8_sm120(
         const float* A, const float* B, float* D,
@@ -1172,6 +1181,49 @@ void init_ops_bindings(py::module_& m) {
        "FP8 GEMM for SM90 (Hopper): D = A @ B (with FP8 quantization internally)");
 
     // ========================================================================
+    // FP8 GEMM for SM100 (Blackwell datacenter) - blockwise scaling
+    // Potential fallback for SM120 (same Blackwell architecture)
+    // ========================================================================
+
+    m.def("fp8_sm100_available", []() {
+        return pygpukit_fp8_sm100_available();
+    }, "Check if FP8 GEMM is available on SM100 (Blackwell datacenter)");
+
+    m.def("gemm_fp8_sm100", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
+        if (A.dtype() != DataType::Float32 || B.dtype() != DataType::Float32 || D.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemm_fp8_sm100: all inputs must be float32");
+        }
+        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
+            throw std::runtime_error("gemm_fp8_sm100: all inputs must be 2D");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B.shape()[1];
+
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemm_fp8_sm100: A.shape[1] must equal B.shape[0]");
+        }
+        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemm_fp8_sm100: D shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemm_fp8_sm100(
+            static_cast<const float*>(A.data()),
+            static_cast<const float*>(B.data()),
+            static_cast<float*>(D.data()),
+            M, N, K,
+            1.0f, 0.0f,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemm_fp8_sm100 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("D"),
+       "FP8 GEMM for SM100 (Blackwell datacenter): D = A @ B (with FP8 quantization internally)");
+
+    // ========================================================================
     // FP8 GEMM for SM120 (Blackwell GeForce) - blockwise scaling
     // NOTE: Currently disabled due to CUTLASS bug #2902
     // ========================================================================
@@ -1220,8 +1272,10 @@ void init_ops_bindings(py::module_& m) {
     // ========================================================================
 
     m.def("fp8_available", []() {
-        // SM120 is disabled due to CUTLASS bug, so only check SM90
-        return pygpukit_fp8_sm90_available();
+        // Check all FP8 backends: SM120 (disabled), SM100, SM90
+        return pygpukit_fp8_sm120_available() ||
+               pygpukit_fp8_sm100_available() ||
+               pygpukit_fp8_sm90_available();
     }, "Check if FP8 GEMM is available (any backend)");
 
     m.def("gemm_fp8", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
@@ -1254,7 +1308,19 @@ void init_ops_bindings(py::module_& m) {
                 M, N, K, 1.0f, 0.0f, nullptr
             );
             if (err == cudaSuccess) return;
-            // Fall through to SM90 if SM120 fails
+            // Fall through to SM100 if SM120 fails
+        }
+
+        // Try SM100 (Blackwell datacenter - potential fallback for SM120)
+        if (pygpukit_fp8_sm100_available()) {
+            err = pygpukit_gemm_fp8_sm100(
+                static_cast<const float*>(A.data()),
+                static_cast<const float*>(B.data()),
+                static_cast<float*>(D.data()),
+                M, N, K, 1.0f, 0.0f, nullptr
+            );
+            if (err == cudaSuccess) return;
+            // Fall through to SM90 if SM100 fails
         }
 
         // Try SM90 (Hopper)
