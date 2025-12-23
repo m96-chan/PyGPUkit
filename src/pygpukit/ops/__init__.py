@@ -18,6 +18,8 @@ from pygpukit.ops.basic import (
     add_inplace,
     # Matmul
     batched_matmul,
+    fp8_available,
+    fp8_sm90_available,
     fp8_sm120_available,
     # Neural Network
     bias_add_inplace,
@@ -46,6 +48,8 @@ from pygpukit.ops.basic import (
     linear_bias_gelu,
     log,
     matmul,
+    matmul_fp8,
+    matmul_fp8_sm90,
     matmul_fp8_sm120,
     # Reduction
     max,
@@ -103,7 +107,11 @@ __all__ = [
     "batched_matmul",
     "transpose",
     "linear_bias_gelu",
+    "matmul_fp8",
+    "matmul_fp8_sm90",
     "matmul_fp8_sm120",
+    "fp8_available",
+    "fp8_sm90_available",
     "fp8_sm120_available",
     # Neural Network
     "gelu",

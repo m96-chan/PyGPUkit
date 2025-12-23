@@ -8,8 +8,18 @@
 namespace py = pybind11;
 using namespace pygpukit;
 
-// Extern declarations for FP8 SM120 functions (must be at global scope)
+// Extern declarations for FP8 functions (must be at global scope)
 extern "C" {
+    // SM90 (Hopper) - FP8 with per-tensor scaling
+    cudaError_t pygpukit_gemm_fp8_sm90(
+        const float* A, const float* B, float* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    );
+    bool pygpukit_fp8_sm90_available();
+
+    // SM120 (Blackwell GeForce) - FP8 with blockwise scaling (disabled due to CUTLASS bug #2902)
     cudaError_t pygpukit_gemm_fp8_sm120(
         const float* A, const float* B, float* D,
         int M, int N, int K,
@@ -1120,12 +1130,55 @@ void init_ops_bindings(py::module_& m) {
        "Strided batched GEMM: C[b] = A[b] @ B[b] for b in [0, batch_count)");
 
     // ========================================================================
-    // FP8 GEMM for SM120 (Blackwell GeForce)
+    // FP8 GEMM for SM90 (Hopper) - per-tensor scaling
+    // ========================================================================
+
+    m.def("fp8_sm90_available", []() {
+        return pygpukit_fp8_sm90_available();
+    }, "Check if FP8 GEMM is available on SM90 (Hopper)");
+
+    m.def("gemm_fp8_sm90", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
+        if (A.dtype() != DataType::Float32 || B.dtype() != DataType::Float32 || D.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemm_fp8_sm90: all inputs must be float32");
+        }
+        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
+            throw std::runtime_error("gemm_fp8_sm90: all inputs must be 2D");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B.shape()[1];
+
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemm_fp8_sm90: A.shape[1] must equal B.shape[0]");
+        }
+        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemm_fp8_sm90: D shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemm_fp8_sm90(
+            static_cast<const float*>(A.data()),
+            static_cast<const float*>(B.data()),
+            static_cast<float*>(D.data()),
+            M, N, K,
+            1.0f, 0.0f,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemm_fp8_sm90 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("D"),
+       "FP8 GEMM for SM90 (Hopper): D = A @ B (with FP8 quantization internally)");
+
+    // ========================================================================
+    // FP8 GEMM for SM120 (Blackwell GeForce) - blockwise scaling
+    // NOTE: Currently disabled due to CUTLASS bug #2902
     // ========================================================================
 
     m.def("fp8_sm120_available", []() {
         return pygpukit_fp8_sm120_available();
-    }, "Check if FP8 GEMM is available on SM120");
+    }, "Check if FP8 GEMM is available on SM120 (currently disabled due to CUTLASS bug)");
 
     m.def("gemm_fp8_sm120", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
         if (A.dtype() != DataType::Float32 || B.dtype() != DataType::Float32 || D.dtype() != DataType::Float32) {
@@ -1160,4 +1213,65 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        "FP8 GEMM for SM120: D = A @ B (with FP8 quantization internally)");
+
+    // ========================================================================
+    // FP8 GEMM auto-dispatch (selects best available backend)
+    // Priority: SM120 (if enabled) > SM90 > error
+    // ========================================================================
+
+    m.def("fp8_available", []() {
+        // SM120 is disabled due to CUTLASS bug, so only check SM90
+        return pygpukit_fp8_sm90_available();
+    }, "Check if FP8 GEMM is available (any backend)");
+
+    m.def("gemm_fp8", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
+        if (A.dtype() != DataType::Float32 || B.dtype() != DataType::Float32 || D.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemm_fp8: all inputs must be float32");
+        }
+        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
+            throw std::runtime_error("gemm_fp8: all inputs must be 2D");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B.shape()[1];
+
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemm_fp8: A.shape[1] must equal B.shape[0]");
+        }
+        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemm_fp8: D shape mismatch");
+        }
+
+        cudaError_t err;
+
+        // Try SM120 first (when CUTLASS bug is fixed, this will be preferred)
+        if (pygpukit_fp8_sm120_available()) {
+            err = pygpukit_gemm_fp8_sm120(
+                static_cast<const float*>(A.data()),
+                static_cast<const float*>(B.data()),
+                static_cast<float*>(D.data()),
+                M, N, K, 1.0f, 0.0f, nullptr
+            );
+            if (err == cudaSuccess) return;
+            // Fall through to SM90 if SM120 fails
+        }
+
+        // Try SM90 (Hopper)
+        if (pygpukit_fp8_sm90_available()) {
+            err = pygpukit_gemm_fp8_sm90(
+                static_cast<const float*>(A.data()),
+                static_cast<const float*>(B.data()),
+                static_cast<float*>(D.data()),
+                M, N, K, 1.0f, 0.0f, nullptr
+            );
+            if (err != cudaSuccess) {
+                throw std::runtime_error("gemm_fp8 (SM90) failed: " + std::string(cudaGetErrorString(err)));
+            }
+            return;
+        }
+
+        throw std::runtime_error("gemm_fp8: no FP8 backend available (requires SM90+)");
+    }, py::arg("A"), py::arg("B"), py::arg("D"),
+       "FP8 GEMM with auto backend selection: D = A @ B");
 }

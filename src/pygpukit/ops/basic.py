@@ -47,9 +47,13 @@ from pygpukit.ops.embedding import (
 # Re-export matmul operations
 from pygpukit.ops.matmul import (
     batched_matmul,
+    fp8_available,
+    fp8_sm90_available,
     fp8_sm120_available,
     linear_bias_gelu,
     matmul,
+    matmul_fp8,
+    matmul_fp8_sm90,
     matmul_fp8_sm120,
     transpose,
 )

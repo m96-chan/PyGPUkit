@@ -83,12 +83,28 @@ endif()
 
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
-# Enable SM120 (Blackwell GeForce) CUTLASS support if building for SM120+
-# Note: Use 120a for full accelerated features (tensor cores, block-scaled MMA)
+# Enable CUTLASS SM support based on target architectures
 # _SUPPORTED macros enable host-side type definitions
 # _ENABLED macros are auto-defined by CUTLASS based on __CUDA_ARCH__ during device compilation
-string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120" SM120_POS)
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "90" SM90_POS)
 string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "100" SM100_POS)
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120" SM120_POS)
+
+# SM90 (Hopper) - FP8 GEMM with per-tensor scaling
+# Also enable for SM100+ since they are forward compatible
+if(NOT SM90_POS EQUAL -1 OR NOT SM100_POS EQUAL -1 OR NOT SM120_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM90 (Hopper) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1)
+endif()
+
+# SM100 (Blackwell datacenter)
+if(NOT SM100_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM100 (Blackwell datacenter) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM100_SUPPORTED=1)
+endif()
+
+# SM120 (Blackwell GeForce) - FP8 GEMM with blockwise scaling
+# Note: Use 120a for full accelerated features (tensor cores, block-scaled MMA)
 if(NOT SM120_POS EQUAL -1)
     message(STATUS "Enabling CUTLASS SM120 (Blackwell GeForce) support")
     add_definitions(-DCUTLASS_ARCH_MMA_SM120_SUPPORTED=1)
@@ -97,10 +113,6 @@ if(NOT SM120_POS EQUAL -1)
     if(NOT SM120A_POS EQUAL -1)
         message(STATUS "  SM120a: Full accelerated features enabled")
     endif()
-endif()
-if(NOT SM100_POS EQUAL -1)
-    message(STATUS "Enabling CUTLASS SM100 (Blackwell datacenter) support")
-    add_definitions(-DCUTLASS_ARCH_MMA_SM100_SUPPORTED=1)
 endif()
 
 # Ampere-optimized compiler flags
@@ -140,6 +152,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
+    ops/matmul/matmul_fp8_sm90.cu
     ops/matmul/matmul_fp8_sm120.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
