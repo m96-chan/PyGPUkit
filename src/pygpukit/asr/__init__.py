@@ -20,8 +20,17 @@ from .preprocessing import (
     pad_or_trim,
     preprocess_audio,
 )
+from .whisper import (
+    TranscriptionResult,
+    TranscriptionSegment,
+    WhisperModel,
+)
 
 __all__ = [
+    # High-level API
+    "WhisperModel",
+    "TranscriptionResult",
+    "TranscriptionSegment",
     # Preprocessing
     "preprocess_audio",
     "pad_or_trim",
