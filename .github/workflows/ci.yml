@@ -102,7 +102,7 @@ jobs:
           mkdir -p build && cd build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" \
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120a" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())")
