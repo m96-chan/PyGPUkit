@@ -241,12 +241,24 @@ jobs:
           # Dynamically find dist-info folder
           DIST_INFO=$(ls -d pygpukit-*.dist-info | head -1)
           echo "Found dist-info folder: $DIST_INFO"
-          find pygpukit -type f | while read f; do
-            hash=$(python -c "import hashlib, base64; print('sha256=' + base64.urlsafe_b64encode(hashlib.sha256(open('$f', 'rb').read()).digest()).rstrip(b'=').decode())")
-            size=$(stat -c%s "$f")
-            echo "$f,$hash,$size"
-          done > "$DIST_INFO/RECORD"
-          echo "$DIST_INFO/RECORD,," >> "$DIST_INFO/RECORD"
+
+          # Generate RECORD with ALL files (pygpukit/ + dist-info/)
+          {
+            # All files in pygpukit/
+            find pygpukit -type f | while read f; do
+              hash=$(python -c "import hashlib, base64; print('sha256=' + base64.urlsafe_b64encode(hashlib.sha256(open('$f', 'rb').read()).digest()).rstrip(b'=').decode())")
+              size=$(stat -c%s "$f")
+              echo "$f,$hash,$size"
+            done
+            # All files in dist-info/ except RECORD
+            find "$DIST_INFO" -type f ! -name RECORD | while read f; do
+              hash=$(python -c "import hashlib, base64; print('sha256=' + base64.urlsafe_b64encode(hashlib.sha256(open('$f', 'rb').read()).digest()).rstrip(b'=').decode())")
+              size=$(stat -c%s "$f")
+              echo "$f,$hash,$size"
+            done
+            # RECORD itself (no hash)
+            echo "$DIST_INFO/RECORD,,"
+          } > "$DIST_INFO/RECORD"
 
           # Repack wheel
           cd ..
@@ -558,16 +570,20 @@ jobs:
           $distInfoName = $distInfo.Name
           Write-Host "Found dist-info folder: $distInfoName"
           $recordPath = "wheel-contents/$distInfoName/RECORD"
+          $wheelContentsPath = (Resolve-Path "wheel-contents").Path
           $newRecord = @()
-          Get-ChildItem wheel-contents/pygpukit -File | ForEach-Object {
-            $relativePath = "pygpukit/$($_.Name)"
+
+          # All files in pygpukit/ (recursive)
+          Get-ChildItem wheel-contents/pygpukit -File -Recurse | ForEach-Object {
+            $relativePath = $_.FullName.Substring($wheelContentsPath.Length + 1).Replace('\', '/')
             $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
             $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
             $hashB64 = [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+', '-').Replace('/', '_')
             $size = $_.Length
             $newRecord += "$relativePath,sha256=$hashB64,$size"
           }
-          # Add dist-info files
+
+          # All files in dist-info/ except RECORD
           Get-ChildItem "wheel-contents/$distInfoName" -File | Where-Object { $_.Name -ne "RECORD" } | ForEach-Object {
             $relativePath = "$distInfoName/$($_.Name)"
             $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
@@ -576,8 +592,13 @@ jobs:
             $size = $_.Length
             $newRecord += "$relativePath,sha256=$hashB64,$size"
           }
+
+          # RECORD itself (no hash)
           $newRecord += "$distInfoName/RECORD,,"
-          $newRecord | Out-File -FilePath $recordPath -Encoding utf8NoBOM
+
+          # Write with Unix line endings (LF only)
+          $newRecord -join "`n" | Set-Content -Path $recordPath -NoNewline -Encoding utf8NoBOM
+          Add-Content -Path $recordPath -Value "" -NoNewline -Encoding utf8NoBOM
 
           # Repack wheel
           Remove-Item $wheel.FullName
