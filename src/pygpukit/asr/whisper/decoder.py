@@ -381,6 +381,8 @@ class WhisperDecoder:
 
         # Add positional embeddings
         positions = self.embed_positions[:seq_len]
+        # Add batch dimension for broadcasting: [seq_len, d_model] -> [1, seq_len, d_model]
+        positions = positions.reshape(1, seq_len, -1)
         x = x + positions
 
         # Get causal mask

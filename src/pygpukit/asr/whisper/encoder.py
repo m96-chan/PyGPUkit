@@ -315,7 +315,14 @@ class WhisperEncoder:
 
         # Add positional embeddings
         seq_len = x.shape[1]
+        max_positions = self.embed_positions.shape[0]
+        if seq_len > max_positions:
+            # Clamp to available positions (should not happen with correct preprocessing)
+            seq_len = max_positions
+            x = x[:, :seq_len, :]
         positions = self.embed_positions[:seq_len]
+        # Add batch dimension for broadcasting: [seq_len, d_model] -> [1, seq_len, d_model]
+        positions = positions.reshape(1, seq_len, -1)
         x = x + positions
 
         # Transformer layers
