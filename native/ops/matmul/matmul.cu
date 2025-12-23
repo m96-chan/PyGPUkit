@@ -79,19 +79,19 @@ void matmul(const GPUArray& a, const GPUArray& b, GPUArray& c) {
 
     // Only check native TensorCore settings if CUTLASS is disabled
     if (!cutlass_enabled) {
+        sm_version = get_sm_version();
         const char* tf32_env = std::getenv("PYGPUKIT_ALLOW_TF32");
         const char* fp16_tc_env = std::getenv("PYGPUKIT_ALLOW_FP16_TC");
 
-        if ((tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) ||
-            (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y'))) {
-            sm_version = get_sm_version();
-        }
+        // On SM 120+ where CUTLASS doesn't work, automatically enable TF32 TensorCore
+        // This provides good performance fallback for Blackwell GeForce (RTX 5090)
+        bool auto_tf32 = (sm_version >= 120);
 
-        if (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y')) {
+        if (auto_tf32 || (tf32_env && (tf32_env[0] == '1' || tf32_env[0] == 'y' || tf32_env[0] == 'Y'))) {
             tf32_enabled = (sm_version >= MIN_SM_VERSION);
         }
 
-        if (fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y')) {
+        if ((fp16_tc_env && (fp16_tc_env[0] == '1' || fp16_tc_env[0] == 'y' || fp16_tc_env[0] == 'Y'))) {
             fp16_tc_enabled = (sm_version >= MIN_SM_VERSION);
         }
     }

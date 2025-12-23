@@ -356,25 +356,79 @@ def batched_matmul(
         return _batched_matmul_cpu(a, b, out=out)
 
 
-def _batched_matmul_cpu(
-    a: GPUArray, b: GPUArray, *, out: GPUArray | None = None
-) -> GPUArray:
+def _batched_matmul_cpu(a: GPUArray, b: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """CPU implementation of batched_matmul."""
-    warnings.warn(
-        "batched_matmul: GPU not available, using CPU fallback (slow)",
-        RuntimeWarning,
-        stacklevel=3,
-    )
     a_np = a.to_numpy()
     b_np = b.to_numpy()
+    result_np = np.matmul(a_np, b_np)
+    result = from_numpy(result_np)
+
     if out is not None:
-        out_np = out.to_numpy()
-        np.matmul(a_np, b_np, out=out_np)
-        out._data = from_numpy(out_np)._data
+        # Copy result to output buffer
+        from ..ops.elementwise import copy_to
+
+        copy_to(result, out)
         return out
     else:
-        result_np = np.matmul(a_np, b_np)
-        return from_numpy(result_np)
+        return result
+
+
+def _batched_matmul_loop(
+    a: GPUArray, b: GPUArray, out_shape: tuple[int, ...], *, out: GPUArray | None = None
+) -> GPUArray:
+    """GPU batched matmul using loop over individual matmuls.
+
+    This is a fallback for when CUTLASS strided batched GEMM is not available
+    (e.g., SM 120). Uses native matmul kernel for each batch element.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+
+    # Reshape to 3D for easier iteration: [batch, M, K] @ [batch, K, N]
+    if a.ndim == 4:
+        batch1, batch2 = a.shape[0], a.shape[1]
+        M, K = a.shape[2], a.shape[3]
+        N = b.shape[3]
+        total_batch = batch1 * batch2
+
+        a_3d = a.reshape(total_batch, M, K)
+        b_3d = b.reshape(total_batch, K, N)
+    else:
+        total_batch = a.shape[0]
+        M, K = a.shape[1], a.shape[2]
+        N = b.shape[2]
+
+        a_3d = a
+        b_3d = b
+
+    # Allocate output
+    if out is None:
+        out_native = native.empty(list(out_shape), native.DataType.Float32)
+        out = GPUArray._wrap_native(out_native)
+
+    # Perform batched matmul via loop
+    for i in range(total_batch):
+        # Extract slice (creates view/copy depending on implementation)
+        a_i = a_3d.to_numpy()[i]
+        b_i = b_3d.to_numpy()[i]
+
+        a_gpu = from_numpy(a_i)
+        b_gpu = from_numpy(b_i)
+
+        # Compute matmul for this batch element
+        c_gpu = matmul(a_gpu, b_gpu)
+
+        # Copy result to output
+        out_np = out.to_numpy()
+        if a.ndim == 4:
+            i1, i2 = i // batch2, i % batch2
+            out_np[i1, i2] = c_gpu.to_numpy()
+        else:
+            out_np[i] = c_gpu.to_numpy()
+        out = from_numpy(out_np)
+
+    return out
 
 
 def _batched_matmul_native(
@@ -419,18 +473,27 @@ def _batched_matmul_native(
     else:
         out_native = out._get_native()
 
-    # Call strided batched GEMM
-    native.gemm_strided_batched_fp32(
-        a_native,
-        b_native,
-        out_native,
-        M,
-        N,
-        K,
-        batch_count,
-        strideA,
-        strideB,
-        strideC,
-    )
+    # Call strided batched GEMM with CPU fallback for unsupported architectures
+    try:
+        native.gemm_strided_batched_fp32(
+            a_native,
+            b_native,
+            out_native,
+            M,
+            N,
+            K,
+            batch_count,
+            strideA,
+            strideB,
+            strideC,
+        )
+    except RuntimeError:
+        # CUTLASS not available/failed (e.g., SM 120) - fall back to CPU
+        warnings.warn(
+            "batched_matmul: CUTLASS kernel failed, using CPU fallback (slow)",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return _batched_matmul_cpu(a, b, out=out)
 
     return out

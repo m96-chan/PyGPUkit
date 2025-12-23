@@ -33,11 +33,24 @@ include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # CUTLASS (header-only library)
 # Can be disabled via environment variable PYGPUKIT_DISABLE_CUTLASS=1
-set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass")
+# Try multiple paths for CUTLASS (scikit-build-core may change working directory)
+set(CUTLASS_DIR_CANDIDATES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass"
+    "${CMAKE_CURRENT_LIST_DIR}/../third_party/cutlass"
+    "${CMAKE_SOURCE_DIR}/../third_party/cutlass"
+)
+set(CUTLASS_FOUND FALSE)
+foreach(CUTLASS_CANDIDATE ${CUTLASS_DIR_CANDIDATES})
+    if(EXISTS "${CUTLASS_CANDIDATE}/include" AND NOT CUTLASS_FOUND)
+        set(CUTLASS_DIR "${CUTLASS_CANDIDATE}")
+        set(CUTLASS_FOUND TRUE)
+    endif()
+endforeach()
+
 if(DEFINED ENV{PYGPUKIT_DISABLE_CUTLASS})
     message(STATUS "CUTLASS disabled via PYGPUKIT_DISABLE_CUTLASS environment variable")
     add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
-elseif(EXISTS "${CUTLASS_DIR}/include")
+elseif(CUTLASS_FOUND)
     message(STATUS "CUTLASS found at: ${CUTLASS_DIR}")
     include_directories(${CUTLASS_DIR}/include)
     include_directories(${CUTLASS_DIR}/tools/util/include)
@@ -46,7 +59,8 @@ elseif(EXISTS "${CUTLASS_DIR}/include")
     # Disabled for now - will be enabled when SM90+ testing is available
     # add_definitions(-DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1)
 else()
-    message(STATUS "CUTLASS not found, using fallback kernels")
+    message(STATUS "CUTLASS not found at any of: ${CUTLASS_DIR_CANDIDATES}")
+    message(STATUS "Using fallback kernels")
     add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
 endif()
 

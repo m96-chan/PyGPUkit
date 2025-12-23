@@ -582,7 +582,7 @@ class GPUArray:
             y = x.reshape(6, 4)  # or x.reshape((6, 4))
             z = x.reshape(-1, 4)  # infer first dimension
         """
-        from pygpukit.core.backend import get_backend, NativeBackend
+        from pygpukit.core.backend import NativeBackend, get_backend
 
         # Handle both reshape(2, 3) and reshape((2, 3))
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):

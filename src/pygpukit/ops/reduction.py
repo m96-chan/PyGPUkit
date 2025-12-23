@@ -157,9 +157,7 @@ def softmax(input: GPUArray, axis: int = -1) -> GPUArray:
     if axis < 0:
         axis = input.ndim + axis
     if axis != input.ndim - 1:
-        raise ValueError(
-            f"softmax currently only supports axis=-1 (last axis), got axis={axis}"
-        )
+        raise ValueError(f"softmax currently only supports axis=-1 (last axis), got axis={axis}")
 
     backend = get_backend()
 

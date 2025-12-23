@@ -54,6 +54,7 @@ using PFN_cublasLtMatmulDescDestroy = cublasStatus_t (CUBLASAPI *)(cublasLtMatmu
 using PFN_cublasLtMatmulDescSetAttribute = cublasStatus_t (CUBLASAPI *)(cublasLtMatmulDesc_t, cublasLtMatmulDescAttributes_t, const void*, size_t);
 using PFN_cublasLtMatrixLayoutCreate = cublasStatus_t (CUBLASAPI *)(cublasLtMatrixLayout_t*, int, uint64_t, uint64_t, int64_t);
 using PFN_cublasLtMatrixLayoutDestroy = cublasStatus_t (CUBLASAPI *)(cublasLtMatrixLayout_t);
+using PFN_cublasLtMatrixLayoutSetAttribute = cublasStatus_t (CUBLASAPI *)(cublasLtMatrixLayout_t, cublasLtMatrixLayoutAttribute_t, const void*, size_t);
 using PFN_cublasLtMatmul = cublasStatus_t (CUBLASAPI *)(
     cublasLtHandle_t, cublasLtMatmulDesc_t,
     const void*, const void*, cublasLtMatrixLayout_t,
@@ -98,6 +99,7 @@ struct CublasLtState {
     PFN_cublasLtMatmulDescSetAttribute pfn_matmul_desc_set_attr{nullptr};
     PFN_cublasLtMatrixLayoutCreate pfn_matrix_layout_create{nullptr};
     PFN_cublasLtMatrixLayoutDestroy pfn_matrix_layout_destroy{nullptr};
+    PFN_cublasLtMatrixLayoutSetAttribute pfn_matrix_layout_set_attr{nullptr};
     PFN_cublasLtMatmul pfn_matmul{nullptr};
 
     // Preference and heuristic function pointers (for CUDA Graph compatibility)
@@ -109,22 +111,52 @@ struct CublasLtState {
 
 CublasLtState g_state;
 
+// Get CUDA runtime major version
+int get_cuda_major_version() {
+    int version = 0;
+    cudaError_t err = cudaRuntimeGetVersion(&version);
+    if (err != cudaSuccess) {
+        return 12;  // Default to 12 if query fails
+    }
+    // version is encoded as major * 1000 + minor * 10
+    return version / 1000;
+}
+
 // Search for cuBLASLt library in various locations
 std::vector<std::string> get_search_paths() {
     std::vector<std::string> paths;
 
+    // Get CUDA runtime version to match cuBLASLt version
+    int cuda_major = get_cuda_major_version();
+    fprintf(stderr, "[cuBLASLt] CUDA runtime major version: %d\n", cuda_major);
+
 #ifdef _WIN32
     // Windows: Search for cublasLt64_*.dll
-    // Note: CUDA 13.x puts DLLs in bin/x64/ subdirectory
+    // Prioritize paths matching the CUDA runtime version
 
-    // 1. Check CUDA_PATH environment variable
-    const char* cuda_path = std::getenv("CUDA_PATH");
-    if (cuda_path) {
-        paths.push_back(std::string(cuda_path) + "\\bin\\x64");  // CUDA 13.x
-        paths.push_back(std::string(cuda_path) + "\\bin");       // CUDA 12.x and earlier
+    if (cuda_major >= 13) {
+        // CUDA 13.x: bin/x64 subdirectory
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1\\bin\\x64");
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\bin\\x64");
+    } else {
+        // CUDA 12.x: bin directly
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin");
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin");
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin");
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin");
+        paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin");
     }
 
-    // 2. Check PATH directories
+    // Then check CUDA_PATH as fallback
+    const char* cuda_path = std::getenv("CUDA_PATH");
+    if (cuda_path) {
+        if (cuda_major >= 13) {
+            paths.push_back(std::string(cuda_path) + "\\bin\\x64");
+        }
+        paths.push_back(std::string(cuda_path) + "\\bin");
+    }
+
+    // Check PATH directories as last resort
     const char* path_env = std::getenv("PATH");
     if (path_env) {
         std::string path_str(path_env);
@@ -138,21 +170,6 @@ std::vector<std::string> get_search_paths() {
             pos = end + 1;
         }
     }
-
-    // 3. Common installation paths (CUDA 13.x uses bin/x64)
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1\\bin\\x64");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\bin\\x64");
-    // CUDA 12.x uses bin directly
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.3\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.2\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.1\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.0\\bin");
-    paths.push_back("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v11.8\\bin");
 
 #else
     // Linux/macOS: Search for libcublasLt.so
@@ -191,7 +208,14 @@ std::vector<std::string> get_search_paths() {
 
 #ifdef _WIN32
 // Find cuBLASLt DLL in a directory (Windows)
-std::string find_cublaslt_in_dir(const std::string& dir) {
+// Prefers the version matching cuda_major
+std::string find_cublaslt_in_dir(const std::string& dir, int cuda_major) {
+    // First, try the exact version matching the CUDA runtime
+    std::string preferred_path = dir + "\\cublasLt64_" + std::to_string(cuda_major) + ".dll";
+    if (GetFileAttributesA(preferred_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return preferred_path;
+    }
+
     // Search for cublasLt64_*.dll pattern (e.g., cublasLt64_12.dll, cublasLt64_13.dll)
     WIN32_FIND_DATAA find_data;
     std::string pattern = dir + "\\cublasLt64_*.dll";
@@ -207,14 +231,6 @@ std::string find_cublaslt_in_dir(const std::string& dir) {
     std::string exact_path = dir + "\\cublasLt64.dll";
     if (GetFileAttributesA(exact_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
         return exact_path;
-    }
-
-    // Try specific version patterns for CUDA 13.x
-    for (int ver = 13; ver >= 11; --ver) {
-        std::string versioned_path = dir + "\\cublasLt64_" + std::to_string(ver) + ".dll";
-        if (GetFileAttributesA(versioned_path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            return versioned_path;
-        }
     }
 
     return "";
@@ -274,6 +290,7 @@ bool try_load(const std::string& path) {
     auto pfn_matmul_desc_set_attr = (PFN_cublasLtMatmulDescSetAttribute)GET_PROC(handle, "cublasLtMatmulDescSetAttribute");
     auto pfn_matrix_layout_create = (PFN_cublasLtMatrixLayoutCreate)GET_PROC(handle, "cublasLtMatrixLayoutCreate");
     auto pfn_matrix_layout_destroy = (PFN_cublasLtMatrixLayoutDestroy)GET_PROC(handle, "cublasLtMatrixLayoutDestroy");
+    auto pfn_matrix_layout_set_attr = (PFN_cublasLtMatrixLayoutSetAttribute)GET_PROC(handle, "cublasLtMatrixLayoutSetAttribute");
     auto pfn_matmul = (PFN_cublasLtMatmul)GET_PROC(handle, "cublasLtMatmul");
 
     // Preference and heuristic functions (for CUDA Graph compatibility)
@@ -285,7 +302,8 @@ bool try_load(const std::string& path) {
     // All core functions must be present
     if (!pfn_create || !pfn_destroy || !pfn_matmul_desc_create ||
         !pfn_matmul_desc_destroy || !pfn_matmul_desc_set_attr ||
-        !pfn_matrix_layout_create || !pfn_matrix_layout_destroy || !pfn_matmul) {
+        !pfn_matrix_layout_create || !pfn_matrix_layout_destroy ||
+        !pfn_matrix_layout_set_attr || !pfn_matmul) {
         FREE_LIBRARY(handle);
         return false;
     }
@@ -314,6 +332,7 @@ bool try_load(const std::string& path) {
     g_state.pfn_matmul_desc_set_attr = pfn_matmul_desc_set_attr;
     g_state.pfn_matrix_layout_create = pfn_matrix_layout_create;
     g_state.pfn_matrix_layout_destroy = pfn_matrix_layout_destroy;
+    g_state.pfn_matrix_layout_set_attr = pfn_matrix_layout_set_attr;
     g_state.pfn_matmul = pfn_matmul;
 
     // Preference and heuristic function pointers
@@ -343,9 +362,14 @@ bool initialize() {
 
     // Search for cuBLASLt
     auto search_paths = get_search_paths();
+    int cuda_major = get_cuda_major_version();
 
     for (const auto& dir : search_paths) {
+#ifdef _WIN32
+        std::string cublaslt_path = find_cublaslt_in_dir(dir, cuda_major);
+#else
         std::string cublaslt_path = find_cublaslt_in_dir(dir);
+#endif
         if (!cublaslt_path.empty() && try_load(cublaslt_path)) {
             g_state.available.store(true, std::memory_order_relaxed);
             g_state.initialized.store(true, std::memory_order_release);
@@ -367,6 +391,22 @@ bool is_available() {
     }
     // First call: do full initialization
     initialize();
+
+    // SM 120 (Blackwell GeForce) has cuBLASLt compatibility issues
+    // AlgoGetHeuristic returns NOT_SUPPORTED (status=15) for most operations
+    // Disable cuBLASLt on SM >= 120 until CUDA/driver fixes this
+    if (g_state.available.load(std::memory_order_relaxed)) {
+        int device_id = 0;
+        cudaGetDevice(&device_id);
+        cudaDeviceProp props;
+        cudaGetDeviceProperties(&props, device_id);
+        int sm_version = props.major * 10 + props.minor;
+        if (sm_version >= 120) {
+            fprintf(stderr, "[cuBLASLt] Disabled on SM %d (Blackwell GeForce compatibility issue)\n", sm_version);
+            g_state.available.store(false, std::memory_order_relaxed);
+        }
+    }
+
     return g_state.available.load(std::memory_order_relaxed);
 }
 
@@ -438,6 +478,16 @@ cublasStatus_t matrix_layout_destroy(cublasLtMatrixLayout_t matLayout) {
     return g_state.pfn_matrix_layout_destroy(matLayout);
 }
 
+cublasStatus_t matrix_layout_set_attribute(
+    cublasLtMatrixLayout_t matLayout,
+    cublasLtMatrixLayoutAttribute_t attr,
+    const void* buf,
+    size_t sizeInBytes
+) {
+    if (!is_available()) return CUBLAS_STATUS_NOT_INITIALIZED;
+    return g_state.pfn_matrix_layout_set_attr(matLayout, attr, buf, sizeInBytes);
+}
+
 cublasStatus_t matmul(
     cublasLtHandle_t lightHandle,
     cublasLtMatmulDesc_t computeDesc,
@@ -470,6 +520,7 @@ cublasStatus_t matmul(
 
 cublasLtHandle_t get_handle() {
     if (!is_available()) {
+        fprintf(stderr, "[cuBLASLt] get_handle: not available\n");
         return nullptr;
     }
 
@@ -485,10 +536,33 @@ cublasLtHandle_t get_handle() {
         return g_state.lt_handle;
     }
 
+    // Ensure CUDA is initialized before creating cuBLASLt handle
+    int device = -1;
+    cudaError_t cuda_err = cudaGetDevice(&device);
+    fprintf(stderr, "[cuBLASLt] cudaGetDevice returned: %d, device=%d\n", static_cast<int>(cuda_err), device);
+    if (cuda_err != cudaSuccess || device < 0) {
+        // Force CUDA initialization
+        fprintf(stderr, "[cuBLASLt] Calling cudaSetDevice(0)...\n");
+        cuda_err = cudaSetDevice(0);
+        if (cuda_err != cudaSuccess) {
+            fprintf(stderr, "[cuBLASLt] ERROR: Failed to initialize CUDA: %d\n", static_cast<int>(cuda_err));
+            return nullptr;
+        }
+        // Try to get device again
+        cudaGetDevice(&device);
+        fprintf(stderr, "[cuBLASLt] After cudaSetDevice, device=%d\n", device);
+    }
+
+    // Sync device to ensure context is ready
+    cudaDeviceSynchronize();
+
     cublasLtHandle_t handle = nullptr;
     cublasStatus_t status = g_state.pfn_create(&handle);
+    fprintf(stderr, "[cuBLASLt] cublasLtCreate returned: %d, handle=%p\n", static_cast<int>(status), handle);
     if (status == CUBLAS_STATUS_SUCCESS) {
         g_state.lt_handle = handle;
+    } else {
+        fprintf(stderr, "[cuBLASLt] ERROR: Failed to create cuBLASLt handle!\n");
     }
 
     return g_state.lt_handle;
@@ -814,6 +888,179 @@ cudaError_t gemm_bf16(
         C, cached->Cdesc,
         algo_ptr, workspace, workspaceSize, stream
     );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        g_last_cublaslt_step = 6;
+        g_last_cublaslt_error = static_cast<int>(status);
+        return cudaErrorUnknown;
+    }
+
+    return cudaSuccess;
+}
+
+cudaError_t gemm_strided_batched_fp32(
+    const float* A, const float* B, float* C,
+    int M, int N, int K, int batch_count,
+    int64_t strideA, int64_t strideB, int64_t strideC,
+    cudaStream_t stream
+) {
+    fprintf(stderr, "[cuBLASLt] gemm_strided_batched_fp32: M=%d N=%d K=%d batch=%d strideA=%lld strideB=%lld strideC=%lld\n",
+            M, N, K, batch_count, (long long)strideA, (long long)strideB, (long long)strideC);
+
+    g_last_cublaslt_error = 0;
+    g_last_cublaslt_step = 0;
+
+    cublasLtHandle_t handle = get_handle();
+    if (!handle) {
+        g_last_cublaslt_step = 1;
+        g_last_cublaslt_error = -1;
+        return cudaErrorNotReady;
+    }
+
+    cublasStatus_t status;
+
+    // Create matmul descriptor
+    cublasLtMatmulDesc_t operationDesc = nullptr;
+    status = matmul_desc_create(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        g_last_cublaslt_step = 2;
+        g_last_cublaslt_error = static_cast<int>(status);
+        return cudaErrorUnknown;
+    }
+
+    // Set transpose attributes (NN for row-major: C = A @ B)
+    // cuBLASLt is column-major, so we compute C^T = B^T @ A^T
+    cublasOperation_t transA = CUBLAS_OP_N;
+    cublasOperation_t transB = CUBLAS_OP_N;
+    matmul_desc_set_attribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
+    matmul_desc_set_attribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
+
+    // Create matrix layouts with batch info (swapped for row-major)
+    // Row-major C[M,N] = A[M,K] @ B[K,N]
+    // Column-major: C^T[N,M] = B^T[N,K] @ A^T[K,M]
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
+
+    // B^T layout: [N, K] with ld=N, stride between batches
+    fprintf(stderr, "[cuBLASLt] Creating Bdesc: rows=%d cols=%d ld=%d\n", N, K, N);
+    status = matrix_layout_create(&Bdesc, CUDA_R_32F, N, K, N);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "[cuBLASLt] Bdesc creation failed: %d\n", static_cast<int>(status));
+        g_last_cublaslt_step = 3;
+        g_last_cublaslt_error = static_cast<int>(status);
+        matmul_desc_destroy(operationDesc);
+        return cudaErrorUnknown;
+    }
+    status = matrix_layout_set_attribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count));
+    fprintf(stderr, "[cuBLASLt] Bdesc batch_count set: %d\n", static_cast<int>(status));
+    status = matrix_layout_set_attribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB));
+    fprintf(stderr, "[cuBLASLt] Bdesc stride set: %d\n", static_cast<int>(status));
+
+    // A^T layout: [K, M] with ld=K, stride between batches
+    fprintf(stderr, "[cuBLASLt] Creating Adesc: rows=%d cols=%d ld=%d\n", K, M, K);
+    status = matrix_layout_create(&Adesc, CUDA_R_32F, K, M, K);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "[cuBLASLt] Adesc creation failed: %d\n", static_cast<int>(status));
+        g_last_cublaslt_step = 4;
+        g_last_cublaslt_error = static_cast<int>(status);
+        matrix_layout_destroy(Bdesc);
+        matmul_desc_destroy(operationDesc);
+        return cudaErrorUnknown;
+    }
+    status = matrix_layout_set_attribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count));
+    fprintf(stderr, "[cuBLASLt] Adesc batch_count set: %d\n", static_cast<int>(status));
+    status = matrix_layout_set_attribute(Adesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA));
+    fprintf(stderr, "[cuBLASLt] Adesc stride set: %d\n", static_cast<int>(status));
+
+    // C^T layout: [N, M] with ld=N, stride between batches
+    fprintf(stderr, "[cuBLASLt] Creating Cdesc: rows=%d cols=%d ld=%d\n", N, M, N);
+    status = matrix_layout_create(&Cdesc, CUDA_R_32F, N, M, N);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "[cuBLASLt] Cdesc creation failed: %d\n", static_cast<int>(status));
+        g_last_cublaslt_step = 5;
+        g_last_cublaslt_error = static_cast<int>(status);
+        matrix_layout_destroy(Adesc);
+        matrix_layout_destroy(Bdesc);
+        matmul_desc_destroy(operationDesc);
+        return cudaErrorUnknown;
+    }
+    status = matrix_layout_set_attribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count));
+    fprintf(stderr, "[cuBLASLt] Cdesc batch_count set: %d\n", static_cast<int>(status));
+    status = matrix_layout_set_attribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideC, sizeof(strideC));
+    fprintf(stderr, "[cuBLASLt] Cdesc stride set: %d\n", static_cast<int>(status));
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    // Select algorithm for batched GEMM using heuristics
+    cublasLtMatmulAlgo_t algo;
+    bool has_algo = false;
+    void* workspace = nullptr;
+    size_t workspaceSize = 0;
+
+    if (g_state.pfn_pref_create && g_state.pfn_algo_get_heuristic) {
+        cublasLtMatmulPreference_t preference = nullptr;
+        status = g_state.pfn_pref_create(&preference);
+        if (status == CUBLAS_STATUS_SUCCESS && preference) {
+            constexpr size_t MAX_WORKSPACE = 32 * 1024 * 1024;
+            g_state.pfn_pref_set_attr(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                      &MAX_WORKSPACE, sizeof(MAX_WORKSPACE));
+
+            cublasLtMatmulHeuristicResult_struct heuristicResult;
+            int returnedResults = 0;
+
+            status = g_state.pfn_algo_get_heuristic(
+                handle, operationDesc,
+                Bdesc, Adesc,  // Swapped for row-major
+                Cdesc, Cdesc,
+                preference, 1, &heuristicResult, &returnedResults
+            );
+
+            fprintf(stderr, "[cuBLASLt] Batched AlgoGetHeuristic: status=%d, results=%d\n",
+                    static_cast<int>(status), returnedResults);
+
+            if (status == CUBLAS_STATUS_SUCCESS && returnedResults > 0) {
+                algo = heuristicResult.algo;
+                workspaceSize = heuristicResult.workspaceSize;
+                has_algo = true;
+
+                if (workspaceSize > 0) {
+                    CUdeviceptr dptr = 0;
+                    CUresult err = cuMemAlloc(&dptr, workspaceSize);
+                    if (err == CUDA_SUCCESS) {
+                        workspace = reinterpret_cast<void*>(dptr);
+                    }
+                }
+            }
+
+            g_state.pfn_pref_destroy(preference);
+        }
+    }
+
+    // Execute batched matmul
+    fprintf(stderr, "[cuBLASLt] Calling cublasLtMatmul (has_algo=%d, ws=%zu)...\n", has_algo, workspaceSize);
+    status = g_state.pfn_matmul(
+        handle, operationDesc,
+        &alpha,
+        B, Bdesc,
+        A, Adesc,
+        &beta,
+        C, Cdesc,
+        C, Cdesc,
+        has_algo ? &algo : nullptr,
+        workspace, workspaceSize, stream
+    );
+    fprintf(stderr, "[cuBLASLt] cublasLtMatmul returned: %d\n", static_cast<int>(status));
+
+    // Free workspace if allocated
+    if (workspace) {
+        cuMemFree(reinterpret_cast<CUdeviceptr>(workspace));
+    }
+
+    // Cleanup
+    matrix_layout_destroy(Cdesc);
+    matrix_layout_destroy(Adesc);
+    matrix_layout_destroy(Bdesc);
+    matmul_desc_destroy(operationDesc);
 
     if (status != CUBLAS_STATUS_SUCCESS) {
         g_last_cublaslt_step = 6;

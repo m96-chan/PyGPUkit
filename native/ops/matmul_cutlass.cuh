@@ -85,9 +85,14 @@ inline int get_cached_sm_version() {
 // Minimum supported SM version
 constexpr int MIN_SM_VERSION = 80;
 
-// Check if SM version is supported
+// Check if SM version is supported for CUTLASS 2.x kernels
+// Note: SM 120 (Blackwell GeForce) requires CUTLASS 4.x which only supports FP8
+//       Until FP32/FP16/BF16 support is added, we must exclude SM >= 120
 inline bool is_sm_supported() {
-    return get_cached_sm_version() >= MIN_SM_VERSION;
+    int sm = get_cached_sm_version();
+    // SM 80-119: CUTLASS 2.x/3.x kernels work
+    // SM 120+: CUTLASS 4.x only supports FP8, fall back to native TF32
+    return sm >= MIN_SM_VERSION && sm < 120;
 }
 
 // SM version classification for kernel selection

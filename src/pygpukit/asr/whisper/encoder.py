@@ -33,14 +33,10 @@ def _softmax_4d(x: GPUArray) -> GPUArray:
     Returns:
         Softmax output [batch, heads, seq_q, seq_k]
     """
-    # CPU fallback implementation
-    # TODO: Implement native GPU kernel for N-D softmax
-    data = x.to_numpy()
-    # Numerical stability: subtract max
-    data_max = data.max(axis=-1, keepdims=True)
-    exp_data = np.exp(data - data_max)
-    result = exp_data / exp_data.sum(axis=-1, keepdims=True)
-    return from_numpy(result.astype(data.dtype))
+    # Use GPU softmax kernel (supports 2D/3D/4D)
+    from ...ops.reduction import softmax
+
+    return softmax(x)
 
 
 def _batched_matmul(a: GPUArray, b: GPUArray) -> GPUArray:
@@ -53,11 +49,10 @@ def _batched_matmul(a: GPUArray, b: GPUArray) -> GPUArray:
     Returns:
         Output [batch, heads, M, N]
     """
-    # CPU fallback using numpy's matmul which supports batched operations
-    a_np = a.to_numpy()
-    b_np = b.to_numpy()
-    result = np.matmul(a_np, b_np)
-    return from_numpy(result.astype(a_np.dtype))
+    # Use GPU batched matmul kernel
+    from ...ops.matmul import batched_matmul
+
+    return batched_matmul(a, b)
 
 
 def _conv1d(
