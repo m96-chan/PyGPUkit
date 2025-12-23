@@ -100,43 +100,48 @@ class WhisperDecoderLayer:
 
     def _load_weights(self, weights: dict) -> None:
         """Load layer weights to GPU."""
+
+        def _to_gpu(arr):
+            """Convert numpy array to GPUArray, handling None."""
+            return from_numpy(arr) if arr is not None else None
+
         # Self attention
-        self.self_attn_q_weight = from_numpy(weights["self_attn_q_weight"])
-        self.self_attn_q_bias = from_numpy(weights["self_attn_q_bias"])
-        self.self_attn_k_weight = from_numpy(weights["self_attn_k_weight"])
-        self.self_attn_k_bias = from_numpy(weights["self_attn_k_bias"])
-        self.self_attn_v_weight = from_numpy(weights["self_attn_v_weight"])
-        self.self_attn_v_bias = from_numpy(weights["self_attn_v_bias"])
-        self.self_attn_out_weight = from_numpy(weights["self_attn_out_weight"])
-        self.self_attn_out_bias = from_numpy(weights["self_attn_out_bias"])
+        self.self_attn_q_weight = _to_gpu(weights["self_attn_q_weight"])
+        self.self_attn_q_bias = _to_gpu(weights["self_attn_q_bias"])
+        self.self_attn_k_weight = _to_gpu(weights["self_attn_k_weight"])
+        self.self_attn_k_bias = _to_gpu(weights["self_attn_k_bias"])
+        self.self_attn_v_weight = _to_gpu(weights["self_attn_v_weight"])
+        self.self_attn_v_bias = _to_gpu(weights["self_attn_v_bias"])
+        self.self_attn_out_weight = _to_gpu(weights["self_attn_out_weight"])
+        self.self_attn_out_bias = _to_gpu(weights["self_attn_out_bias"])
 
         # Self attention layer norm
-        self.self_attn_ln_weight = from_numpy(weights["self_attn_layer_norm_weight"])
-        self.self_attn_ln_bias = from_numpy(weights["self_attn_layer_norm_bias"])
+        self.self_attn_ln_weight = _to_gpu(weights["self_attn_layer_norm_weight"])
+        self.self_attn_ln_bias = _to_gpu(weights["self_attn_layer_norm_bias"])
 
         # Cross attention
-        self.cross_attn_q_weight = from_numpy(weights["cross_attn_q_weight"])
-        self.cross_attn_q_bias = from_numpy(weights["cross_attn_q_bias"])
-        self.cross_attn_k_weight = from_numpy(weights["cross_attn_k_weight"])
-        self.cross_attn_k_bias = from_numpy(weights["cross_attn_k_bias"])
-        self.cross_attn_v_weight = from_numpy(weights["cross_attn_v_weight"])
-        self.cross_attn_v_bias = from_numpy(weights["cross_attn_v_bias"])
-        self.cross_attn_out_weight = from_numpy(weights["cross_attn_out_weight"])
-        self.cross_attn_out_bias = from_numpy(weights["cross_attn_out_bias"])
+        self.cross_attn_q_weight = _to_gpu(weights["cross_attn_q_weight"])
+        self.cross_attn_q_bias = _to_gpu(weights["cross_attn_q_bias"])
+        self.cross_attn_k_weight = _to_gpu(weights["cross_attn_k_weight"])
+        self.cross_attn_k_bias = _to_gpu(weights["cross_attn_k_bias"])
+        self.cross_attn_v_weight = _to_gpu(weights["cross_attn_v_weight"])
+        self.cross_attn_v_bias = _to_gpu(weights["cross_attn_v_bias"])
+        self.cross_attn_out_weight = _to_gpu(weights["cross_attn_out_weight"])
+        self.cross_attn_out_bias = _to_gpu(weights["cross_attn_out_bias"])
 
         # Cross attention layer norm
-        self.cross_attn_ln_weight = from_numpy(weights["cross_attn_layer_norm_weight"])
-        self.cross_attn_ln_bias = from_numpy(weights["cross_attn_layer_norm_bias"])
+        self.cross_attn_ln_weight = _to_gpu(weights["cross_attn_layer_norm_weight"])
+        self.cross_attn_ln_bias = _to_gpu(weights["cross_attn_layer_norm_bias"])
 
         # FFN
-        self.fc1_weight = from_numpy(weights["fc1_weight"])
-        self.fc1_bias = from_numpy(weights["fc1_bias"])
-        self.fc2_weight = from_numpy(weights["fc2_weight"])
-        self.fc2_bias = from_numpy(weights["fc2_bias"])
+        self.fc1_weight = _to_gpu(weights["fc1_weight"])
+        self.fc1_bias = _to_gpu(weights["fc1_bias"])
+        self.fc2_weight = _to_gpu(weights["fc2_weight"])
+        self.fc2_bias = _to_gpu(weights["fc2_bias"])
 
         # Final layer norm
-        self.ffn_ln_weight = from_numpy(weights["final_layer_norm_weight"])
-        self.ffn_ln_bias = from_numpy(weights["final_layer_norm_bias"])
+        self.ffn_ln_weight = _to_gpu(weights["final_layer_norm_weight"])
+        self.ffn_ln_bias = _to_gpu(weights["final_layer_norm_bias"])
 
     def __call__(
         self,
@@ -335,18 +340,23 @@ class WhisperDecoder:
 
     def _load_weights(self, weights: WhisperWeights) -> None:
         """Load decoder-specific weights."""
+
+        def _to_gpu(arr):
+            """Convert numpy array to GPUArray, handling None."""
+            return from_numpy(arr) if arr is not None else None
+
         # Token embeddings
-        self.embed_tokens = from_numpy(weights.decoder_embed_tokens)
+        self.embed_tokens = _to_gpu(weights.decoder_embed_tokens)
 
         # Positional embeddings
-        self.embed_positions = from_numpy(weights.decoder_embed_positions)
+        self.embed_positions = _to_gpu(weights.decoder_embed_positions)
 
         # Final layer norm
-        self.layer_norm_weight = from_numpy(weights.decoder_layer_norm_weight)
-        self.layer_norm_bias = from_numpy(weights.decoder_layer_norm_bias)
+        self.layer_norm_weight = _to_gpu(weights.decoder_layer_norm_weight)
+        self.layer_norm_bias = _to_gpu(weights.decoder_layer_norm_bias)
 
         # Output projection
-        self.proj_out = from_numpy(weights.proj_out_weight)
+        self.proj_out = _to_gpu(weights.proj_out_weight)
 
     def __call__(
         self,

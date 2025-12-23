@@ -123,29 +123,34 @@ class WhisperEncoderLayer:
 
     def _load_weights(self, weights: dict) -> None:
         """Load layer weights to GPU."""
+
+        def _to_gpu(arr):
+            """Convert numpy array to GPUArray, handling None."""
+            return from_numpy(arr) if arr is not None else None
+
         # Self attention
-        self.q_weight = from_numpy(weights["self_attn_q_weight"])
-        self.q_bias = from_numpy(weights["self_attn_q_bias"])
-        self.k_weight = from_numpy(weights["self_attn_k_weight"])
-        self.k_bias = from_numpy(weights["self_attn_k_bias"])
-        self.v_weight = from_numpy(weights["self_attn_v_weight"])
-        self.v_bias = from_numpy(weights["self_attn_v_bias"])
-        self.out_weight = from_numpy(weights["self_attn_out_weight"])
-        self.out_bias = from_numpy(weights["self_attn_out_bias"])
+        self.q_weight = _to_gpu(weights["self_attn_q_weight"])
+        self.q_bias = _to_gpu(weights["self_attn_q_bias"])
+        self.k_weight = _to_gpu(weights["self_attn_k_weight"])
+        self.k_bias = _to_gpu(weights["self_attn_k_bias"])
+        self.v_weight = _to_gpu(weights["self_attn_v_weight"])
+        self.v_bias = _to_gpu(weights["self_attn_v_bias"])
+        self.out_weight = _to_gpu(weights["self_attn_out_weight"])
+        self.out_bias = _to_gpu(weights["self_attn_out_bias"])
 
         # Self attention layer norm
-        self.attn_ln_weight = from_numpy(weights["self_attn_layer_norm_weight"])
-        self.attn_ln_bias = from_numpy(weights["self_attn_layer_norm_bias"])
+        self.attn_ln_weight = _to_gpu(weights["self_attn_layer_norm_weight"])
+        self.attn_ln_bias = _to_gpu(weights["self_attn_layer_norm_bias"])
 
         # FFN
-        self.fc1_weight = from_numpy(weights["fc1_weight"])
-        self.fc1_bias = from_numpy(weights["fc1_bias"])
-        self.fc2_weight = from_numpy(weights["fc2_weight"])
-        self.fc2_bias = from_numpy(weights["fc2_bias"])
+        self.fc1_weight = _to_gpu(weights["fc1_weight"])
+        self.fc1_bias = _to_gpu(weights["fc1_bias"])
+        self.fc2_weight = _to_gpu(weights["fc2_weight"])
+        self.fc2_bias = _to_gpu(weights["fc2_bias"])
 
         # Final layer norm
-        self.ffn_ln_weight = from_numpy(weights["final_layer_norm_weight"])
-        self.ffn_ln_bias = from_numpy(weights["final_layer_norm_bias"])
+        self.ffn_ln_weight = _to_gpu(weights["final_layer_norm_weight"])
+        self.ffn_ln_bias = _to_gpu(weights["final_layer_norm_bias"])
 
     def __call__(self, x: GPUArray) -> GPUArray:
         """Forward pass through encoder layer.
@@ -273,18 +278,23 @@ class WhisperEncoder:
 
     def _load_weights(self, weights: WhisperWeights) -> None:
         """Load encoder-specific weights."""
+
+        def _to_gpu(arr):
+            """Convert numpy array to GPUArray, handling None."""
+            return from_numpy(arr) if arr is not None else None
+
         # Conv1d stem
-        self.conv1_weight = from_numpy(weights.encoder_conv1_weight)
-        self.conv1_bias = from_numpy(weights.encoder_conv1_bias)
-        self.conv2_weight = from_numpy(weights.encoder_conv2_weight)
-        self.conv2_bias = from_numpy(weights.encoder_conv2_bias)
+        self.conv1_weight = _to_gpu(weights.encoder_conv1_weight)
+        self.conv1_bias = _to_gpu(weights.encoder_conv1_bias)
+        self.conv2_weight = _to_gpu(weights.encoder_conv2_weight)
+        self.conv2_bias = _to_gpu(weights.encoder_conv2_bias)
 
         # Positional embeddings
-        self.embed_positions = from_numpy(weights.encoder_embed_positions)
+        self.embed_positions = _to_gpu(weights.encoder_embed_positions)
 
         # Final layer norm
-        self.layer_norm_weight = from_numpy(weights.encoder_layer_norm_weight)
-        self.layer_norm_bias = from_numpy(weights.encoder_layer_norm_bias)
+        self.layer_norm_weight = _to_gpu(weights.encoder_layer_norm_weight)
+        self.layer_norm_bias = _to_gpu(weights.encoder_layer_norm_bias)
 
     def __call__(self, mel: GPUArray) -> GPUArray:
         """Encode mel spectrogram to hidden states.
