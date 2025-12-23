@@ -6,5 +6,14 @@ Supports OpenAI Whisper and derived models:
 - distil-whisper variants
 """
 
-# Will be populated as components are implemented
-__all__ = []
+from .config import WHISPER_CONFIGS, WhisperConfig
+from .loader import WhisperWeights, download_model, load_safetensors, load_whisper_model
+
+__all__ = [
+    "WhisperConfig",
+    "WHISPER_CONFIGS",
+    "WhisperWeights",
+    "load_whisper_model",
+    "load_safetensors",
+    "download_model",
+]
