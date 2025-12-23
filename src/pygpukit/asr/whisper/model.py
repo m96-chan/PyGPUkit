@@ -315,10 +315,11 @@ class WhisperModel:
             Mel spectrogram [1, n_mels, n_frames]
         """
         # Pad or trim to 30 seconds
-        audio = pad_or_trim(audio)
+        audio_gpu = pad_or_trim(audio)
+        audio_np = audio_gpu.to_numpy()
 
         # Compute mel spectrogram using numpy
-        mel = self._compute_mel_spectrogram(audio)
+        mel = self._compute_mel_spectrogram(audio_np)
 
         # Normalize
         mel = normalize_mel(from_numpy(mel))
