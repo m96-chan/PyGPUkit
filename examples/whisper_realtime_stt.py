@@ -326,14 +326,97 @@ def print_transcription(event: TranscriptionEvent) -> None:
     print(f"{timestamp} {event.text}")
 
 
+def list_audio_devices() -> list[dict]:
+    """List available audio input devices.
+
+    Returns:
+        List of device info dicts with 'index', 'name', 'channels', 'sample_rate'
+    """
+    try:
+        import sounddevice as sd
+    except ImportError as err:
+        raise ImportError("sounddevice is required: pip install sounddevice") from err
+
+    devices = []
+    for i, dev in enumerate(sd.query_devices()):
+        if dev["max_input_channels"] > 0:  # Input device
+            devices.append(
+                {
+                    "index": i,
+                    "name": dev["name"],
+                    "channels": dev["max_input_channels"],
+                    "sample_rate": dev["default_samplerate"],
+                }
+            )
+    return devices
+
+
+def print_audio_devices() -> None:
+    """Print available audio input devices."""
+    devices = list_audio_devices()
+    print("\nAvailable audio input devices:")
+    print("-" * 60)
+    for dev in devices:
+        print(f"  [{dev['index']:2d}] {dev['name']}")
+        print(f"       Channels: {dev['channels']}, Sample Rate: {dev['sample_rate']:.0f} Hz")
+    print("-" * 60)
+
+
+def select_audio_device() -> int | None:
+    """Interactively select an audio input device.
+
+    Returns:
+        Selected device index or None for default
+    """
+    devices = list_audio_devices()
+
+    if not devices:
+        print("No audio input devices found!")
+        return None
+
+    if len(devices) == 1:
+        print(f"Using audio device: {devices[0]['name']}")
+        return devices[0]["index"]
+
+    print("\nAvailable audio input devices:")
+    print("-" * 60)
+    for dev in devices:
+        print(f"  [{dev['index']:2d}] {dev['name']}")
+    print("-" * 60)
+
+    while True:
+        try:
+            choice = input(
+                f"Select device [0-{max(d['index'] for d in devices)}, Enter=default]: "
+            ).strip()
+            if choice == "":
+                return None
+            idx = int(choice)
+            if any(d["index"] == idx for d in devices):
+                return idx
+            print(f"Invalid device index: {idx}")
+        except ValueError:
+            print("Please enter a valid number")
+        except KeyboardInterrupt:
+            print("\nCancelled")
+            sys.exit(0)
+
+
 def demo_microphone(args: argparse.Namespace) -> None:
     """Run demo with microphone input."""
+    # Select device if not specified
+    device = args.device
+    if device is None and args.select_device:
+        device = select_audio_device()
+
     print("=" * 60)
     print("Real-time Speech-to-Text Demo (Microphone)")
     print("=" * 60)
     print(f"Model: {args.model}")
     print(f"Language: {args.language or 'auto'}")
     print(f"Chunk size: {args.chunk_size}s")
+    if device is not None:
+        print(f"Device: {device}")
     print("-" * 60)
     print("Speak into your microphone. Press Ctrl+C to stop.")
     print("-" * 60)
@@ -348,7 +431,7 @@ def demo_microphone(args: argparse.Namespace) -> None:
     stt.load_model()
 
     # Start microphone
-    mic = MicrophoneStream(device=args.device)
+    mic = MicrophoneStream(device=device)
 
     try:
         stt.start()
@@ -432,8 +515,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Microphone input (default)
-    python whisper_realtime_stt.py
+    # List available microphones
+    python whisper_realtime_stt.py --list-devices
+
+    # Select microphone interactively
+    python whisper_realtime_stt.py --select-device
+
+    # Use specific microphone by index
+    python whisper_realtime_stt.py --device 2
 
     # WAV file input
     python whisper_realtime_stt.py --input recording.wav
@@ -493,12 +582,28 @@ Examples:
         help="Audio input device index (for microphone)",
     )
     parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="List available audio input devices and exit",
+    )
+    parser.add_argument(
+        "--select-device",
+        "-s",
+        action="store_true",
+        help="Interactively select audio input device at startup",
+    )
+    parser.add_argument(
         "--fast",
         action="store_true",
         help="Process file as fast as possible (no real-time simulation)",
     )
 
     args = parser.parse_args()
+
+    # List devices and exit
+    if args.list_devices:
+        print_audio_devices()
+        return
 
     if args.input:
         demo_file(args)
