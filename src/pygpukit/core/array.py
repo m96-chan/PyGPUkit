@@ -521,3 +521,61 @@ class GPUArray:
         view_native = native.GPUArray.narrow(src_native, 0, new_shape)
 
         return GPUArray._wrap_native(view_native)
+
+    def transpose(self, *axes: int) -> GPUArray:
+        """Transpose the array by permuting its axes.
+
+        Args:
+            *axes: The new order of axes. If not provided, reverses all axes.
+                   For a 3D array, transpose(0, 2, 1) swaps the last two axes.
+
+        Returns:
+            A new GPUArray with transposed data.
+
+        Example:
+            # Transpose 2D matrix
+            a = from_numpy(np.array([[1, 2], [3, 4]]))
+            b = a.transpose()  # or a.T
+
+            # Permute 3D tensor axes
+            x = from_numpy(np.zeros((2, 3, 4)))
+            y = x.transpose(0, 2, 1)  # shape (2, 4, 3)
+        """
+        from pygpukit.core.factory import from_numpy
+
+        np_data = self.to_numpy()
+        if len(axes) == 0:
+            result = np_data.T
+        else:
+            result = np_data.transpose(*axes)
+        return from_numpy(result.copy())
+
+    @property
+    def T(self) -> GPUArray:
+        """Return transposed array (reverses all axes)."""
+        return self.transpose()
+
+    def reshape(self, *shape: int) -> GPUArray:
+        """Reshape the array to a new shape.
+
+        Args:
+            *shape: The new shape. Can be passed as separate args or as a tuple.
+                    One dimension can be -1 to infer from the total size.
+
+        Returns:
+            A new GPUArray with the specified shape.
+
+        Example:
+            x = from_numpy(np.zeros((2, 3, 4)))
+            y = x.reshape(6, 4)  # or x.reshape((6, 4))
+            z = x.reshape(-1, 4)  # infer first dimension
+        """
+        from pygpukit.core.factory import from_numpy
+
+        # Handle both reshape(2, 3) and reshape((2, 3))
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+
+        np_data = self.to_numpy()
+        result = np_data.reshape(shape)
+        return from_numpy(result.copy())
