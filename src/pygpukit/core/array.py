@@ -251,9 +251,21 @@ class GPUArray:
         """Element-wise addition.
 
         Supports both GPUArray and scalar (int/float) operands.
+        Broadcasting is supported for compatible shapes.
         """
         if isinstance(other, (int, float)):
             return self._scalar_op(other, lambda a, b: a + b)
+
+        # Check if broadcasting is needed
+        if self.shape != other.shape:
+            # Use numpy broadcasting
+            from pygpukit.core.factory import from_numpy
+
+            a_np = self.to_numpy()
+            b_np = other.to_numpy()
+            result = a_np + b_np
+            return from_numpy(result.astype(a_np.dtype))
+
         from pygpukit.ops.basic import add
 
         return add(self, other)

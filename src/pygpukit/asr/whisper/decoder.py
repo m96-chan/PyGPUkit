@@ -24,7 +24,7 @@ import math
 import numpy as np
 
 from ...core import GPUArray, from_numpy
-from ...ops import matmul as matmul_ops
+from ...ops.matmul import matmul
 from ...ops.nn import gelu, layernorm
 from .config import WhisperConfig
 from .loader import WhisperWeights
@@ -60,6 +60,22 @@ def _softmax_4d(x: GPUArray) -> GPUArray:
     exp_data = np.exp(data - data_max)
     result = exp_data / exp_data.sum(axis=-1, keepdims=True)
     return from_numpy(result.astype(data.dtype))
+
+
+def _batched_matmul(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Batched matrix multiplication for 4D tensors.
+
+    Args:
+        a: Input [batch, heads, M, K]
+        b: Input [batch, heads, K, N]
+
+    Returns:
+        Output [batch, heads, M, N]
+    """
+    a_np = a.to_numpy()
+    b_np = b.to_numpy()
+    result = np.matmul(a_np, b_np)
+    return from_numpy(result.astype(a_np.dtype))
 
 
 def _create_causal_mask(seq_len: int, dtype: np.dtype) -> np.ndarray:
@@ -215,7 +231,7 @@ class WhisperDecoderLayer:
 
         # Scaled dot-product attention with causal mask
         scale = 1.0 / math.sqrt(self.head_dim)
-        attn_weights = matmul_ops.matmul(q, k.transpose(0, 1, 3, 2)) * scale
+        attn_weights = _batched_matmul(q, k.transpose(0, 1, 3, 2)) * scale
 
         # Apply causal mask
         if causal_mask is not None:
@@ -225,7 +241,7 @@ class WhisperDecoderLayer:
         attn_weights = _softmax_4d(attn_weights)
 
         # Apply attention to values
-        attn_output = matmul_ops.matmul(attn_weights, v)
+        attn_output = _batched_matmul(attn_weights, v)
 
         # Reshape back: [batch, n_heads, seq, head_dim] -> [batch, seq, d_model]
         attn_output = attn_output.transpose(0, 2, 1, 3)
@@ -267,13 +283,13 @@ class WhisperDecoderLayer:
 
         # Scaled dot-product attention (no causal mask for cross attention)
         scale = 1.0 / math.sqrt(self.head_dim)
-        attn_weights = matmul_ops.matmul(q, k.transpose(0, 1, 3, 2)) * scale
+        attn_weights = _batched_matmul(q, k.transpose(0, 1, 3, 2)) * scale
 
         # Softmax
         attn_weights = _softmax_4d(attn_weights)
 
         # Apply attention to values
-        attn_output = matmul_ops.matmul(attn_weights, v)
+        attn_output = _batched_matmul(attn_weights, v)
 
         # Reshape back: [batch, n_heads, seq, head_dim] -> [batch, seq, d_model]
         attn_output = attn_output.transpose(0, 2, 1, 3)
@@ -305,10 +321,25 @@ class WhisperDecoderLayer:
         return output
 
     def _linear(self, x: GPUArray, weight: GPUArray, bias: GPUArray) -> GPUArray:
-        """Linear projection: y = xW^T + b."""
-        out = matmul_ops.matmul(x, weight.T)
-        if bias is not None:
-            out = out + bias
+        """Linear projection: y = xW^T + b.
+
+        Handles both 2D [batch, features] and 3D [batch, seq_len, features] input.
+        """
+        weight_t = weight.T
+        out_features = weight.shape[0]
+
+        if x.ndim == 3:
+            batch, seq_len, in_features = x.shape
+            x_2d = x.reshape(batch * seq_len, in_features)
+            out_2d = matmul(x_2d, weight_t)
+            # Add bias in 2D (broadcasting works naturally)
+            if bias is not None:
+                out_2d = out_2d + bias
+            out = out_2d.reshape(batch, seq_len, out_features)
+        else:
+            out = matmul(x, weight_t)
+            if bias is not None:
+                out = out + bias
         return out
 
 
@@ -396,7 +427,11 @@ class WhisperDecoder:
         x = layernorm(x, self.layer_norm_weight, self.layer_norm_bias)
 
         # Output projection to vocabulary
-        logits = matmul_ops.matmul(x, self.proj_out.T)
+        # x is [batch, seq_len, d_model], proj_out is [vocab_size, d_model]
+        batch, seq_len, d_model = x.shape
+        x_2d = x.reshape(batch * seq_len, d_model)
+        logits_2d = matmul(x_2d, self.proj_out.T)
+        logits = logits_2d.reshape(batch, seq_len, -1)
 
         return logits
 
@@ -476,8 +511,8 @@ class WhisperDecoder:
             # Get logits for last token
             last_logits = logits.to_numpy()[0, -1, :]  # [vocab_size]
 
-            # Apply temperature
-            if temperature != 1.0:
+            # Apply temperature (skip for greedy decoding)
+            if temperature > 0.0 and temperature != 1.0:
                 last_logits = last_logits / temperature
 
             # Sample next token

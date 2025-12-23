@@ -18,7 +18,7 @@ import math
 import numpy as np
 
 from ...core import GPUArray, from_numpy
-from ...ops import matmul as matmul_ops
+from ...ops.matmul import matmul
 from ...ops.nn import gelu, layernorm
 from .config import WhisperConfig
 from .loader import WhisperWeights
@@ -41,6 +41,23 @@ def _softmax_4d(x: GPUArray) -> GPUArray:
     exp_data = np.exp(data - data_max)
     result = exp_data / exp_data.sum(axis=-1, keepdims=True)
     return from_numpy(result.astype(data.dtype))
+
+
+def _batched_matmul(a: GPUArray, b: GPUArray) -> GPUArray:
+    """Batched matrix multiplication for 4D tensors.
+
+    Args:
+        a: Input [batch, heads, M, K]
+        b: Input [batch, heads, K, N]
+
+    Returns:
+        Output [batch, heads, M, N]
+    """
+    # CPU fallback using numpy's matmul which supports batched operations
+    a_np = a.to_numpy()
+    b_np = b.to_numpy()
+    result = np.matmul(a_np, b_np)
+    return from_numpy(result.astype(a_np.dtype))
 
 
 def _conv1d(
@@ -210,13 +227,13 @@ class WhisperEncoderLayer:
 
         # Scaled dot-product attention
         scale = 1.0 / math.sqrt(self.head_dim)
-        attn_weights = matmul_ops.matmul(q, k.transpose(0, 1, 3, 2)) * scale
+        attn_weights = _batched_matmul(q, k.transpose(0, 1, 3, 2)) * scale
 
         # Softmax over last dimension
         attn_weights = _softmax_4d(attn_weights)
 
         # Apply attention to values
-        attn_output = matmul_ops.matmul(attn_weights, v)
+        attn_output = _batched_matmul(attn_weights, v)
 
         # Reshape back: [batch, n_heads, seq, head_dim] -> [batch, seq, d_model]
         attn_output = attn_output.transpose(0, 2, 1, 3)
@@ -248,11 +265,27 @@ class WhisperEncoderLayer:
         return output
 
     def _linear(self, x: GPUArray, weight: GPUArray, bias: GPUArray) -> GPUArray:
-        """Linear projection: y = xW^T + b."""
+        """Linear projection: y = xW^T + b.
+
+        Handles both 2D [batch, features] and 3D [batch, seq_len, features] input.
+        """
         # weight is [out_features, in_features], need to transpose
-        out = matmul_ops.matmul(x, weight.T)
-        if bias is not None:
-            out = out + bias
+        weight_t = weight.T
+        out_features = weight.shape[0]
+
+        if x.ndim == 3:
+            # Reshape [batch, seq_len, in_features] -> [batch * seq_len, in_features]
+            batch, seq_len, in_features = x.shape
+            x_2d = x.reshape(batch * seq_len, in_features)
+            out_2d = matmul(x_2d, weight_t)
+            # Add bias in 2D (broadcasting works naturally)
+            if bias is not None:
+                out_2d = out_2d + bias
+            out = out_2d.reshape(batch, seq_len, out_features)
+        else:
+            out = matmul(x, weight_t)
+            if bias is not None:
+                out = out + bias
         return out
 
 

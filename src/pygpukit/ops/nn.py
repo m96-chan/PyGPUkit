@@ -128,7 +128,7 @@ def layernorm(
     Computes: (x - mean) / sqrt(var + eps) * gamma + beta
 
     Args:
-        input: Input array of shape [batch, features].
+        input: Input array of shape [batch, features] or [batch, seq_len, features].
         gamma: Scale parameter of shape [features].
         beta: Bias parameter of shape [features].
         eps: Small epsilon for numerical stability.
@@ -141,19 +141,36 @@ def layernorm(
     """
     _validate_float_dtype(input, "layernorm")
 
-    if input.ndim != 2:
-        raise ValueError(f"layernorm expects 2D input [batch, features], got {input.ndim}D")
+    if input.ndim not in (2, 3):
+        raise ValueError(f"layernorm expects 2D or 3D input, got {input.ndim}D")
     if gamma.ndim != 1 or beta.ndim != 1:
         raise ValueError("layernorm expects 1D gamma and beta")
     if input.dtype != gamma.dtype or input.dtype != beta.dtype:
         raise ValueError("layernorm: all inputs must have same dtype")
 
-    features = input.shape[1]
+    features = input.shape[-1]  # Last dimension is features
     if gamma.shape[0] != features or beta.shape[0] != features:
         raise ValueError(
             f"layernorm: gamma/beta size {gamma.shape[0]} must match features {features}"
         )
 
+    # Handle 3D input by reshaping to 2D, processing, and reshaping back
+    if input.ndim == 3:
+        batch, seq_len, feat = input.shape
+        input_2d = input.reshape(batch * seq_len, feat)
+        result_2d = _layernorm_dispatch(input_2d, gamma, beta, eps)
+        return result_2d.reshape(batch, seq_len, feat)
+    else:
+        return _layernorm_dispatch(input, gamma, beta, eps)
+
+
+def _layernorm_dispatch(
+    input: GPUArray,
+    gamma: GPUArray,
+    beta: GPUArray,
+    eps: float,
+) -> GPUArray:
+    """Dispatch layernorm to native or CPU implementation."""
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():

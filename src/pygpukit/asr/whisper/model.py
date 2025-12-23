@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ...core import GPUArray, from_numpy
+from ...ops.audio import AudioBuffer
 from ..preprocessing import (
     WHISPER_CHUNK_LENGTH,
     WHISPER_HOP_LENGTH,
@@ -159,6 +160,7 @@ class WhisperModel:
     def transcribe(
         self,
         audio: np.ndarray | str,
+        sample_rate: int | None = None,
         language: str | None = None,
         max_length: int = 448,
         temperature: float = 0.0,
@@ -167,7 +169,8 @@ class WhisperModel:
         """Transcribe audio to text.
 
         Args:
-            audio: Audio waveform (numpy array at 16kHz) or path to audio file
+            audio: Audio waveform (numpy array) or path to audio file
+            sample_rate: Sample rate of input audio (required if not 16kHz)
             language: Optional language code (e.g., "ja", "en")
             max_length: Maximum number of tokens to generate
             temperature: Sampling temperature (0 for greedy)
@@ -178,6 +181,13 @@ class WhisperModel:
         # Load audio if path
         if isinstance(audio, str):
             audio = self._load_audio(audio)
+
+        # Resample to 16kHz if needed
+        if sample_rate is not None and sample_rate != WHISPER_SAMPLE_RATE:
+            audio_gpu = from_numpy(audio.astype(np.float32))
+            audio_buf = AudioBuffer(data=audio_gpu, sample_rate=sample_rate, channels=1)
+            audio_buf = audio_buf.resample(WHISPER_SAMPLE_RATE)
+            audio = audio_buf.data.to_numpy()
 
         # Preprocess to mel spectrogram
         mel = self._preprocess_audio(audio)

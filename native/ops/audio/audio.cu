@@ -183,13 +183,16 @@ GPUArray resample(const GPUArray& input, int src_rate, int dst_rate) {
         throw std::runtime_error("resample: input must be Float32");
     }
 
-    // Currently only support 48kHz -> 16kHz (3:1 decimation)
-    if (src_rate != 48000 || dst_rate != 16000) {
-        throw std::runtime_error("resample: currently only 48000 -> 16000 is supported");
+    if (src_rate == dst_rate) {
+        // No resampling needed, return copy
+        GPUArray output(input.shape(), DataType::Float32);
+        cudaMemcpy(output.data(), input.data(), input.size() * sizeof(float), cudaMemcpyDeviceToDevice);
+        return output;
     }
 
     int in_len = static_cast<int>(input.size());
-    int out_len = in_len / 3;  // 3:1 decimation
+    int out_len = static_cast<int>(static_cast<int64_t>(in_len) * dst_rate / src_rate);
+    float ratio = static_cast<float>(src_rate) / static_cast<float>(dst_rate);
 
     GPUArray output({static_cast<size_t>(out_len)}, DataType::Float32);
 
@@ -198,13 +201,24 @@ GPUArray resample(const GPUArray& input, int src_rate, int dst_rate) {
 
     cudaStream_t stream = internal::get_capture_stream();
 
-    resample_polyphase_kernel<<<num_blocks, block_size, 0, stream>>>(
-        static_cast<const float*>(input.data()),
-        static_cast<float*>(output.data()),
-        in_len,
-        out_len);
+    // Use optimized polyphase filter for 48kHz -> 16kHz
+    if (src_rate == 48000 && dst_rate == 16000) {
+        resample_polyphase_kernel<<<num_blocks, block_size, 0, stream>>>(
+            static_cast<const float*>(input.data()),
+            static_cast<float*>(output.data()),
+            in_len,
+            out_len);
+    } else {
+        // Generic linear interpolation for other sample rates
+        resample_linear_kernel<<<num_blocks, block_size, 0, stream>>>(
+            static_cast<const float*>(input.data()),
+            static_cast<float*>(output.data()),
+            in_len,
+            out_len,
+            ratio);
+    }
 
-    sync_and_check("resample_polyphase kernel failed");
+    sync_and_check("resample kernel failed");
     return output;
 }
 

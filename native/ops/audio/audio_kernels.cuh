@@ -178,6 +178,29 @@ __global__ void resample_polyphase_kernel(
     output[out_idx] = sum;
 }
 
+// Generic linear interpolation resampler for arbitrary sample rates
+__global__ void resample_linear_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int in_len,
+    int out_len,
+    float ratio)  // ratio = src_rate / dst_rate
+{
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= out_len) return;
+
+    // Map output sample to input position (floating point)
+    float in_pos = out_idx * ratio;
+    int in_idx = static_cast<int>(in_pos);
+    float frac = in_pos - in_idx;
+
+    // Linear interpolation between adjacent samples
+    float sample0 = (in_idx < in_len) ? input[in_idx] : 0.0f;
+    float sample1 = (in_idx + 1 < in_len) ? input[in_idx + 1] : sample0;
+
+    output[out_idx] = sample0 + frac * (sample1 - sample0);
+}
+
 // ============================================================================
 // Ring Buffer Operations (for streaming)
 // ============================================================================
