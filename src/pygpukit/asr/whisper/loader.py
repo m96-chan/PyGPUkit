@@ -34,6 +34,28 @@ import numpy as np
 from .config import WhisperConfig
 
 
+def _bfloat16_to_float32(data: bytes, shape: tuple) -> np.ndarray:
+    """Convert raw bfloat16 bytes to float32 numpy array.
+
+    bfloat16 is the upper 16 bits of float32, so we just need to
+    shift left by 16 bits and view as float32.
+
+    Args:
+        data: Raw bytes in bfloat16 format
+        shape: Target tensor shape
+
+    Returns:
+        float32 numpy array
+    """
+    # Read as uint16
+    bf16 = np.frombuffer(data, dtype=np.uint16)
+    # Pad with zeros to create float32 (bfloat16 is upper 16 bits)
+    f32_int = bf16.astype(np.uint32) << 16
+    # View as float32
+    f32 = f32_int.view(np.float32)
+    return f32.reshape(shape)
+
+
 def load_safetensors(file_path: str) -> dict[str, np.ndarray]:
     """Load tensors from SafeTensors file.
 
@@ -41,7 +63,11 @@ def load_safetensors(file_path: str) -> dict[str, np.ndarray]:
         file_path: Path to .safetensors file
 
     Returns:
-        Dictionary mapping tensor names to numpy arrays
+        Dictionary mapping tensor names to numpy arrays (float32)
+
+    Note:
+        bfloat16 tensors are automatically converted to float32 since
+        numpy doesn't natively support bfloat16.
     """
     try:
         from safetensors import safe_open
@@ -51,9 +77,63 @@ def load_safetensors(file_path: str) -> dict[str, np.ndarray]:
         ) from err
 
     tensors = {}
+
+    # Check if any tensor is bfloat16 by trying to load
+    has_bfloat16 = False
     with safe_open(file_path, framework="numpy") as f:
         for key in f.keys():
-            tensors[key] = f.get_tensor(key)
+            try:
+                tensors[key] = f.get_tensor(key)
+            except TypeError as e:
+                if "bfloat16" in str(e):
+                    has_bfloat16 = True
+                    break
+                raise
+
+    # If bfloat16 detected, reload with raw bytes conversion
+    if has_bfloat16:
+        import json
+        import struct
+
+        tensors = {}
+
+        # Read safetensors header to get tensor info
+        with open(file_path, "rb") as f:
+            # First 8 bytes: header size (uint64 little-endian)
+            header_size = struct.unpack("<Q", f.read(8))[0]
+            # Read header JSON
+            header_json = f.read(header_size).decode("utf-8")
+            header = json.loads(header_json)
+            # Data starts after header
+            data_start = 8 + header_size
+
+            for key, info in header.items():
+                if key == "__metadata__":
+                    continue
+
+                dtype = info["dtype"]
+                shape = info["shape"]
+                offsets = info["data_offsets"]
+                start, end = offsets
+
+                # Seek to tensor data
+                f.seek(data_start + start)
+                raw_data = f.read(end - start)
+
+                if dtype == "BF16":
+                    tensors[key] = _bfloat16_to_float32(raw_data, tuple(shape))
+                elif dtype == "F32":
+                    tensors[key] = np.frombuffer(raw_data, dtype=np.float32).reshape(shape)
+                elif dtype == "F16":
+                    tensors[key] = (
+                        np.frombuffer(raw_data, dtype=np.float16).reshape(shape).astype(np.float32)
+                    )
+                elif dtype == "I64":
+                    tensors[key] = np.frombuffer(raw_data, dtype=np.int64).reshape(shape)
+                elif dtype == "I32":
+                    tensors[key] = np.frombuffer(raw_data, dtype=np.int32).reshape(shape)
+                else:
+                    raise ValueError(f"Unsupported dtype: {dtype} for tensor {key}")
 
     return tensors
 
