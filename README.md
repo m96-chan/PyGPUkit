@@ -33,6 +33,24 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.14
+
+### Packaging Fixes
+v0.2.13 and v0.2.14 fix wheel RECORD file issues that caused PyPI deprecation warnings.
+
+| Version | Issue | Fix |
+|---------|-------|-----|
+| v0.2.14 | Windows wheel missing `licenses/LICENSE` in RECORD | Added `-Recurse` to scan dist-info subdirectories |
+| v0.2.13 | Hardcoded version in release workflow | Dynamic dist-info folder detection |
+
+**Recommended:** Use v0.2.14 or later.
+
+```bash
+pip install pygpukit>=0.2.14
+```
+
+---
+
 ## What's New in v0.2.12
 
 ### GPU Audio Processing (Driver-Only)
