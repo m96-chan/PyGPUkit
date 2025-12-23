@@ -35,6 +35,19 @@ The core scheduling, memory management, GPU coordination, and performance-critic
 ```
 PyGPUkit/
 ├── src/pygpukit/           # Python API (NumPy-compatible)
+│   ├── core/               # GPUArray, backend abstraction
+│   ├── ops/                # GPU operations (matmul, nn, audio, etc.)
+│   ├── llm/                # LLM inference (Qwen, LLaMA)
+│   │   ├── models/         # Model implementations
+│   │   └── sampling/       # Token sampling strategies
+│   └── asr/                # Speech recognition (Whisper)
+│       ├── preprocessing.py    # Audio preprocessing (mel, normalize)
+│       └── whisper/            # Whisper model implementation
+│           ├── config.py       # WhisperConfig
+│           ├── loader.py       # SafeTensors loader
+│           ├── encoder.py      # Whisper encoder
+│           ├── decoder.py      # Whisper decoder
+│           └── model.py        # WhisperModel high-level API
 ├── native/
 │   ├── core/               # C++ (CUDA Runtime/Driver API)
 │   ├── jit/                # C++ (NVRTC)
@@ -48,8 +61,19 @@ PyGPUkit/
 │   │       └── device.rs   # DeviceCapabilities, KernelType
 │   └── pygpukit-python/    # PyO3 bindings
 ├── examples/
+├── benchmarks/             # Performance benchmarks
 └── tests/
 ```
+
+### Module Separation Policy
+
+| Module | Purpose | Input | Output |
+|--------|---------|-------|--------|
+| `llm/` | Text generation | Text tokens | Text tokens |
+| `asr/` | Speech recognition | Audio waveform | Text |
+| `ops/` | Low-level GPU ops | GPUArray | GPUArray |
+
+**Rationale**: Modules are separated by **modality** (audio vs text), not by architecture (transformer). This follows industry conventions (HuggingFace, OpenAI API) and enables clean future expansion (TTS, vision, etc.).
 
 ### Language Responsibilities
 
