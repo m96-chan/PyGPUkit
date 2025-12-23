@@ -579,3 +579,32 @@ class GPUArray:
         np_data = self.to_numpy()
         result = np_data.reshape(shape)
         return from_numpy(result.copy())
+
+    def __getitem__(self, key) -> GPUArray:
+        """Index or slice the array.
+
+        Supports NumPy-style indexing including:
+        - Integer indexing: arr[0]
+        - Slicing: arr[:10], arr[1:5], arr[::2]
+        - Multi-dimensional: arr[0, :, 1:3]
+
+        Args:
+            key: Index, slice, or tuple of indices/slices.
+
+        Returns:
+            A new GPUArray containing the selected elements.
+
+        Example:
+            x = from_numpy(np.arange(100).reshape(10, 10))
+            row = x[0]        # First row
+            col = x[:, 0]     # First column
+            sub = x[:5, :5]   # 5x5 subarray
+        """
+        from pygpukit.core.factory import from_numpy
+
+        np_data = self.to_numpy()
+        result = np_data[key]
+        # Handle scalar result
+        if not isinstance(result, np.ndarray):
+            result = np.array(result)
+        return from_numpy(result.copy())
