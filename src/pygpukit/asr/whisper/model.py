@@ -321,8 +321,8 @@ class WhisperModel:
         # Compute mel spectrogram using numpy
         mel = self._compute_mel_spectrogram(audio_np)
 
-        # Normalize
-        mel = normalize_mel(from_numpy(mel))
+        # Normalize (accepts numpy directly)
+        mel = normalize_mel(mel)
 
         # Add batch dimension
         mel_np = mel.to_numpy()

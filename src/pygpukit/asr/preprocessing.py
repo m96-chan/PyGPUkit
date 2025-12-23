@@ -66,7 +66,7 @@ def pad_or_trim(
         return from_numpy(result_np)
 
 
-def normalize_mel(log_mel: GPUArray) -> GPUArray:
+def normalize_mel(log_mel: Union[GPUArray, np.ndarray]) -> GPUArray:
     """Apply Whisper-style normalization to log-mel spectrogram.
 
     Whisper normalization: (log_mel + 4.0) / 4.0
@@ -74,13 +74,16 @@ def normalize_mel(log_mel: GPUArray) -> GPUArray:
     This centers the values around 0 and scales them to roughly [-1, 1] range.
 
     Args:
-        log_mel: Log-mel spectrogram [n_frames, n_mels]
+        log_mel: Log-mel spectrogram [n_mels, n_frames] or [n_frames, n_mels]
 
     Returns:
-        Normalized log-mel spectrogram
+        Normalized log-mel spectrogram as GPUArray
     """
+    # Convert to GPUArray if numpy
+    if isinstance(log_mel, np.ndarray):
+        log_mel = from_numpy(log_mel.astype(np.float32))
+
     # (log_mel + 4.0) / 4.0
-    # Using GPU ops
     return (log_mel + 4.0) / 4.0
 
 

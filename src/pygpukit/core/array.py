@@ -247,29 +247,81 @@ class GPUArray:
     # Arithmetic operators
     # ========================================================================
 
-    def __add__(self, other: GPUArray) -> GPUArray:
-        """Element-wise addition."""
+    def __add__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise addition.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a + b)
         from pygpukit.ops.basic import add
 
         return add(self, other)
 
-    def __sub__(self, other: GPUArray) -> GPUArray:
-        """Element-wise subtraction."""
+    def __radd__(self, other: int | float) -> GPUArray:
+        """Right-hand addition for scalar + GPUArray."""
+        return self._scalar_op(other, lambda a, b: b + a)
+
+    def __sub__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise subtraction.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a - b)
         from pygpukit.ops.basic import sub
 
         return sub(self, other)
 
-    def __mul__(self, other: GPUArray) -> GPUArray:
-        """Element-wise multiplication."""
+    def __rsub__(self, other: int | float) -> GPUArray:
+        """Right-hand subtraction for scalar - GPUArray."""
+        return self._scalar_op(other, lambda a, b: b - a)
+
+    def __mul__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise multiplication.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a * b)
         from pygpukit.ops.basic import mul
 
         return mul(self, other)
 
-    def __truediv__(self, other: GPUArray) -> GPUArray:
-        """Element-wise division."""
+    def __rmul__(self, other: int | float) -> GPUArray:
+        """Right-hand multiplication for scalar * GPUArray."""
+        return self._scalar_op(other, lambda a, b: b * a)
+
+    def __truediv__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise division.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a / b)
         from pygpukit.ops.basic import div
 
         return div(self, other)
+
+    def __rtruediv__(self, other: int | float) -> GPUArray:
+        """Right-hand division for scalar / GPUArray."""
+        return self._scalar_op(other, lambda a, b: b / a)
+
+    def _scalar_op(self, scalar: int | float, op) -> GPUArray:
+        """Apply a scalar operation using NumPy.
+
+        Args:
+            scalar: The scalar operand.
+            op: A callable that takes (array, scalar) and returns the result.
+
+        Returns:
+            A new GPUArray with the result.
+        """
+        from pygpukit.core.factory import from_numpy
+
+        np_data = self.to_numpy()
+        result = op(np_data, scalar)
+        return from_numpy(result.astype(np_data.dtype))
 
     def __matmul__(self, other: GPUArray) -> GPUArray:
         """Matrix multiplication."""
