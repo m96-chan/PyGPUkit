@@ -1436,6 +1436,100 @@ void transpose_3d_021(const GPUArray& input, GPUArray& out) {
     sync_and_check("transpose_3d_021 kernel failed");
 }
 
+// Internal helper for transpose_4d_0213 kernel dispatch
+static void transpose_4d_0213_dispatch(
+    const GPUArray& input,
+    GPUArray& result,
+    size_t dim0, size_t dim1, size_t dim2, size_t dim3
+) {
+    size_t total = input.size();
+    const int block_size = 256;
+    const int grid_size = (total + block_size - 1) / block_size;
+
+    // Use capture stream if available
+    cudaStream_t stream = internal::get_capture_stream();
+
+    switch (input.dtype()) {
+        case DataType::Float32:
+            nn::transpose_0213_f32_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const float*>(input.data()),
+                static_cast<float*>(result.data()),
+                dim0, dim1, dim2, dim3);
+            break;
+        case DataType::Float16:
+            nn::transpose_0213_f16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __half*>(input.data()),
+                static_cast<__half*>(result.data()),
+                dim0, dim1, dim2, dim3);
+            break;
+        case DataType::BFloat16:
+            nn::transpose_0213_bf16_kernel<<<grid_size, block_size, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(input.data()),
+                static_cast<__nv_bfloat16*>(result.data()),
+                dim0, dim1, dim2, dim3);
+            break;
+        default:
+            throw std::runtime_error("transpose_4d_0213: unsupported dtype");
+    }
+}
+
+// Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+GPUArray transpose_4d_0213(const GPUArray& input) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("transpose_4d_0213: only float32/float16/bfloat16 supported");
+    }
+    if (input.ndim() != 4) {
+        throw std::runtime_error("transpose_4d_0213: expects 4D tensor");
+    }
+
+    size_t dim0 = input.shape()[0];
+    size_t dim1 = input.shape()[1];
+    size_t dim2 = input.shape()[2];
+    size_t dim3 = input.shape()[3];
+
+    // Output shape: [dim0, dim2, dim1, dim3]
+    std::vector<size_t> out_shape = {dim0, dim2, dim1, dim3};
+    GPUArray result(out_shape, input.dtype());
+
+    transpose_4d_0213_dispatch(input, result, dim0, dim1, dim2, dim3);
+    sync_and_check("transpose_4d_0213 kernel failed");
+    return result;
+}
+
+// Transpose 4D tensor with output buffer (for CUDA Graph capture)
+void transpose_4d_0213(const GPUArray& input, GPUArray& out) {
+    if (input.dtype() != DataType::Float32 && input.dtype() != DataType::Float16 &&
+        input.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("transpose_4d_0213: only float32/float16/bfloat16 supported");
+    }
+    if (input.ndim() != 4) {
+        throw std::runtime_error("transpose_4d_0213: expects 4D tensor");
+    }
+    if (out.ndim() != 4) {
+        throw std::runtime_error("transpose_4d_0213: output expects 4D tensor");
+    }
+    if (input.dtype() != out.dtype()) {
+        throw std::runtime_error("transpose_4d_0213: dtype mismatch");
+    }
+
+    size_t dim0 = input.shape()[0];
+    size_t dim1 = input.shape()[1];
+    size_t dim2 = input.shape()[2];
+    size_t dim3 = input.shape()[3];
+
+    // Verify output shape: [dim0, dim2, dim1, dim3]
+    if (out.shape()[0] != dim0 || out.shape()[1] != dim2 ||
+        out.shape()[2] != dim1 || out.shape()[3] != dim3) {
+        throw std::runtime_error("transpose_4d_0213: output shape mismatch, expected [" +
+            std::to_string(dim0) + ", " + std::to_string(dim2) + ", " +
+            std::to_string(dim1) + ", " + std::to_string(dim3) + "]");
+    }
+
+    transpose_4d_0213_dispatch(input, out, dim0, dim1, dim2, dim3);
+    sync_and_check("transpose_4d_0213 kernel failed");
+}
+
 // Internal helper for reshape_copy kernel dispatch
 static void reshape_copy_dispatch(
     const GPUArray& input,

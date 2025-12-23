@@ -130,35 +130,47 @@ def _max_native(a: GPUArray) -> GPUArray:
     return GPUArray._wrap_native(c_native)
 
 
-def softmax(input: GPUArray) -> GPUArray:
-    """Softmax activation applied row-wise.
+def softmax(input: GPUArray, axis: int = -1) -> GPUArray:
+    """Softmax activation along the specified axis.
 
     Computes: y[i] = exp(x[i] - max(x)) / sum(exp(x - max(x)))
 
     Args:
-        input: Input array of shape [batch, features].
+        input: Input array of shape [..., features].
+            Supports 2D, 3D, and 4D tensors.
+        axis: The axis along which to compute softmax (default: -1, last axis).
 
     Returns:
-        A new GPUArray containing the softmax output.
+        A new GPUArray containing the softmax output, same shape as input.
 
     Raises:
-        ValueError: If input is not 2D or dtype is not a float type.
+        ValueError: If dtype is not a float type or axis is invalid.
     """
     _validate_float_dtype(input, "softmax")
 
-    if input.ndim != 2:
-        raise ValueError(f"softmax expects 2D input [batch, features], got {input.ndim}D")
+    if input.ndim < 2:
+        raise ValueError(f"softmax expects at least 2D input, got {input.ndim}D")
+    if input.ndim > 4:
+        raise ValueError(f"softmax supports up to 4D input, got {input.ndim}D")
+
+    # Normalize axis
+    if axis < 0:
+        axis = input.ndim + axis
+    if axis != input.ndim - 1:
+        raise ValueError(
+            f"softmax currently only supports axis=-1 (last axis), got axis={axis}"
+        )
 
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _softmax_native(input)
+        return _softmax_native_nd(input)
     else:
-        return _softmax_cpu(input)
+        return _softmax_cpu_nd(input)
 
 
 def _softmax_cpu(input: GPUArray) -> GPUArray:
-    """CPU implementation of softmax."""
+    """CPU implementation of softmax for 2D tensors."""
     x = input.to_numpy()
     # Numerical stability: subtract max
     x_max = x.max(axis=1, keepdims=True)
@@ -166,11 +178,49 @@ def _softmax_cpu(input: GPUArray) -> GPUArray:
     return from_numpy(exp_x / exp_x.sum(axis=1, keepdims=True))
 
 
+def _softmax_cpu_nd(input: GPUArray) -> GPUArray:
+    """CPU implementation of softmax for N-D tensors (axis=-1)."""
+    x = input.to_numpy()
+    # Numerical stability: subtract max along last axis
+    x_max = x.max(axis=-1, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return from_numpy(exp_x / exp_x.sum(axis=-1, keepdims=True))
+
+
 def _softmax_native(input: GPUArray) -> GPUArray:
-    """Native C++ CUDA implementation of softmax (zero-copy)."""
+    """Native C++ CUDA implementation of softmax (zero-copy) for 2D tensors."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
     input_native = input._get_native()
     c_native = native.softmax(input_native)
     return GPUArray._wrap_native(c_native)
+
+
+def _softmax_native_nd(input: GPUArray) -> GPUArray:
+    """Native C++ CUDA implementation of softmax for N-D tensors.
+
+    Flattens leading dimensions into a single batch dimension,
+    applies softmax along the last axis, then reshapes back.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    original_shape = input.shape
+
+    # Flatten all but last dimension into batch
+    features = original_shape[-1]
+    batch_size = 1
+    for dim in original_shape[:-1]:
+        batch_size *= dim
+
+    # Reshape to 2D [batch, features]
+    input_2d = input.reshape((batch_size, features))
+    input_native = input_2d._get_native()
+
+    # Apply softmax
+    c_native = native.softmax(input_native)
+    result_2d = GPUArray._wrap_native(c_native)
+
+    # Reshape back to original shape
+    return result_2d.reshape(original_shape)

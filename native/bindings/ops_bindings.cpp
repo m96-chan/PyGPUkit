@@ -263,6 +263,16 @@ void init_ops_bindings(py::module_& m) {
           py::arg("input"), py::arg("out"),
           "Transpose 3D tensor with output buffer (for CUDA Graph capture)");
 
+    // Transpose 4D: [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+    m.def("transpose_4d_0213", py::overload_cast<const GPUArray&>(&ops::transpose_4d_0213),
+          py::arg("input"),
+          "Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d2, d1, d3] (swap axes 1 and 2)");
+
+    // Transpose 4D with output buffer (for CUDA Graph capture)
+    m.def("transpose_4d_0213_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::transpose_4d_0213),
+          py::arg("input"), py::arg("out"),
+          "Transpose 4D tensor with output buffer (for CUDA Graph capture)");
+
     // Reshape with copy
     m.def("reshape_copy", py::overload_cast<const GPUArray&, const std::vector<size_t>&>(&ops::reshape_copy),
           py::arg("input"), py::arg("new_shape"),
@@ -1087,4 +1097,14 @@ void init_ops_bindings(py::module_& m) {
         auto handle = cublaslt::get_handle();
         return reinterpret_cast<uintptr_t>(handle);
     }, "Get cuBLASLt handle address for debugging (0 if not available).");
+
+    // ========================================================================
+    // Strided Batched GEMM (for batched matmul in attention)
+    // ========================================================================
+
+    m.def("gemm_strided_batched_fp32", &ops::batched_matmul_fp32,
+       py::arg("A"), py::arg("B"), py::arg("C"),
+       py::arg("M"), py::arg("N"), py::arg("K"), py::arg("batch_count"),
+       py::arg("strideA"), py::arg("strideB"), py::arg("strideC"),
+       "Strided batched GEMM: C[b] = A[b] @ B[b] for b in [0, batch_count)");
 }

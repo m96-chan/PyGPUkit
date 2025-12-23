@@ -349,6 +349,85 @@ __global__ void transpose_021_bf16_kernel(
     }
 }
 
+// ============================================================================
+// 4D Transpose: [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+// Swaps axes 1 and 2 (common in attention: batch, seq, heads, dim -> batch, heads, seq, dim)
+// ============================================================================
+
+__global__ void transpose_0213_f32_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t dim3
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * dim2 * dim3;
+
+    if (idx < total) {
+        // Compute source coordinates [d0, d1, d2, d3]
+        size_t d3 = idx % dim3;
+        size_t remaining = idx / dim3;
+        size_t d2 = remaining % dim2;
+        remaining = remaining / dim2;
+        size_t d1 = remaining % dim1;
+        size_t d0 = remaining / dim1;
+
+        // Compute destination index [d0, d2, d1, d3]
+        size_t dst_idx = d0 * (dim2 * dim1 * dim3) + d2 * (dim1 * dim3) + d1 * dim3 + d3;
+        dst[dst_idx] = src[idx];
+    }
+}
+
+__global__ void transpose_0213_f16_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t dim3
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * dim2 * dim3;
+
+    if (idx < total) {
+        size_t d3 = idx % dim3;
+        size_t remaining = idx / dim3;
+        size_t d2 = remaining % dim2;
+        remaining = remaining / dim2;
+        size_t d1 = remaining % dim1;
+        size_t d0 = remaining / dim1;
+
+        size_t dst_idx = d0 * (dim2 * dim1 * dim3) + d2 * (dim1 * dim3) + d1 * dim3 + d3;
+        dst[dst_idx] = src[idx];
+    }
+}
+
+__global__ void transpose_0213_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    size_t dim0,
+    size_t dim1,
+    size_t dim2,
+    size_t dim3
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = dim0 * dim1 * dim2 * dim3;
+
+    if (idx < total) {
+        size_t d3 = idx % dim3;
+        size_t remaining = idx / dim3;
+        size_t d2 = remaining % dim2;
+        remaining = remaining / dim2;
+        size_t d1 = remaining % dim1;
+        size_t d0 = remaining / dim1;
+
+        size_t dst_idx = d0 * (dim2 * dim1 * dim3) + d2 * (dim1 * dim3) + d1 * dim3 + d3;
+        dst[dst_idx] = src[idx];
+    }
+}
+
 // Reshape with copy (ensures contiguous output)
 // Simply copies data - reshape is handled by changing shape metadata
 __global__ void copy_f32_kernel(

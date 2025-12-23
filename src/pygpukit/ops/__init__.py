@@ -16,6 +16,8 @@ from pygpukit.ops.basic import (
     # Elementwise
     add,
     add_inplace,
+    # Matmul
+    batched_matmul,
     # Neural Network
     bias_add_inplace,
     # Tensor
@@ -73,6 +75,7 @@ from pygpukit.ops.basic import (
     sum,
     transpose,
     transpose_3d_021,
+    transpose_4d_0213,
 )
 
 __all__ = [
@@ -95,6 +98,7 @@ __all__ = [
     "softmax",
     # Matmul
     "matmul",
+    "batched_matmul",
     "transpose",
     "linear_bias_gelu",
     # Neural Network
@@ -131,6 +135,7 @@ __all__ = [
     "concat_axis0",
     "repeat_interleave_axis1",
     "transpose_3d_021",
+    "transpose_4d_0213",
     "reshape_copy",
     "cast_f32_to_bf16",
     "cast_f32_to_f16",

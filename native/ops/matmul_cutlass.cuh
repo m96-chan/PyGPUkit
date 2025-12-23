@@ -35,6 +35,7 @@
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/device/gemm.h"
+#include "cutlass/gemm/device/gemm_batched.h"
 #include "cutlass/epilogue/thread/linear_combination.h"
 #include "cutlass/epilogue/thread/linear_combination_gelu.h"
 #include "cutlass/util/device_memory.h"
@@ -188,6 +189,34 @@ using TF32Gemm_Sm89 = cutlass::gemm::device::Gemm<
 
 // Default alias (SM80 for backward compatibility)
 using TF32Gemm = TF32Gemm_Sm80;
+
+// ============================================================================
+// TF32 Batched GEMM (FP32 input/output, TF32 TensorCore for batch operations)
+// ============================================================================
+
+// SM86 (RTX 30xx): 5-stage pipeline for batched operations
+using TF32GemmBatched_Sm86 = cutlass::gemm::device::GemmBatched<
+    float,                                      // ElementA (will be B^T)
+    cutlass::layout::ColumnMajor,               // LayoutA
+    float,                                      // ElementB (will be A^T)
+    cutlass::layout::ColumnMajor,               // LayoutB
+    float,                                      // ElementC (will be C^T)
+    cutlass::layout::ColumnMajor,               // LayoutC
+    float,                                      // ElementAccumulator
+    cutlass::arch::OpClassTensorOp,             // OperatorClass (TensorCore)
+    cutlass::arch::Sm80,                        // ArchTag (Ampere TensorCore compatible)
+    cutlass::gemm::GemmShape<128, 128, 16>,     // ThreadBlockShape
+    cutlass::gemm::GemmShape<64, 64, 16>,       // WarpShape
+    cutlass::gemm::GemmShape<16, 8, 8>,         // InstructionShape (mma.sync)
+    cutlass::epilogue::thread::LinearCombination<
+        float, 128 / cutlass::sizeof_bits<float>::value,
+        float, float>,                          // EpilogueOp (128-bit aligned)
+    cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
+    5                                           // Stages (5-stage for SM86)
+>;
+
+// Default batched alias
+using TF32GemmBatched = TF32GemmBatched_Sm86;
 
 // ============================================================================
 // FP16 GEMM (FP16 input/output, FP16 TensorCore)
@@ -856,6 +885,107 @@ inline cudaError_t gemm_bf16_bias_gelu(
         return run_gemm_bias_gelu<BF16GemmBiasGELU_Sm80>(
             problem_size, B, N, A, K, bias, D, N, stream);
     }
+}
+
+// ============================================================================
+// Batched GEMM Implementation
+// ============================================================================
+
+/**
+ * Template helper for batched GEMM dispatch
+ *
+ * Memory layout for strided batched GEMM:
+ * - A[batch, M, K] row-major: stride_A = M * K
+ * - B[batch, K, N] row-major: stride_B = K * N
+ * - C[batch, M, N] row-major: stride_C = M * N
+ *
+ * Using the transpose trick for CUTLASS column-major kernels:
+ * - C^T[batch, N, M] = B^T[batch, N, K] @ A^T[batch, K, M]
+ */
+template<typename GemmBatchedOp>
+inline cudaError_t run_gemm_batched(
+    cutlass::gemm::GemmCoord problem_size,
+    const void* A, int ldA, int64_t strideA,
+    const void* B, int ldB, int64_t strideB,
+    void* C, int ldC, int64_t strideC,
+    float alpha, float beta,
+    int batch_count,
+    cudaStream_t stream
+) {
+    using ElementA = typename GemmBatchedOp::ElementA;
+    using ElementB = typename GemmBatchedOp::ElementB;
+    using ElementC = typename GemmBatchedOp::ElementC;
+
+    typename GemmBatchedOp::Arguments arguments{
+        problem_size,
+        {static_cast<const ElementA*>(A), ldA},
+        strideA,
+        {static_cast<const ElementB*>(B), ldB},
+        strideB,
+        {static_cast<ElementC*>(C), ldC},
+        strideC,
+        {static_cast<ElementC*>(C), ldC},
+        strideC,
+        {alpha, beta},
+        batch_count
+    };
+
+    GemmBatchedOp gemm_op;
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    size_t workspace_size = GemmBatchedOp::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    status = gemm_op.initialize(arguments, workspace.get(), stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    status = gemm_op(stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    return cudaSuccess;
+}
+
+/**
+ * FP32 Strided Batched GEMM using CUTLASS TensorCore (TF32)
+ *
+ * Computes: C[b] = A[b] @ B[b] for b in [0, batch_count)
+ * Where A[batch, M, K], B[batch, K, N], C[batch, M, N] are row-major.
+ */
+inline cudaError_t gemm_batched_fp32(
+    const float* A,
+    const float* B,
+    float* C,
+    int M, int N, int K,
+    int batch_count,
+    int64_t strideA,
+    int64_t strideB,
+    int64_t strideC,
+    float alpha = 1.0f,
+    float beta = 0.0f,
+    cudaStream_t stream = nullptr
+) {
+    // Transpose trick: C^T[N,M] = B^T[N,K] @ A^T[K,M]
+    // For batched: each batch element uses the same transformation
+    cutlass::gemm::GemmCoord problem_size(N, M, K);
+
+    // Note: Strides remain the same (element count between batches)
+    // but the roles of A/B are swapped for the transpose trick
+    return run_gemm_batched<TF32GemmBatched_Sm86>(
+        problem_size,
+        B, N, strideB,   // B^T as first operand (ld = N)
+        A, K, strideA,   // A^T as second operand (ld = K)
+        C, N, strideC,   // C^T as output (ld = N)
+        alpha, beta,
+        batch_count,
+        stream
+    );
 }
 
 // ============================================================================

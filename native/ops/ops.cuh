@@ -177,6 +177,13 @@ void sdpa_causal_fixed_cache_ptr(const GPUArray& Q, const GPUArray& K, const GPU
 // output: [batch, out_features]
 GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias);
 
+// Strided Batched GEMM: C[b] = A[b] @ B[b] for b in [0, batch_count)
+// A: [batch, M, K], B: [batch, K, N], C: [batch, M, N] (row-major)
+// Uses CUTLASS TensorCore for high performance
+void batched_matmul_fp32(const GPUArray& A, const GPUArray& B, GPUArray& C,
+                         int M, int N, int K, int batch_count,
+                         int64_t strideA, int64_t strideB, int64_t strideC);
+
 // ============================================================================
 // Tensor Manipulation Operations
 // ============================================================================
@@ -193,6 +200,12 @@ GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats);
 GPUArray transpose_3d_021(const GPUArray& input);
 // Transpose 3D tensor with output buffer (for CUDA Graph capture)
 void transpose_3d_021(const GPUArray& input, GPUArray& out);
+
+// Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+// Swaps axes 1 and 2 (common in attention: batch, seq, heads, dim -> batch, heads, seq, dim)
+GPUArray transpose_4d_0213(const GPUArray& input);
+// Transpose 4D tensor with output buffer (for CUDA Graph capture)
+void transpose_4d_0213(const GPUArray& input, GPUArray& out);
 
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);

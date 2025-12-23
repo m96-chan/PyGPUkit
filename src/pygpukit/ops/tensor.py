@@ -188,6 +188,71 @@ def _transpose_3d_021_native(input: GPUArray, *, out: GPUArray | None = None) ->
         return GPUArray._wrap_native(c_native)
 
 
+def transpose_4d_0213(input: GPUArray, *, out: GPUArray | None = None) -> GPUArray | None:
+    """Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d2, d1, d3].
+
+    Swaps axes 1 and 2 while keeping axes 0 and 3 in place.
+    Common in attention operations to convert:
+    - [batch, seq, heads, dim] -> [batch, heads, seq, dim]
+
+    Args:
+        input: 4D tensor to transpose.
+        out: Optional pre-allocated output buffer for CUDA Graph capture.
+             If provided, must have shape [d0, d2, d1, d3] and same dtype as input.
+
+    Returns:
+        Transposed tensor with axes 1 and 2 swapped.
+        Returns None if out is provided (in-place operation).
+    """
+    _validate_float_dtype(input, "transpose_4d_0213")
+
+    if input.ndim != 4:
+        raise ValueError(f"transpose_4d_0213 expects 4D input, got {input.ndim}D")
+
+    backend = get_backend()
+
+    # Native transpose_4d_0213 supports float32/float16/bfloat16
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        dtype_str = str(input.dtype)
+        if dtype_str in ("float32", "float16", "bfloat16"):
+            return _transpose_4d_0213_native(input, out=out)
+        else:
+            if out is not None:
+                raise NotImplementedError(
+                    "transpose_4d_0213: out parameter not supported for CPU fallback"
+                )
+            return _transpose_4d_0213_cpu(input)
+    else:
+        if out is not None:
+            raise NotImplementedError(
+                "transpose_4d_0213: out parameter not supported for CPU fallback"
+            )
+        return _transpose_4d_0213_cpu(input)
+
+
+def _transpose_4d_0213_cpu(input: GPUArray) -> GPUArray:
+    """CPU fallback for transpose_4d_0213."""
+    x = input.to_numpy()
+    result = np.transpose(x, (0, 2, 1, 3)).copy()
+    return from_numpy(result)
+
+
+def _transpose_4d_0213_native(input: GPUArray, *, out: GPUArray | None = None) -> GPUArray | None:
+    """Native C++ CUDA implementation of transpose_4d_0213."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    input_native = input._get_native()
+
+    if out is not None:
+        out_native = out._get_native()
+        native.transpose_4d_0213_(input_native, out_native)
+        return None
+    else:
+        c_native = native.transpose_4d_0213(input_native)
+        return GPUArray._wrap_native(c_native)
+
+
 # =============================================================================
 # Reshape Operations
 # =============================================================================

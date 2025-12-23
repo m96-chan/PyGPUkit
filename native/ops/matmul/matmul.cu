@@ -16,6 +16,7 @@
 #include "../matmul_f16_bf16_tc.cuh"
 #include "../matmul_f16_bf16_tc_generic.cuh"
 #include "../matmul_cublaslt.cuh"
+#include "../matmul_cutlass.cuh"
 
 #include <cstdlib>
 #include <algorithm>
@@ -624,6 +625,39 @@ GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const G
     output = gelu(output);
 
     return output;
+}
+
+// ============================================================================
+// Batched GEMM Implementation
+// ============================================================================
+
+void batched_matmul_fp32(const GPUArray& A, const GPUArray& B, GPUArray& C,
+                         int M, int N, int K, int batch_count,
+                         int64_t strideA, int64_t strideB, int64_t strideC) {
+    // Validate inputs
+    if (A.dtype() != DataType::Float32 || B.dtype() != DataType::Float32 || C.dtype() != DataType::Float32) {
+        throw std::runtime_error("batched_matmul_fp32: all inputs must be float32");
+    }
+
+#if PYGPUKIT_HAS_CUTLASS
+    // Use CUTLASS batched GEMM
+    cudaError_t err = cutlass_gemm::gemm_batched_fp32(
+        static_cast<const float*>(A.data()),
+        static_cast<const float*>(B.data()),
+        static_cast<float*>(C.data()),
+        M, N, K,
+        batch_count,
+        strideA, strideB, strideC,
+        1.0f, 0.0f,  // alpha, beta
+        internal::get_capture_stream()
+    );
+    if (err != cudaSuccess) {
+        throw std::runtime_error("batched_matmul_fp32: CUTLASS kernel failed");
+    }
+    sync_and_check("batched_matmul_fp32 CUTLASS kernel failed");
+#else
+    throw std::runtime_error("batched_matmul_fp32: CUTLASS not available");
+#endif
 }
 
 } // namespace ops

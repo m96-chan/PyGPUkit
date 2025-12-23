@@ -5,6 +5,8 @@ Corresponds to native/ops/matmul/.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from pygpukit.core.array import GPUArray
@@ -281,3 +283,154 @@ def _linear_bias_gelu_native(
     bias_native = bias._get_native()
     c_native = native.linear_bias_gelu(input_native, weight_native, bias_native)
     return GPUArray._wrap_native(c_native)
+
+
+def batched_matmul(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Batched matrix multiplication for 3D and 4D tensors.
+
+    Supports:
+    - 3D: [batch, M, K] @ [batch, K, N] -> [batch, M, N]
+    - 4D: [batch1, batch2, M, K] @ [batch1, batch2, K, N] -> [batch1, batch2, M, N]
+
+    Args:
+        a: First input array (3D or 4D).
+        b: Second input array (3D or 4D).
+        out: Optional output array. If provided, result is written in-place.
+
+    Returns:
+        The result GPUArray with shape [..., M, N].
+
+    Raises:
+        ValueError: If arrays are not 3D/4D or dimensions don't match.
+    """
+    if a.ndim not in (3, 4):
+        raise ValueError(f"batched_matmul requires 3D or 4D arrays, got {a.ndim}D")
+    if b.ndim not in (3, 4):
+        raise ValueError(f"batched_matmul requires 3D or 4D arrays, got {b.ndim}D")
+    if a.ndim != b.ndim:
+        raise ValueError(f"batched_matmul requires same ndim, got {a.ndim}D and {b.ndim}D")
+
+    _validate_same_dtype(a, b, "batched_matmul")
+
+    # Extract dimensions
+    if a.ndim == 3:
+        batch = a.shape[0]
+        M, K = a.shape[1], a.shape[2]
+        K2, N = b.shape[1], b.shape[2]
+        if b.shape[0] != batch:
+            raise ValueError(f"Batch dimension mismatch: {a.shape[0]} vs {b.shape[0]}")
+        if K != K2:
+            raise ValueError(f"Inner dimension mismatch: {K} vs {K2}")
+        out_shape = (batch, M, N)
+        batch_count = batch
+    else:  # 4D
+        batch1, batch2 = a.shape[0], a.shape[1]
+        M, K = a.shape[2], a.shape[3]
+        K2, N = b.shape[2], b.shape[3]
+        if b.shape[0] != batch1 or b.shape[1] != batch2:
+            raise ValueError(
+                f"Batch dimensions mismatch: ({batch1}, {batch2}) vs ({b.shape[0]}, {b.shape[1]})"
+            )
+        if K != K2:
+            raise ValueError(f"Inner dimension mismatch: {K} vs {K2}")
+        out_shape = (batch1, batch2, M, N)
+        batch_count = batch1 * batch2
+
+    # Validate output
+    if out is not None:
+        if out.shape != out_shape:
+            raise ValueError(f"out shape {out.shape} does not match expected {out_shape}")
+        if out.dtype != a.dtype:
+            raise ValueError(f"out dtype {out.dtype} does not match input dtype {a.dtype}")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _batched_matmul_native(a, b, M, N, K, batch_count, out_shape, out=out)
+    else:
+        return _batched_matmul_cpu(a, b, out=out)
+
+
+def _batched_matmul_cpu(
+    a: GPUArray, b: GPUArray, *, out: GPUArray | None = None
+) -> GPUArray:
+    """CPU implementation of batched_matmul."""
+    warnings.warn(
+        "batched_matmul: GPU not available, using CPU fallback (slow)",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    a_np = a.to_numpy()
+    b_np = b.to_numpy()
+    if out is not None:
+        out_np = out.to_numpy()
+        np.matmul(a_np, b_np, out=out_np)
+        out._data = from_numpy(out_np)._data
+        return out
+    else:
+        result_np = np.matmul(a_np, b_np)
+        return from_numpy(result_np)
+
+
+def _batched_matmul_native(
+    a: GPUArray,
+    b: GPUArray,
+    M: int,
+    N: int,
+    K: int,
+    batch_count: int,
+    out_shape: tuple[int, ...],
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Native cuBLASLt strided batched GEMM implementation."""
+    from pygpukit.core.backend import get_native_module
+    from pygpukit.core.dtypes import float32
+
+    native = get_native_module()
+
+    # Currently only FP32 supported via cuBLASLt strided batched
+    if a.dtype != float32:
+        warnings.warn(
+            f"batched_matmul: GPU kernel requires float32, got {a.dtype}. Using CPU fallback (slow)",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return _batched_matmul_cpu(a, b, out=out)
+
+    # Compute strides for strided batched GEMM
+    strideA = M * K
+    strideB = K * N
+    strideC = M * N
+
+    # Get native arrays
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Allocate output if needed (using native allocation)
+    if out is None:
+        out_native = native.empty(list(out_shape), native.DataType.Float32)
+        out = GPUArray._wrap_native(out_native)
+    else:
+        out_native = out._get_native()
+
+    # Call strided batched GEMM
+    native.gemm_strided_batched_fp32(
+        a_native,
+        b_native,
+        out_native,
+        M,
+        N,
+        K,
+        batch_count,
+        strideA,
+        strideB,
+        strideC,
+    )
+
+    return out

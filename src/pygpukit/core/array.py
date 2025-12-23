@@ -582,11 +582,61 @@ class GPUArray:
             y = x.reshape(6, 4)  # or x.reshape((6, 4))
             z = x.reshape(-1, 4)  # infer first dimension
         """
-        from pygpukit.core.factory import from_numpy
+        from pygpukit.core.backend import get_backend, NativeBackend
 
         # Handle both reshape(2, 3) and reshape((2, 3))
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
+
+        # Handle -1 dimension inference
+        shape = list(shape)
+        total_size = 1
+        for dim in self.shape:
+            total_size *= dim
+
+        neg_idx = -1
+        known_size = 1
+        for i, dim in enumerate(shape):
+            if dim == -1:
+                if neg_idx >= 0:
+                    raise ValueError("reshape: only one dimension can be -1")
+                neg_idx = i
+            else:
+                known_size *= dim
+
+        if neg_idx >= 0:
+            if total_size % known_size != 0:
+                raise ValueError(
+                    f"reshape: cannot infer dimension, total size {total_size} "
+                    f"not divisible by {known_size}"
+                )
+            shape[neg_idx] = total_size // known_size
+
+        shape = tuple(shape)
+
+        # Verify total size
+        output_size = 1
+        for dim in shape:
+            output_size *= dim
+        if output_size != total_size:
+            raise ValueError(
+                f"reshape: cannot reshape array of size {total_size} into shape {shape}"
+            )
+
+        # Use native reshape_copy if available (keeps data on GPU)
+        backend = get_backend()
+        if isinstance(backend, NativeBackend) and backend.is_available():
+            dtype_str = str(self.dtype)
+            if dtype_str in ("float32", "float16", "bfloat16"):
+                from pygpukit.core.backend import get_native_module
+
+                native = get_native_module()
+                input_native = self._get_native()
+                c_native = native.reshape_copy(input_native, list(shape))
+                return GPUArray._wrap_native(c_native)
+
+        # CPU fallback
+        from pygpukit.core.factory import from_numpy
 
         np_data = self.to_numpy()
         result = np_data.reshape(shape)
