@@ -624,8 +624,7 @@ def matmul_fp8_sm100(
 
     if not fp8_sm100_available():
         raise RuntimeError(
-            "FP8 SM100 GEMM is not available. "
-            "Requires SM100+ GPU and CUTLASS SM100 support."
+            "FP8 SM100 GEMM is not available. Requires SM100+ GPU and CUTLASS SM100 support."
         )
 
     backend = get_backend()
@@ -715,8 +714,7 @@ def matmul_fp8_sm120(
 
     if not fp8_sm120_available():
         raise RuntimeError(
-            "FP8 SM120 GEMM is not available. "
-            "Requires SM120+ GPU and CUTLASS SM120 support."
+            "FP8 SM120 GEMM is not available. Requires SM120+ GPU and CUTLASS SM120 support."
         )
 
     backend = get_backend()
@@ -806,8 +804,7 @@ def matmul_fp8_sm90(
 
     if not fp8_sm90_available():
         raise RuntimeError(
-            "FP8 SM90 GEMM is not available. "
-            "Requires SM90+ GPU and CUTLASS SM90 support."
+            "FP8 SM90 GEMM is not available. Requires SM90+ GPU and CUTLASS SM90 support."
         )
 
     backend = get_backend()
@@ -900,10 +897,7 @@ def matmul_fp8(
         raise ValueError("matmul_fp8 requires float32 inputs")
 
     if not fp8_available():
-        raise RuntimeError(
-            "FP8 GEMM is not available. "
-            "Requires SM90+ GPU and CUTLASS support."
-        )
+        raise RuntimeError("FP8 GEMM is not available. Requires SM90+ GPU and CUTLASS support.")
 
     backend = get_backend()
 

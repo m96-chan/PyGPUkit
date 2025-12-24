@@ -207,6 +207,18 @@ GPUArray transpose_4d_0213(const GPUArray& input);
 // Transpose 4D tensor with output buffer (for CUDA Graph capture)
 void transpose_4d_0213(const GPUArray& input, GPUArray& out);
 
+// Transpose 3D tensor: [d0, d1, d2] -> [d0, d2, d1]
+// Swaps last two axes (common in attention operations)
+GPUArray transpose_3d_012(const GPUArray& input);
+// Transpose 3D tensor with output buffer (for CUDA Graph capture)
+void transpose_3d_012(const GPUArray& input, GPUArray& out);
+
+// Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d1, d3, d2]
+// Swaps last two axes (for K^T in attention)
+GPUArray transpose_4d_0132(const GPUArray& input);
+// Transpose 4D tensor with output buffer (for CUDA Graph capture)
+void transpose_4d_0132(const GPUArray& input, GPUArray& out);
+
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);
 // Reshape with copy into output buffer (for CUDA Graph capture)

@@ -537,6 +537,14 @@ class GPUArray:
     def transpose(self, *axes: int) -> GPUArray:
         """Transpose the array by permuting its axes.
 
+        Uses native GPU kernels when available for common patterns:
+        - 2D (1,0): Native matmul.transpose()
+        - 3D (1,0,2): Native tensor.transpose_3d_021()
+        - 3D (0,2,1): Native tensor.transpose_3d_012()
+        - 4D (0,2,1,3): Native tensor.transpose_4d_0213()
+        - 4D (0,1,3,2): Native tensor.transpose_4d_0132()
+        - Other patterns: CPU fallback
+
         Args:
             *axes: The new order of axes. If not provided, reverses all axes.
                    For a 3D array, transpose(0, 2, 1) swaps the last two axes.
@@ -553,13 +561,61 @@ class GPUArray:
             x = from_numpy(np.zeros((2, 3, 4)))
             y = x.transpose(0, 2, 1)  # shape (2, 4, 3)
         """
+        from pygpukit.core.backend import NativeBackend, get_backend
         from pygpukit.core.factory import from_numpy
 
-        np_data = self.to_numpy()
+        # Normalize axes
         if len(axes) == 0:
-            result = np_data.T
-        else:
-            result = np_data.transpose(*axes)
+            # Reverse all axes
+            axes = tuple(range(self.ndim - 1, -1, -1))
+
+        # Check if we can use native implementations
+        backend = get_backend()
+        dtype_str = str(self.dtype)
+        use_native = (
+            isinstance(backend, NativeBackend)
+            and backend.is_available()
+            and dtype_str in ("float32", "float16", "bfloat16")
+        )
+
+        if use_native:
+            # 2D transpose: (1, 0)
+            if self.ndim == 2 and axes == (1, 0):
+                from pygpukit.ops.matmul import transpose as matmul_transpose
+
+                return matmul_transpose(self)
+
+            # 3D transpose (1, 0, 2): [d0, d1, d2] -> [d1, d0, d2]
+            if self.ndim == 3 and axes == (1, 0, 2):
+                from pygpukit.ops.tensor import transpose_3d_021
+
+                result = transpose_3d_021(self)
+                return result if result is not None else self
+
+            # 3D transpose (0, 2, 1): [d0, d1, d2] -> [d0, d2, d1]
+            if self.ndim == 3 and axes == (0, 2, 1):
+                from pygpukit.ops.tensor import transpose_3d_012
+
+                result = transpose_3d_012(self)
+                return result if result is not None else self
+
+            # 4D transpose (0, 2, 1, 3): [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+            if self.ndim == 4 and axes == (0, 2, 1, 3):
+                from pygpukit.ops.tensor import transpose_4d_0213
+
+                result = transpose_4d_0213(self)
+                return result if result is not None else self
+
+            # 4D transpose (0, 1, 3, 2): [d0, d1, d2, d3] -> [d0, d1, d3, d2]
+            if self.ndim == 4 and axes == (0, 1, 3, 2):
+                from pygpukit.ops.tensor import transpose_4d_0132
+
+                result = transpose_4d_0132(self)
+                return result if result is not None else self
+
+        # CPU fallback for unsupported patterns
+        np_data = self.to_numpy()
+        result = np_data.transpose(*axes)
         return from_numpy(result.copy())
 
     @property

@@ -18,10 +18,6 @@ from pygpukit.ops.basic import (
     add_inplace,
     # Matmul
     batched_matmul,
-    fp8_available,
-    fp8_sm90_available,
-    fp8_sm100_available,
-    fp8_sm120_available,
     # Neural Network
     bias_add_inplace,
     # Tensor
@@ -38,6 +34,10 @@ from pygpukit.ops.basic import (
     embedding_lookup_ptr,
     # Unary
     exp,
+    fp8_available,
+    fp8_sm90_available,
+    fp8_sm100_available,
+    fp8_sm120_available,
     gelu,
     kv_cache_prefill,
     kv_cache_prefill_gqa,

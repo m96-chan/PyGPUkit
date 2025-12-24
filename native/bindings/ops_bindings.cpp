@@ -303,6 +303,26 @@ void init_ops_bindings(py::module_& m) {
           py::arg("input"), py::arg("out"),
           "Transpose 4D tensor with output buffer (for CUDA Graph capture)");
 
+    // Transpose 3D: [d0, d1, d2] -> [d0, d2, d1] (swap last two axes)
+    m.def("transpose_3d_012", py::overload_cast<const GPUArray&>(&ops::transpose_3d_012),
+          py::arg("input"),
+          "Transpose 3D tensor: [d0, d1, d2] -> [d0, d2, d1] (swap last two axes)");
+
+    // Transpose 3D with output buffer (for CUDA Graph capture)
+    m.def("transpose_3d_012_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::transpose_3d_012),
+          py::arg("input"), py::arg("out"),
+          "Transpose 3D tensor with output buffer (for CUDA Graph capture)");
+
+    // Transpose 4D: [d0, d1, d2, d3] -> [d0, d1, d3, d2] (swap last two axes)
+    m.def("transpose_4d_0132", py::overload_cast<const GPUArray&>(&ops::transpose_4d_0132),
+          py::arg("input"),
+          "Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d1, d3, d2] (swap last two axes)");
+
+    // Transpose 4D with output buffer (for CUDA Graph capture)
+    m.def("transpose_4d_0132_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::transpose_4d_0132),
+          py::arg("input"), py::arg("out"),
+          "Transpose 4D tensor with output buffer (for CUDA Graph capture)");
+
     // Reshape with copy
     m.def("reshape_copy", py::overload_cast<const GPUArray&, const std::vector<size_t>&>(&ops::reshape_copy),
           py::arg("input"), py::arg("new_shape"),
