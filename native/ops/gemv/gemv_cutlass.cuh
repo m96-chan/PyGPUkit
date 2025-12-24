@@ -34,25 +34,54 @@ namespace ops {
 namespace gemv {
 
 // ============================================================================
-// Configuration
+// Configuration - Per-size tuning
 // ============================================================================
 
-// GEMV kernel configuration
-// Tuned for memory bandwidth maximization
+// Default configuration (medium sizes: K=2048-8192, N=1024-8192)
 struct GemvConfig {
-    // Block size: 256 threads = 8 warps
-    // Rationale: Good occupancy on SM86+ (up to 16 blocks/SM)
-    static constexpr int BLOCK_SIZE = 256;
-
-    // Tile N: Each block processes 256 output elements
-    // Rationale: Matches BLOCK_SIZE for simple thread-to-output mapping
+    static constexpr int BLOCK_SIZE = 256;  // 8 warps
     static constexpr int TILE_N = 256;
-
-    // K unroll factor: Process 8 K values per iteration
-    // Rationale: Hide memory latency, utilize instruction-level parallelism
     static constexpr int UNROLL_K = 8;
+    static constexpr int MIN_N = 128;
+};
 
-    // Minimum N for GEMV dispatch (below this, GEMM might be faster)
+// Small K configuration (K < 2048)
+// - Smaller unroll to reduce register pressure
+// - Good for embedding lookups, small hidden sizes
+struct GemvConfigSmallK {
+    static constexpr int BLOCK_SIZE = 256;
+    static constexpr int TILE_N = 256;
+    static constexpr int UNROLL_K = 4;      // Less unrolling for small K
+    static constexpr int MIN_N = 128;
+};
+
+// Large K configuration (K > 8192)
+// - Larger unroll for more ILP
+// - Trades registers for throughput
+struct GemvConfigLargeK {
+    static constexpr int BLOCK_SIZE = 256;
+    static constexpr int TILE_N = 256;
+    static constexpr int UNROLL_K = 16;     // More unrolling for large K
+    static constexpr int MIN_N = 128;
+};
+
+// Small N configuration (N < 1024)
+// - Smaller tile to avoid wasted threads
+// - Better for narrow outputs
+struct GemvConfigSmallN {
+    static constexpr int BLOCK_SIZE = 128;  // 4 warps
+    static constexpr int TILE_N = 128;
+    static constexpr int UNROLL_K = 8;
+    static constexpr int MIN_N = 64;
+};
+
+// Large matrices (K > 8192 AND N > 8192)
+// - Maximum unrolling
+// - Optimized for LLM MLP layers (8192x28672 etc)
+struct GemvConfigLarge {
+    static constexpr int BLOCK_SIZE = 256;
+    static constexpr int TILE_N = 256;
+    static constexpr int UNROLL_K = 16;
     static constexpr int MIN_N = 128;
 };
 
@@ -139,47 +168,114 @@ __global__ void gemv_bf16_kernel(
     int k = 0;
     constexpr int UNROLL = Config::UNROLL_K;
 
+    // Template-based unrolling: UNROLL_K can be 4, 8, or 16
     for (; k + UNROLL <= K; k += UNROLL) {
-        // Vectorized load: 8 BF16 values using 4x BF16x2 loads
-        // This reduces memory transactions for A (broadcast)
-        __nv_bfloat162 a01 = ldg_bf16x2(A + k + 0);
-        __nv_bfloat162 a23 = ldg_bf16x2(A + k + 2);
-        __nv_bfloat162 a45 = ldg_bf16x2(A + k + 4);
-        __nv_bfloat162 a67 = ldg_bf16x2(A + k + 6);
+        // UNROLL_K=4: Load 2 bfloat162 (4 values)
+        // UNROLL_K=8: Load 4 bfloat162 (8 values)
+        // UNROLL_K=16: Load 8 bfloat162 (16 values)
 
-        // Extract individual floats from bfloat162
-        float a0 = __low2float(a01);
-        float a1 = __high2float(a01);
-        float a2 = __low2float(a23);
-        float a3 = __high2float(a23);
-        float a4 = __low2float(a45);
-        float a5 = __high2float(a45);
-        float a6 = __low2float(a67);
-        float a7 = __high2float(a67);
-
-        // Load UNROLL_K values of B (coalesced across threads)
-        // Using __ldg() for read-only cache optimization
-        // Note: Adjacent threads access adjacent memory locations at each k
-        //       Thread tid reads B[k*N + block_n + tid], which is coalesced
-        float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
-        float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
-        float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
-        float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
-        float b4 = ldg_bf16_to_f32(B_col + (k + 4) * N);
-        float b5 = ldg_bf16_to_f32(B_col + (k + 5) * N);
-        float b6 = ldg_bf16_to_f32(B_col + (k + 6) * N);
-        float b7 = ldg_bf16_to_f32(B_col + (k + 7) * N);
-
-        // FMA accumulation
-        // Using fmaf for precision and potential hardware fusion
-        acc = fmaf(a0, b0, acc);
-        acc = fmaf(a1, b1, acc);
-        acc = fmaf(a2, b2, acc);
-        acc = fmaf(a3, b3, acc);
-        acc = fmaf(a4, b4, acc);
-        acc = fmaf(a5, b5, acc);
-        acc = fmaf(a6, b6, acc);
-        acc = fmaf(a7, b7, acc);
+        if constexpr (UNROLL == 4) {
+            __nv_bfloat162 a01 = ldg_bf16x2(A + k + 0);
+            __nv_bfloat162 a23 = ldg_bf16x2(A + k + 2);
+            float a0 = __low2float(a01);
+            float a1 = __high2float(a01);
+            float a2 = __low2float(a23);
+            float a3 = __high2float(a23);
+            float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
+            float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
+            float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
+            float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+            acc = fmaf(a2, b2, acc);
+            acc = fmaf(a3, b3, acc);
+        } else if constexpr (UNROLL == 8) {
+            __nv_bfloat162 a01 = ldg_bf16x2(A + k + 0);
+            __nv_bfloat162 a23 = ldg_bf16x2(A + k + 2);
+            __nv_bfloat162 a45 = ldg_bf16x2(A + k + 4);
+            __nv_bfloat162 a67 = ldg_bf16x2(A + k + 6);
+            float a0 = __low2float(a01);
+            float a1 = __high2float(a01);
+            float a2 = __low2float(a23);
+            float a3 = __high2float(a23);
+            float a4 = __low2float(a45);
+            float a5 = __high2float(a45);
+            float a6 = __low2float(a67);
+            float a7 = __high2float(a67);
+            float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
+            float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
+            float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
+            float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
+            float b4 = ldg_bf16_to_f32(B_col + (k + 4) * N);
+            float b5 = ldg_bf16_to_f32(B_col + (k + 5) * N);
+            float b6 = ldg_bf16_to_f32(B_col + (k + 6) * N);
+            float b7 = ldg_bf16_to_f32(B_col + (k + 7) * N);
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+            acc = fmaf(a2, b2, acc);
+            acc = fmaf(a3, b3, acc);
+            acc = fmaf(a4, b4, acc);
+            acc = fmaf(a5, b5, acc);
+            acc = fmaf(a6, b6, acc);
+            acc = fmaf(a7, b7, acc);
+        } else if constexpr (UNROLL == 16) {
+            __nv_bfloat162 a01 = ldg_bf16x2(A + k + 0);
+            __nv_bfloat162 a23 = ldg_bf16x2(A + k + 2);
+            __nv_bfloat162 a45 = ldg_bf16x2(A + k + 4);
+            __nv_bfloat162 a67 = ldg_bf16x2(A + k + 6);
+            __nv_bfloat162 a89 = ldg_bf16x2(A + k + 8);
+            __nv_bfloat162 aAB = ldg_bf16x2(A + k + 10);
+            __nv_bfloat162 aCD = ldg_bf16x2(A + k + 12);
+            __nv_bfloat162 aEF = ldg_bf16x2(A + k + 14);
+            float a0 = __low2float(a01);
+            float a1 = __high2float(a01);
+            float a2 = __low2float(a23);
+            float a3 = __high2float(a23);
+            float a4 = __low2float(a45);
+            float a5 = __high2float(a45);
+            float a6 = __low2float(a67);
+            float a7 = __high2float(a67);
+            float a8 = __low2float(a89);
+            float a9 = __high2float(a89);
+            float aA = __low2float(aAB);
+            float aB = __high2float(aAB);
+            float aC = __low2float(aCD);
+            float aD = __high2float(aCD);
+            float aE = __low2float(aEF);
+            float aF = __high2float(aEF);
+            float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
+            float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
+            float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
+            float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
+            float b4 = ldg_bf16_to_f32(B_col + (k + 4) * N);
+            float b5 = ldg_bf16_to_f32(B_col + (k + 5) * N);
+            float b6 = ldg_bf16_to_f32(B_col + (k + 6) * N);
+            float b7 = ldg_bf16_to_f32(B_col + (k + 7) * N);
+            float b8 = ldg_bf16_to_f32(B_col + (k + 8) * N);
+            float b9 = ldg_bf16_to_f32(B_col + (k + 9) * N);
+            float bA = ldg_bf16_to_f32(B_col + (k + 10) * N);
+            float bB = ldg_bf16_to_f32(B_col + (k + 11) * N);
+            float bC = ldg_bf16_to_f32(B_col + (k + 12) * N);
+            float bD = ldg_bf16_to_f32(B_col + (k + 13) * N);
+            float bE = ldg_bf16_to_f32(B_col + (k + 14) * N);
+            float bF = ldg_bf16_to_f32(B_col + (k + 15) * N);
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+            acc = fmaf(a2, b2, acc);
+            acc = fmaf(a3, b3, acc);
+            acc = fmaf(a4, b4, acc);
+            acc = fmaf(a5, b5, acc);
+            acc = fmaf(a6, b6, acc);
+            acc = fmaf(a7, b7, acc);
+            acc = fmaf(a8, b8, acc);
+            acc = fmaf(a9, b9, acc);
+            acc = fmaf(aA, bA, acc);
+            acc = fmaf(aB, bB, acc);
+            acc = fmaf(aC, bC, acc);
+            acc = fmaf(aD, bD, acc);
+            acc = fmaf(aE, bE, acc);
+            acc = fmaf(aF, bF, acc);
+        }
     }
 
     // Handle K remainder (when K is not divisible by UNROLL_K)
@@ -391,39 +487,110 @@ __global__ void gemv_bf16_batched_kernel(
     int k = 0;
     constexpr int UNROLL = Config::UNROLL_K;
 
+    // Template-based unrolling: UNROLL_K can be 4, 8, or 16
     for (; k + UNROLL <= K; k += UNROLL) {
-        // Vectorized load for A (broadcast)
-        __nv_bfloat162 a01 = ldg_bf16x2(A_batch + k + 0);
-        __nv_bfloat162 a23 = ldg_bf16x2(A_batch + k + 2);
-        __nv_bfloat162 a45 = ldg_bf16x2(A_batch + k + 4);
-        __nv_bfloat162 a67 = ldg_bf16x2(A_batch + k + 6);
-
-        float a0 = __low2float(a01);
-        float a1 = __high2float(a01);
-        float a2 = __low2float(a23);
-        float a3 = __high2float(a23);
-        float a4 = __low2float(a45);
-        float a5 = __high2float(a45);
-        float a6 = __low2float(a67);
-        float a7 = __high2float(a67);
-
-        float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
-        float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
-        float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
-        float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
-        float b4 = ldg_bf16_to_f32(B_col + (k + 4) * N);
-        float b5 = ldg_bf16_to_f32(B_col + (k + 5) * N);
-        float b6 = ldg_bf16_to_f32(B_col + (k + 6) * N);
-        float b7 = ldg_bf16_to_f32(B_col + (k + 7) * N);
-
-        acc = fmaf(a0, b0, acc);
-        acc = fmaf(a1, b1, acc);
-        acc = fmaf(a2, b2, acc);
-        acc = fmaf(a3, b3, acc);
-        acc = fmaf(a4, b4, acc);
-        acc = fmaf(a5, b5, acc);
-        acc = fmaf(a6, b6, acc);
-        acc = fmaf(a7, b7, acc);
+        if constexpr (UNROLL == 4) {
+            __nv_bfloat162 a01 = ldg_bf16x2(A_batch + k + 0);
+            __nv_bfloat162 a23 = ldg_bf16x2(A_batch + k + 2);
+            float a0 = __low2float(a01);
+            float a1 = __high2float(a01);
+            float a2 = __low2float(a23);
+            float a3 = __high2float(a23);
+            float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
+            float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
+            float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
+            float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+            acc = fmaf(a2, b2, acc);
+            acc = fmaf(a3, b3, acc);
+        } else if constexpr (UNROLL == 8) {
+            __nv_bfloat162 a01 = ldg_bf16x2(A_batch + k + 0);
+            __nv_bfloat162 a23 = ldg_bf16x2(A_batch + k + 2);
+            __nv_bfloat162 a45 = ldg_bf16x2(A_batch + k + 4);
+            __nv_bfloat162 a67 = ldg_bf16x2(A_batch + k + 6);
+            float a0 = __low2float(a01);
+            float a1 = __high2float(a01);
+            float a2 = __low2float(a23);
+            float a3 = __high2float(a23);
+            float a4 = __low2float(a45);
+            float a5 = __high2float(a45);
+            float a6 = __low2float(a67);
+            float a7 = __high2float(a67);
+            float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
+            float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
+            float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
+            float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
+            float b4 = ldg_bf16_to_f32(B_col + (k + 4) * N);
+            float b5 = ldg_bf16_to_f32(B_col + (k + 5) * N);
+            float b6 = ldg_bf16_to_f32(B_col + (k + 6) * N);
+            float b7 = ldg_bf16_to_f32(B_col + (k + 7) * N);
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+            acc = fmaf(a2, b2, acc);
+            acc = fmaf(a3, b3, acc);
+            acc = fmaf(a4, b4, acc);
+            acc = fmaf(a5, b5, acc);
+            acc = fmaf(a6, b6, acc);
+            acc = fmaf(a7, b7, acc);
+        } else if constexpr (UNROLL == 16) {
+            __nv_bfloat162 a01 = ldg_bf16x2(A_batch + k + 0);
+            __nv_bfloat162 a23 = ldg_bf16x2(A_batch + k + 2);
+            __nv_bfloat162 a45 = ldg_bf16x2(A_batch + k + 4);
+            __nv_bfloat162 a67 = ldg_bf16x2(A_batch + k + 6);
+            __nv_bfloat162 a89 = ldg_bf16x2(A_batch + k + 8);
+            __nv_bfloat162 aAB = ldg_bf16x2(A_batch + k + 10);
+            __nv_bfloat162 aCD = ldg_bf16x2(A_batch + k + 12);
+            __nv_bfloat162 aEF = ldg_bf16x2(A_batch + k + 14);
+            float a0 = __low2float(a01);
+            float a1 = __high2float(a01);
+            float a2 = __low2float(a23);
+            float a3 = __high2float(a23);
+            float a4 = __low2float(a45);
+            float a5 = __high2float(a45);
+            float a6 = __low2float(a67);
+            float a7 = __high2float(a67);
+            float a8 = __low2float(a89);
+            float a9 = __high2float(a89);
+            float aA = __low2float(aAB);
+            float aB = __high2float(aAB);
+            float aC = __low2float(aCD);
+            float aD = __high2float(aCD);
+            float aE = __low2float(aEF);
+            float aF = __high2float(aEF);
+            float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
+            float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
+            float b2 = ldg_bf16_to_f32(B_col + (k + 2) * N);
+            float b3 = ldg_bf16_to_f32(B_col + (k + 3) * N);
+            float b4 = ldg_bf16_to_f32(B_col + (k + 4) * N);
+            float b5 = ldg_bf16_to_f32(B_col + (k + 5) * N);
+            float b6 = ldg_bf16_to_f32(B_col + (k + 6) * N);
+            float b7 = ldg_bf16_to_f32(B_col + (k + 7) * N);
+            float b8 = ldg_bf16_to_f32(B_col + (k + 8) * N);
+            float b9 = ldg_bf16_to_f32(B_col + (k + 9) * N);
+            float bA = ldg_bf16_to_f32(B_col + (k + 10) * N);
+            float bB = ldg_bf16_to_f32(B_col + (k + 11) * N);
+            float bC = ldg_bf16_to_f32(B_col + (k + 12) * N);
+            float bD = ldg_bf16_to_f32(B_col + (k + 13) * N);
+            float bE = ldg_bf16_to_f32(B_col + (k + 14) * N);
+            float bF = ldg_bf16_to_f32(B_col + (k + 15) * N);
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+            acc = fmaf(a2, b2, acc);
+            acc = fmaf(a3, b3, acc);
+            acc = fmaf(a4, b4, acc);
+            acc = fmaf(a5, b5, acc);
+            acc = fmaf(a6, b6, acc);
+            acc = fmaf(a7, b7, acc);
+            acc = fmaf(a8, b8, acc);
+            acc = fmaf(a9, b9, acc);
+            acc = fmaf(aA, bA, acc);
+            acc = fmaf(aB, bB, acc);
+            acc = fmaf(aC, bC, acc);
+            acc = fmaf(aD, bD, acc);
+            acc = fmaf(aE, bE, acc);
+            acc = fmaf(aF, bF, acc);
+        }
     }
 
     for (; k < K; ++k) {
@@ -447,14 +614,14 @@ __global__ void gemv_bf16_batched_kernel(
 // ============================================================================
 
 /**
- * Launch BF16 GEMV
+ * Launch BF16 GEMV with per-size configuration selection
  *
- * CTA/Warp configuration rationale:
- * - Block size 256 = 8 warps
- * - SM86: max 1536 threads/SM = 6 blocks/SM at 256 threads
- * - SM89: max 1536 threads/SM = 6 blocks/SM at 256 threads
- * - SM90: max 2048 threads/SM = 8 blocks/SM at 256 threads
- * - Good occupancy across all target SMs
+ * Configuration selection logic:
+ * - Small N (< 1024): Use smaller block/tile (GemvConfigSmallN)
+ * - Small K (< 2048): Use smaller unroll (GemvConfigSmallK)
+ * - Large K (> 8192) AND Large N (> 8192): Maximum unroll (GemvConfigLarge)
+ * - Large K (> 8192): Larger unroll (GemvConfigLargeK)
+ * - Default: Balanced configuration (GemvConfig)
  */
 inline cudaError_t launch_gemv_bf16(
     const __nv_bfloat16* A,
@@ -466,14 +633,43 @@ inline cudaError_t launch_gemv_bf16(
     float beta = 0.0f,
     cudaStream_t stream = nullptr
 ) {
-    using Config = GemvConfig;
-
-    dim3 block(Config::BLOCK_SIZE);
-    dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);
-
-    gemv_bf16_kernel<Config><<<grid, block, 0, stream>>>(
-        A, B, C, K, N, alpha, beta
-    );
+    // Per-size configuration dispatch
+    if (N < 1024) {
+        // Small N: use smaller block to avoid wasted threads
+        using Config = GemvConfigSmallN;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);
+        gemv_bf16_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, alpha, beta);
+    } else if (K > 8192 && N > 8192) {
+        // Large matrices: maximum unrolling
+        using Config = GemvConfigLarge;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);
+        gemv_bf16_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, alpha, beta);
+    } else if (K > 8192) {
+        // Large K: more unrolling for ILP
+        using Config = GemvConfigLargeK;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);
+        gemv_bf16_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, alpha, beta);
+    } else if (K < 2048) {
+        // Small K: less unrolling
+        using Config = GemvConfigSmallK;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);
+        gemv_bf16_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, alpha, beta);
+    } else {
+        // Default: balanced configuration
+        using Config = GemvConfig;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);
+        gemv_bf16_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, alpha, beta);
+    }
 
     return cudaGetLastError();
 }
@@ -529,7 +725,7 @@ inline cudaError_t launch_gemv_fp32(
 }
 
 /**
- * Launch batched BF16 GEMV
+ * Launch batched BF16 GEMV with per-size configuration selection
  */
 inline cudaError_t launch_gemv_bf16_batched(
     const __nv_bfloat16* A,  // [batch, K]
@@ -542,14 +738,38 @@ inline cudaError_t launch_gemv_bf16_batched(
     float beta = 0.0f,
     cudaStream_t stream = nullptr
 ) {
-    using Config = GemvConfig;
-
-    dim3 block(Config::BLOCK_SIZE);
-    dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N, batch_count);
-
-    gemv_bf16_batched_kernel<Config><<<grid, block, 0, stream>>>(
-        A, B, C, K, N, batch_count, alpha, beta
-    );
+    // Per-size configuration dispatch (same logic as non-batched)
+    if (N < 1024) {
+        using Config = GemvConfigSmallN;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N, batch_count);
+        gemv_bf16_batched_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, batch_count, alpha, beta);
+    } else if (K > 8192 && N > 8192) {
+        using Config = GemvConfigLarge;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N, batch_count);
+        gemv_bf16_batched_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, batch_count, alpha, beta);
+    } else if (K > 8192) {
+        using Config = GemvConfigLargeK;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N, batch_count);
+        gemv_bf16_batched_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, batch_count, alpha, beta);
+    } else if (K < 2048) {
+        using Config = GemvConfigSmallK;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N, batch_count);
+        gemv_bf16_batched_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, batch_count, alpha, beta);
+    } else {
+        using Config = GemvConfig;
+        dim3 block(Config::BLOCK_SIZE);
+        dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N, batch_count);
+        gemv_bf16_batched_kernel<Config><<<grid, block, 0, stream>>>(
+            A, B, C, K, N, batch_count, alpha, beta);
+    }
 
     return cudaGetLastError();
 }
