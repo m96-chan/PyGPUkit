@@ -51,12 +51,14 @@ from pygpukit.ops.matmul import (
     fp8_sm90_available,
     fp8_sm100_available,
     fp8_sm120_available,
+    fp8_bf16_sm120_available,
     linear_bias_gelu,
     matmul,
     matmul_fp8,
     matmul_fp8_sm90,
     matmul_fp8_sm100,
     matmul_fp8_sm120,
+    matmul_fp8_bf16_sm120,
     transpose,
 )
 
@@ -146,10 +148,12 @@ __all__ = [
     "matmul_fp8_sm90",
     "matmul_fp8_sm100",
     "matmul_fp8_sm120",
+    "matmul_fp8_bf16_sm120",
     "fp8_available",
     "fp8_sm90_available",
     "fp8_sm100_available",
     "fp8_sm120_available",
+    "fp8_bf16_sm120_available",
     # Neural Network
     "gelu",
     "silu",
