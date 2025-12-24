@@ -70,6 +70,19 @@ __device__ __forceinline__ float ldg_fp16_to_f32(const __half* ptr) {
     return __half2float(__ldg(ptr));
 }
 
+// Vectorized load: Load 2 BF16 values as bfloat162
+__device__ __forceinline__ __nv_bfloat162 ldg_bf16x2(const __nv_bfloat16* ptr) {
+    return __ldg(reinterpret_cast<const __nv_bfloat162*>(ptr));
+}
+
+// Vectorized load: Load 4 BF16 values as 2x bfloat162
+__device__ __forceinline__ void ldg_bf16x4(const __nv_bfloat16* ptr,
+                                            __nv_bfloat162& v01, __nv_bfloat162& v23) {
+    const __nv_bfloat162* ptr2 = reinterpret_cast<const __nv_bfloat162*>(ptr);
+    v01 = __ldg(ptr2);
+    v23 = __ldg(ptr2 + 1);
+}
+
 // ============================================================================
 // BF16 GEMV Kernel
 // ============================================================================
@@ -93,6 +106,7 @@ __device__ __forceinline__ float ldg_fp16_to_f32(const __half* ptr) {
  * 3. FMA accumulation in FP32 for precision
  * 4. K-loop unrolling (UNROLL_K=8) for ILP
  * 5. Predicated loads for K remainder handling
+ * 6. Vectorized BF16x2 loads for A (reduces memory transactions)
  */
 template<typename Config = GemvConfig>
 __global__ void gemv_bf16_kernel(
@@ -126,16 +140,22 @@ __global__ void gemv_bf16_kernel(
     constexpr int UNROLL = Config::UNROLL_K;
 
     for (; k + UNROLL <= K; k += UNROLL) {
-        // Load UNROLL_K values of A (broadcast to all threads via L1/L2)
-        // Using direct loads since A is small and cache-resident
-        float a0 = __bfloat162float(A[k + 0]);
-        float a1 = __bfloat162float(A[k + 1]);
-        float a2 = __bfloat162float(A[k + 2]);
-        float a3 = __bfloat162float(A[k + 3]);
-        float a4 = __bfloat162float(A[k + 4]);
-        float a5 = __bfloat162float(A[k + 5]);
-        float a6 = __bfloat162float(A[k + 6]);
-        float a7 = __bfloat162float(A[k + 7]);
+        // Vectorized load: 8 BF16 values using 4x BF16x2 loads
+        // This reduces memory transactions for A (broadcast)
+        __nv_bfloat162 a01 = ldg_bf16x2(A + k + 0);
+        __nv_bfloat162 a23 = ldg_bf16x2(A + k + 2);
+        __nv_bfloat162 a45 = ldg_bf16x2(A + k + 4);
+        __nv_bfloat162 a67 = ldg_bf16x2(A + k + 6);
+
+        // Extract individual floats from bfloat162
+        float a0 = __low2float(a01);
+        float a1 = __high2float(a01);
+        float a2 = __low2float(a23);
+        float a3 = __high2float(a23);
+        float a4 = __low2float(a45);
+        float a5 = __high2float(a45);
+        float a6 = __low2float(a67);
+        float a7 = __high2float(a67);
 
         // Load UNROLL_K values of B (coalesced across threads)
         // Using __ldg() for read-only cache optimization
@@ -372,14 +392,20 @@ __global__ void gemv_bf16_batched_kernel(
     constexpr int UNROLL = Config::UNROLL_K;
 
     for (; k + UNROLL <= K; k += UNROLL) {
-        float a0 = __bfloat162float(A_batch[k + 0]);
-        float a1 = __bfloat162float(A_batch[k + 1]);
-        float a2 = __bfloat162float(A_batch[k + 2]);
-        float a3 = __bfloat162float(A_batch[k + 3]);
-        float a4 = __bfloat162float(A_batch[k + 4]);
-        float a5 = __bfloat162float(A_batch[k + 5]);
-        float a6 = __bfloat162float(A_batch[k + 6]);
-        float a7 = __bfloat162float(A_batch[k + 7]);
+        // Vectorized load for A (broadcast)
+        __nv_bfloat162 a01 = ldg_bf16x2(A_batch + k + 0);
+        __nv_bfloat162 a23 = ldg_bf16x2(A_batch + k + 2);
+        __nv_bfloat162 a45 = ldg_bf16x2(A_batch + k + 4);
+        __nv_bfloat162 a67 = ldg_bf16x2(A_batch + k + 6);
+
+        float a0 = __low2float(a01);
+        float a1 = __high2float(a01);
+        float a2 = __low2float(a23);
+        float a3 = __high2float(a23);
+        float a4 = __low2float(a45);
+        float a5 = __high2float(a45);
+        float a6 = __low2float(a67);
+        float a7 = __high2float(a67);
 
         float b0 = ldg_bf16_to_f32(B_col + (k + 0) * N);
         float b1 = ldg_bf16_to_f32(B_col + (k + 1) * N);
