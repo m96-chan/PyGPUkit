@@ -13,10 +13,10 @@
  *
  * IMPORTANT: This is the ONLY backend for SM120. No cuBLAS fallback.
  *
- * STATUS: DISABLED due to CUTLASS bug #2902
+ * WORKAROUND for CUTLASS bug #2902:
  * - partition_S() drops alignment from 1024 to 8 bytes
  * - SM75_U32x4_LDSM_N requires 16-byte alignment
- * - Causes "misaligned shared or local address" at runtime
+ * - We patch the LDSM copy operations to handle misalignment
  * - Tracking issue: https://github.com/NVIDIA/cutlass/issues/2902
  * - Local issue: https://github.com/m96-chan/PyGPUkit/issues/107
  */
@@ -26,9 +26,8 @@
 #include <cuda_bf16.h>
 #include <cstdio>
 
-// DISABLED: CUTLASS SM120 blockwise FP8 GEMM has a misalignment bug (#2902)
-// Re-enable when CUTLASS fixes the issue
-// #define PYGPUKIT_ENABLE_FP8_SM120
+// Enable FP8 SM120 with alignment patch
+#define PYGPUKIT_ENABLE_FP8_SM120
 
 // Only compile for SM120+ AND when explicitly enabled
 #if (defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)) && defined(PYGPUKIT_ENABLE_FP8_SM120)
@@ -43,6 +42,13 @@
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/device_memory.h"
 
+// ============================================================================
+// ALIGNMENT PATCH: Include AFTER CUTLASS headers
+// Provides alignment-safe LDSM operations for Issue #2902 workaround
+// ============================================================================
+#define PYGPUKIT_PATCH_CUTLASS_LDSM_POST 1
+#include "aligned_copy_sm120.cuh"
+
 using namespace cute;
 
 namespace pygpukit {
@@ -50,20 +56,20 @@ namespace ops {
 namespace fp8_gemm_sm120 {
 
 // ============================================================================
-// GEMM Configuration: MX FP8 E4M3 x MX FP8 E4M3 -> BF16 with blockwise scaling
-// Based on CUTLASS example 79c_blackwell_geforce_mixed_mxfp8_mxfp6_bf16_gemm
-// Using OpClassBlockScaledTensorOp for SM120 GeForce
+// GEMM Configuration: FP8 E4M3 x FP8 E4M3 -> BF16 with blockwise scaling
+// Based on CUTLASS example 87a_blackwell_geforce_fp8_bf16_gemm_blockwise
+// Using OpClassTensorOp for SM120 GeForce (NOT OpClassBlockScaledTensorOp)
 // ============================================================================
 
-// A matrix: MX FP8 E4M3, RowMajor
-using ElementA = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
+// A matrix: FP8 E4M3, RowMajor
+using ElementA = cutlass::float_e4m3_t;
 using LayoutATag = cutlass::layout::RowMajor;
-constexpr int AlignmentA = 16;  // From example 79c
+constexpr int AlignmentA = 128 / cutlass::sizeof_bits<ElementA>::value;
 
-// B matrix: MX FP8 E4M3, ColumnMajor
-using ElementB = cutlass::mx_float8_t<cutlass::float_e4m3_t>;
+// B matrix: FP8 E4M3, ColumnMajor
+using ElementB = cutlass::float_e4m3_t;
 using LayoutBTag = cutlass::layout::ColumnMajor;
-constexpr int AlignmentB = 128;  // From example 79c
+constexpr int AlignmentB = 128 / cutlass::sizeof_bits<ElementB>::value;
 
 // Output: BF16
 using ElementC = cutlass::bfloat16_t;
@@ -75,33 +81,39 @@ constexpr int AlignmentD = AlignmentC;
 
 // Accumulator type
 using ElementAccumulator = float;
+using ElementCompute = float;
 
-// SM120 GeForce architecture with BlockScaledTensorOp
+// SM120 GeForce architecture with TensorOp
 using ArchTag = cutlass::arch::Sm120;
-using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
+using OperatorClass = cutlass::arch::OpClassTensorOp;
 
 // MMA and Cluster Tile Shapes
-using ThreadBlockShape = Shape<_128, _128, _128>;
-using ClusterShape = Shape<_1, _1, _1>;  // GeForce: no cluster support
+using MmaTileShape_MNK = Shape<_128, _128, _128>;
+using ClusterShape_MNK = Shape<_1, _1, _1>;  // GeForce: no cluster support
+
+// Scale configuration (trivial blockwise scaling from example 87a)
+using ScaleConfig = decltype(cutlass::detail::sm120_trivial_blockwise_scale_config(MmaTileShape_MNK{}));
+using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
+using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());
 
 // Epilogue
 using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
-    ThreadBlockShape, ClusterShape,
+    MmaTileShape_MNK, ClusterShape_MNK,
     cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAccumulator, ElementAccumulator,
+    ElementAccumulator, ElementCompute,
     ElementC, LayoutCTag, AlignmentC,
     ElementD, LayoutDTag, AlignmentD,
     cutlass::epilogue::collective::EpilogueScheduleAuto
 >::CollectiveOp;
 
-// Mainloop with MX types (scale factors are embedded in ElementA/ElementB types)
+// Mainloop with scale factor layouts
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
-    ElementA, LayoutATag, AlignmentA,
-    ElementB, LayoutBTag, AlignmentB,
+    ElementA, cute::tuple<LayoutATag, LayoutSFA>, AlignmentA,
+    ElementB, cute::tuple<LayoutBTag, LayoutSFB>, AlignmentB,
     ElementAccumulator,
-    ThreadBlockShape, ClusterShape,
+    MmaTileShape_MNK, ClusterShape_MNK,
     cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
     cutlass::gemm::collective::KernelScheduleAuto
@@ -117,15 +129,9 @@ using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-// Stride and Layout types (from CollectiveMainloop for MX types)
+// Stride and Layout types
 using StrideA = typename Gemm::GemmKernel::StrideA;
-using LayoutA = decltype(cute::make_layout(make_shape(0,0,0), StrideA{}));
-using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
-
 using StrideB = typename Gemm::GemmKernel::StrideB;
-using LayoutB = decltype(cute::make_layout(make_shape(0,0,0), StrideB{}));
-using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
-
 using StrideC = typename Gemm::GemmKernel::StrideC;
 using StrideD = typename Gemm::GemmKernel::StrideD;
 
@@ -230,6 +236,7 @@ cudaError_t gemm_fp8(
     float beta,
     cudaStream_t stream
 ) {
+    fprintf(stderr, "[FP8 GEMM SM120] BUILD_VER=2024-12-24-A\n");
     fprintf(stderr, "[FP8 GEMM SM120] Starting M=%d, N=%d, K=%d\n", M, N, K);
 
     // Check input/output alignment

@@ -968,6 +968,13 @@ cd /d/Projects/m96-chan/PyGPUkit
 
 **サポートSM:** 80, 86, 89, 90, 100, 120
 
+### Local Development Hardware
+
+| Machine | GPU | SM | CUDA Toolkit | Notes |
+|---------|-----|-----|--------------|-------|
+| Primary | RTX 5090 | 120 | 13.1 | Blackwell GeForce, FP8 testing |
+| Secondary | RTX 3090 Ti | 86 | 12.x | Ampere, TF32 benchmarks |
+
 ### Tokenizer
 
 **PyGPUkit内蔵のTokenizerは使用しない。HuggingFace `tokenizers`ライブラリを使用する。**
