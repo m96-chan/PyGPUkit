@@ -67,9 +67,11 @@ class GPUArray:
             float16,
             float32,
             float64,
+            int8,
             int16,
             int32,
             int64,
+            uint8,
         )
 
         native = get_native_module()
@@ -90,6 +92,10 @@ class GPUArray:
             dtype = int32
         elif native_dtype == native.DataType.Int16:
             dtype = int16
+        elif native_dtype == native.DataType.Int8:
+            dtype = int8
+        elif native_dtype == native.DataType.UInt8:
+            dtype = uint8
         else:
             raise ValueError(f"Unknown native dtype: {native_dtype}")
 
@@ -441,8 +447,10 @@ class GPUArray:
         # Call native narrow
         view_native = native.GPUArray.narrow(src_native, offset_elements, new_shape)
 
-        # Wrap the view
-        return GPUArray._wrap_native(view_native)
+        # Wrap the view and keep reference to source to prevent memory from being freed
+        view_arr = GPUArray._wrap_native(view_native)
+        view_arr._source_ref = self
+        return view_arr
 
     def view(self, new_shape: tuple[int, ...]) -> GPUArray:
         """Create a zero-copy view with a different shape (same total elements).
@@ -487,8 +495,10 @@ class GPUArray:
         # Use narrow with offset=0 to create view with new shape
         view_native = native.GPUArray.narrow(src_native, 0, list(new_shape))
 
-        # Wrap the view
-        return GPUArray._wrap_native(view_native)
+        # Wrap the view and keep reference to source to prevent memory from being freed
+        view_arr = GPUArray._wrap_native(view_native)
+        view_arr._source_ref = self  # Keep source alive while view exists
+        return view_arr
 
     def slice_rows(self, num_rows: int) -> GPUArray:
         """Create a zero-copy view of the first N rows (batch dimension).
@@ -532,7 +542,10 @@ class GPUArray:
         # Use narrow with offset=0 to get first num_rows rows
         view_native = native.GPUArray.narrow(src_native, 0, new_shape)
 
-        return GPUArray._wrap_native(view_native)
+        # Keep reference to source to prevent memory from being freed
+        view_arr = GPUArray._wrap_native(view_native)
+        view_arr._source_ref = self
+        return view_arr
 
     def transpose(self, *axes: int) -> GPUArray:
         """Transpose the array by permuting its axes.

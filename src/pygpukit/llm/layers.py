@@ -92,8 +92,14 @@ class Linear:
         if self._weight_t is None:
             self._weight_t = transpose(self.weight)
 
-        # Use GEMV for M=1 with BF16 (4-6x faster than cuBLASLt)
-        use_gemv = Linear._use_gemv and x.shape[0] == 1 and x.dtype == dt_bfloat16
+        # Use GEMV for M=1 with BF16 (1.3-2.4x faster than matmul)
+        # Skip GEMV when out is provided (CUDA Graph mode) - GEMV allocates internally
+        use_gemv = (
+            Linear._use_gemv
+            and x.shape[0] == 1
+            and x.dtype == dt_bfloat16
+            and out is None  # GEMV allocates, not compatible with CUDA Graph
+        )
 
         if use_gemv:
             # GEMV path: zero-copy view to 1D, call gemv_bf16, view back to 2D
