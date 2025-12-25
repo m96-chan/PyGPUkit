@@ -46,6 +46,15 @@ extern "C" {
     );
     bool pygpukit_nvf4_bf16_sm120_available();
 
+    // SM120 (Blackwell GeForce) - Pure NVF4 GEMM (for benchmarking)
+    cudaError_t pygpukit_benchmark_gemm_nvf4_sm120(
+        __nv_bfloat16* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    );
+    bool pygpukit_nvf4_nvf4_sm120_available();
+
     // NVF4 GEMV for SM120
     bool pygpukit_gemv_nvf4_available();
     cudaError_t pygpukit_quantize_bf16_to_nvf4(
@@ -1352,6 +1361,31 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        "NVF4 (4-bit) GEMM for SM120 with BF16 I/O: D = A @ B (BF16 -> NVF4 quantize -> GEMM -> BF16)");
+
+    m.def("nvf4_nvf4_sm120_available", []() {
+        return pygpukit_nvf4_nvf4_sm120_available();
+    }, "Check if pure NVF4 GEMM is available (SM120+)");
+
+    m.def("benchmark_gemm_nvf4_sm120", [](GPUArray& D, int M, int N, int K) {
+        if (D.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("benchmark_gemm_nvf4_sm120: D must be bfloat16");
+        }
+        if (D.ndim() != 2) {
+            throw std::runtime_error("benchmark_gemm_nvf4_sm120: D must be 2D");
+        }
+
+        cudaError_t err = pygpukit_benchmark_gemm_nvf4_sm120(
+            static_cast<__nv_bfloat16*>(D.data()),
+            M, N, K,
+            1.0f, 0.0f,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("benchmark_gemm_nvf4_sm120 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("D"), py::arg("M"), py::arg("N"), py::arg("K"),
+       "Benchmark pure NVF4 GEMM (pre-allocated data, no quantization overhead)");
 
     // ========================================================================
     // NVF4 GEMV for SM120 (M=1 path)
