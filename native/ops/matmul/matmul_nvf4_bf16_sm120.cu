@@ -88,7 +88,7 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     cutlass::epilogue::collective::EpilogueScheduleAuto
 >::CollectiveOp;
 
-// Mainloop - using PingPong schedule for better performance
+// Mainloop - Pingpong schedule with auto stage count (explicit 3 causes init failure)
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
     ElementA, LayoutATag, AlignmentA,
@@ -97,7 +97,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
     ThreadBlockShape, ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    cutlass::gemm::KernelTmaWarpSpecializedPingpong  // Explicit pingpong schedule
+    cutlass::gemm::KernelTmaWarpSpecializedPingpong
 >::CollectiveOp;
 
 // GEMM Kernel

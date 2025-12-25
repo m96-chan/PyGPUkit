@@ -86,15 +86,14 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     cutlass::epilogue::collective::EpilogueScheduleAuto
 >::CollectiveOp;
 
-// Mainloop - Pingpong schedule (best so far)
+// Mainloop - Pingpong schedule with 3-stage pipeline (optimal for SM120)
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
     ElementA, LayoutATag, AlignmentA,
     ElementB, LayoutBTag, AlignmentB,
     ElementAccumulator,
     ThreadBlockShape, ClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<
-        static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    cutlass::gemm::collective::StageCount<3>,  // 3 stages optimal (2=base, 4=too much smem)
     cutlass::gemm::KernelTmaWarpSpecializedPingpong
 >::CollectiveOp;
 
