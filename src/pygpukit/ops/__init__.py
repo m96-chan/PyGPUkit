@@ -39,6 +39,10 @@ from pygpukit.ops.basic import (
     fp8_sm100_available,
     fp8_sm120_available,
     gelu,
+    # GEMV
+    gemv_bf16,
+    gemv_nvf4_available,
+    gemv_nvf4_bf16,
     kv_cache_prefill,
     kv_cache_prefill_gqa,
     kv_cache_update,
@@ -60,6 +64,8 @@ from pygpukit.ops.basic import (
     mul,
     mul_inplace,
     nvf4_bf16_sm120_available,
+    nvf4_get_sizes,
+    quantize_bf16_to_nvf4,
     relu,
     repeat_interleave_axis1,
     reshape_copy,
@@ -121,6 +127,12 @@ __all__ = [
     "fp8_sm100_available",
     "fp8_sm120_available",
     "nvf4_bf16_sm120_available",
+    # GEMV
+    "gemv_bf16",
+    "gemv_nvf4_bf16",
+    "gemv_nvf4_available",
+    "nvf4_get_sizes",
+    "quantize_bf16_to_nvf4",
     # Neural Network
     "gelu",
     "silu",

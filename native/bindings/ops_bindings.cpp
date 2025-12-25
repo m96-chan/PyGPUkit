@@ -45,6 +45,22 @@ extern "C" {
         cudaStream_t stream
     );
     bool pygpukit_nvf4_bf16_sm120_available();
+
+    // NVF4 GEMV for SM120
+    bool pygpukit_gemv_nvf4_available();
+    cudaError_t pygpukit_quantize_bf16_to_nvf4(
+        const void* input, void* out_data, void* out_scale,
+        int K, int N, cudaStream_t stream
+    );
+    cudaError_t pygpukit_gemv_nvf4_bf16(
+        const void* A, const void* B_data, const void* B_scale, void* C,
+        int K, int N, float alpha, cudaStream_t stream
+    );
+    cudaError_t pygpukit_gemv_bf16(
+        const void* A, const void* B, void* C,
+        int K, int N, float alpha, float beta, cudaStream_t stream
+    );
+    void pygpukit_nvf4_get_sizes(int K, int N, size_t* data_size, size_t* scale_size);
 }
 
 void init_ops_bindings(py::module_& m) {
@@ -1336,6 +1352,94 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        "NVF4 (4-bit) GEMM for SM120 with BF16 I/O: D = A @ B (BF16 -> NVF4 quantize -> GEMM -> BF16)");
+
+    // ========================================================================
+    // NVF4 GEMV for SM120 (M=1 path)
+    // ========================================================================
+
+    m.def("gemv_nvf4_available", []() {
+        return pygpukit_gemv_nvf4_available();
+    }, "Check if NVF4 GEMV is available (SM120+)");
+
+    m.def("quantize_bf16_to_nvf4", [](const GPUArray& input, GPUArray& out_data, GPUArray& out_scale) {
+        if (input.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("quantize_bf16_to_nvf4: input must be bfloat16");
+        }
+        if (input.ndim() != 2) {
+            throw std::runtime_error("quantize_bf16_to_nvf4: input must be 2D [K, N]");
+        }
+
+        int K = input.shape()[0];
+        int N = input.shape()[1];
+
+        cudaError_t err = pygpukit_quantize_bf16_to_nvf4(
+            input.data(), out_data.data(), out_scale.data(),
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("quantize_bf16_to_nvf4 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("input"), py::arg("out_data"), py::arg("out_scale"),
+       "Quantize BF16 weights to NVF4 format for SM120 GEMV");
+
+    m.def("gemv_nvf4_bf16", [](const GPUArray& A, const GPUArray& B_data, const GPUArray& B_scale, GPUArray& C, float alpha) {
+        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_nvf4_bf16: A and C must be bfloat16");
+        }
+        if (A.ndim() != 1) {
+            throw std::runtime_error("gemv_nvf4_bf16: A must be 1D [K]");
+        }
+
+        int K = A.shape()[0];
+        int N = C.shape()[0];
+
+        cudaError_t err = pygpukit_gemv_nvf4_bf16(
+            A.data(), B_data.data(), B_scale.data(), C.data(),
+            K, N, alpha, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_nvf4_bf16 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_data"), py::arg("B_scale"), py::arg("C"), py::arg("alpha") = 1.0f,
+       "NVF4 GEMV for SM120: C[N] = alpha * A[K] @ B[K,N] (NVF4 quantized weights)");
+
+    m.def("gemv_bf16", [](const GPUArray& A, const GPUArray& B, GPUArray& C, float alpha, float beta) {
+        if (A.dtype() != DataType::BFloat16 || B.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_bf16: all inputs must be bfloat16");
+        }
+        if (A.ndim() != 1 || B.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_bf16: A[K], B[K,N], C[N] dimensions required");
+        }
+
+        int K = A.shape()[0];
+        int N = B.shape()[1];
+
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_bf16: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_bf16: N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_bf16(
+            A.data(), B.data(), C.data(),
+            K, N, alpha, beta, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_bf16 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("C"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
+       "BF16 GEMV: C[N] = alpha * A[K] @ B[K,N] + beta * C[N]");
+
+    m.def("nvf4_get_sizes", [](int K, int N) {
+        size_t data_size, scale_size;
+        pygpukit_nvf4_get_sizes(K, N, &data_size, &scale_size);
+        return py::make_tuple(data_size, scale_size);
+    }, py::arg("K"), py::arg("N"),
+       "Get buffer sizes for NVF4 quantization: returns (data_size, scale_size)");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

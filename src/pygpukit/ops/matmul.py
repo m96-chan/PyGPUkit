@@ -945,6 +945,274 @@ def _matmul_nvf4_bf16_sm120_native(
     return out
 
 
+# ============================================================================
+# GEMV Operations (M=1 special case)
+# ============================================================================
+
+
+def gemv_nvf4_available() -> bool:
+    """Check if NVF4 GEMV is available (SM120+).
+
+    Returns:
+        True if NVF4 GEMV is available on current GPU.
+    """
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return native.gemv_nvf4_available()
+    else:
+        return False
+
+
+def nvf4_get_sizes(K: int, N: int) -> tuple[int, int]:
+    """Get buffer sizes for NVF4-quantized weights.
+
+    Args:
+        K: Inner dimension (input features).
+        N: Output dimension (output features).
+
+    Returns:
+        Tuple of (data_size, scale_size) in bytes.
+        - data_size: Size for packed NVF4 weights [K/2, N]
+        - scale_size: Size for UE4M3 scale factors [K/32, N]
+
+    Note:
+        NVF4 provides 4x compression vs BF16:
+        - BF16 weight size: K * N * 2 bytes
+        - NVF4 total size: K/2 * N + K/32 * N bytes
+    """
+    data_size = (K // 2) * N
+    scale_size = ((K + 31) // 32) * N
+    return data_size, scale_size
+
+
+def quantize_bf16_to_nvf4(
+    input: GPUArray,
+    out_data: GPUArray,
+    out_scale: GPUArray,
+) -> None:
+    """Quantize BF16 weights to NVF4 format with block scaling.
+
+    This quantizes BF16 weights to 4-bit NVF4 format with UE4M3 scale factors.
+    Each 32-element block shares one scale factor.
+
+    Args:
+        input: BF16 weight matrix [K, N].
+        out_data: Pre-allocated buffer for packed NVF4 data [K/2, N] (uint8).
+        out_scale: Pre-allocated buffer for scale factors [K/32, N] (uint8).
+
+    Raises:
+        ValueError: If input is not 2D BF16, or buffers have wrong size.
+        RuntimeError: If NVF4 is not available.
+
+    Note:
+        NVF4 values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0} and negatives.
+        Block size: 32 elements per scale factor.
+    """
+    from pygpukit.core.dtypes import bfloat16
+
+    if input.ndim != 2:
+        raise ValueError(f"quantize_bf16_to_nvf4 requires 2D input, got {input.ndim}D")
+
+    if input.dtype != bfloat16:
+        raise ValueError(f"quantize_bf16_to_nvf4 requires bfloat16 input, got {input.dtype}")
+
+    if not gemv_nvf4_available():
+        raise RuntimeError("NVF4 quantization not available. Requires SM120+ GPU.")
+
+    K, N = input.shape
+    expected_data_size, expected_scale_size = nvf4_get_sizes(K, N)
+
+    # Validate buffer sizes (count elements)
+    actual_data_size = (
+        out_data.shape[0] * out_data.shape[1] if out_data.ndim == 2 else out_data.size
+    )
+    actual_scale_size = (
+        out_scale.shape[0] * out_scale.shape[1] if out_scale.ndim == 2 else out_scale.size
+    )
+
+    if actual_data_size < expected_data_size:
+        raise ValueError(f"out_data buffer too small: {actual_data_size} < {expected_data_size}")
+    if actual_scale_size < expected_scale_size:
+        raise ValueError(f"out_scale buffer too small: {actual_scale_size} < {expected_scale_size}")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        input_native = input._get_native()
+        data_native = out_data._get_native()
+        scale_native = out_scale._get_native()
+        native.quantize_bf16_to_nvf4(input_native, data_native, scale_native)
+
+
+def gemv_nvf4_bf16(
+    a: GPUArray,
+    b_data: GPUArray,
+    b_scale: GPUArray,
+    *,
+    out: GPUArray | None = None,
+    alpha: float = 1.0,
+) -> GPUArray:
+    """NVF4 GEMV: C[N] = alpha * A[K] @ B[K,N] (NVF4 quantized).
+
+    This performs matrix-vector multiplication where the weight matrix B
+    is pre-quantized to NVF4 format with block scaling.
+
+    Args:
+        a: Input vector [K], BF16.
+        b_data: Packed NVF4 weight data [K/2, N], uint8.
+        b_scale: UE4M3 scale factors [K/32, N], uint8.
+        out: Optional output vector [N], BF16.
+        alpha: Scaling factor (default 1.0).
+
+    Returns:
+        Output vector [N], BF16.
+
+    Raises:
+        ValueError: If shapes or dtypes don't match.
+        RuntimeError: If NVF4 GEMV is not available.
+
+    Note:
+        For LLM inference decode path (M=1), NVF4 provides 4x bandwidth
+        reduction vs BF16, which is critical for memory-bound workloads.
+    """
+    from pygpukit.core.dtypes import bfloat16
+
+    if a.ndim != 1:
+        raise ValueError(f"gemv_nvf4_bf16 requires 1D input vector, got {a.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"gemv_nvf4_bf16 requires bfloat16 input, got {a.dtype}")
+
+    if not gemv_nvf4_available():
+        raise RuntimeError("NVF4 GEMV not available. Requires SM120+ GPU.")
+
+    # Infer N from b_data shape: [K/2, N]
+    if b_data.ndim == 2:
+        N = b_data.shape[1]
+    else:
+        raise ValueError(f"b_data must be 2D [K/2, N], got {b_data.ndim}D")
+
+    # Validate output
+    if out is not None:
+        if out.shape != (N,):
+            raise ValueError(f"out shape {out.shape} does not match expected ({N},)")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        data_native = b_data._get_native()
+        scale_native = b_scale._get_native()
+
+        if out is None:
+            out_native = native.empty([N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.gemv_nvf4_bf16(a_native, data_native, scale_native, out_native, alpha)
+
+        return out
+    else:
+        raise RuntimeError("NVF4 GEMV requires native backend")
+
+
+def gemv_bf16(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
+) -> GPUArray:
+    """BF16 GEMV: C[N] = alpha * A[K] @ B[K,N] + beta * C[N].
+
+    Standard BF16 matrix-vector multiplication without quantization.
+
+    Args:
+        a: Input vector [K], BF16.
+        b: Weight matrix [K, N], BF16 (row-major).
+        out: Optional output vector [N], BF16.
+        alpha: Scaling factor for A @ B (default 1.0).
+        beta: Scaling factor for existing C (default 0.0).
+
+    Returns:
+        Output vector [N], BF16.
+
+    Raises:
+        ValueError: If shapes or dtypes don't match.
+    """
+    from pygpukit.core.dtypes import bfloat16
+
+    if a.ndim != 1:
+        raise ValueError(f"gemv_bf16 requires 1D input vector, got {a.ndim}D")
+
+    if b.ndim != 2:
+        raise ValueError(f"gemv_bf16 requires 2D weight matrix, got {b.ndim}D")
+
+    if a.dtype != bfloat16 or b.dtype != bfloat16:
+        raise ValueError("gemv_bf16 requires bfloat16 inputs")
+
+    K = a.shape[0]
+    if b.shape[0] != K:
+        raise ValueError(f"gemv_bf16 dimension mismatch: A[{K}] vs B[{b.shape[0]}, {b.shape[1]}]")
+
+    N = b.shape[1]
+
+    # Validate output
+    if out is not None:
+        if out.shape != (N,):
+            raise ValueError(f"out shape {out.shape} does not match expected ({N},)")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_native = b._get_native()
+
+        if out is None:
+            out_native = native.empty([N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.gemv_bf16(a_native, b_native, out_native, alpha, beta)
+
+        return out
+    else:
+        # CPU fallback
+        a_np: np.ndarray[np.floating] = a.to_numpy().astype(np.float32)
+        b_np: np.ndarray[np.floating] = b.to_numpy().astype(np.float32)
+        result: np.ndarray[np.floating] = alpha * (a_np @ b_np)
+        if out is not None:
+            result = result + beta * out.to_numpy().astype(np.float32)
+        return from_numpy(result.astype(np.float16).view(np.uint16).astype(np.uint16))
+
+
+# ============================================================================
+# FP8 Operations
+# ============================================================================
+
+
 def matmul_fp8(
     a: GPUArray,
     b: GPUArray,
