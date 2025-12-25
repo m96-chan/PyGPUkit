@@ -152,25 +152,24 @@ inline uint8_t bf16_to_nvf4_e2m1_host(float val) {
     return sign | code;
 }
 
-// Convert float to NVF4 E2M1 (4-bit) - DEVICE version
+// Convert float to NVF4 E2M1 (4-bit) - DEVICE version (branchless)
+// Uses comparison accumulation instead of if-else chain for better warp efficiency
 __device__ __forceinline__
 uint8_t bf16_to_nvf4_e2m1(float val) {
     // E2M1 representable values: 0, 0.5, 1, 1.5, 2, 3, 4, 6 (and negatives)
-    if (fabsf(val) < 0.25f) return 0;  // Zero
+    float absval = fabsf(val);
+    uint8_t sign = (val < 0.0f) ? 0x8 : 0x0;
 
-    uint8_t sign = (val < 0) ? 0x8 : 0x0;
-    val = fabsf(val);
-    val = fminf(val, NVF4_MAX);
-
-    // Quantize to nearest E2M1 value
-    uint8_t code;
-    if (val < 0.75f) code = 1;       // 0.5
-    else if (val < 1.25f) code = 2;  // 1.0
-    else if (val < 1.75f) code = 3;  // 1.5
-    else if (val < 2.5f) code = 4;   // 2.0
-    else if (val < 3.5f) code = 5;   // 3.0
-    else if (val < 5.0f) code = 6;   // 4.0
-    else code = 7;                    // 6.0
+    // Branchless: count how many thresholds we exceed
+    // Thresholds are midpoints between adjacent representable values
+    uint8_t code = 0;
+    code += (absval >= 0.25f);   // 0 -> 1 (0.5)
+    code += (absval >= 0.75f);   // 1 -> 2 (1.0)
+    code += (absval >= 1.25f);   // 2 -> 3 (1.5)
+    code += (absval >= 1.75f);   // 3 -> 4 (2.0)
+    code += (absval >= 2.5f);    // 4 -> 5 (3.0)
+    code += (absval >= 3.5f);    // 5 -> 6 (4.0)
+    code += (absval >= 5.0f);    // 6 -> 7 (6.0)
 
     return sign | code;
 }
@@ -179,38 +178,67 @@ uint8_t bf16_to_nvf4_e2m1(float val) {
 // GPU-side BF16 -> NVF4 Quantization Kernels (Unit Scale)
 // ============================================================================
 
-// Simple GPU quantization: BF16 [M, K] RowMajor -> NVF4 packed (unit scale)
-// Output format matches CUTLASS PackedVectorLayout: 2 elements per byte
+// Vectorized GPU quantization: BF16 [M, K] RowMajor -> NVF4 packed (unit scale)
+// Each thread processes 8 BF16 elements -> 4 output bytes using uint4 loads
 __global__ void quantize_A_gpu_kernel(
     const nv_bfloat16* __restrict__ input,  // [M, K] RowMajor BF16
     uint8_t* __restrict__ output,            // Packed NVF4 (size = M*K/2)
     int M, int K
 ) {
-    // Each thread handles 2 consecutive elements (1 output byte)
+    // Each thread handles 8 elements (4 output bytes)
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pairs = (M * K) / 2;
-    if (idx >= total_pairs) return;
+    int total_quads = (M * K) / 8;
+    if (idx >= total_quads) return;
 
-    int base = idx * 2;
-    float v0 = __bfloat162float(input[base]);
-    float v1 = __bfloat162float(input[base + 1]);
+    // Vectorized load: 8 BF16 = 16 bytes = uint4
+    const uint4* input_vec = reinterpret_cast<const uint4*>(input);
+    uint4 data = input_vec[idx];
 
+    // Unpack BF16 values from uint4 (2 BF16 per uint32)
+    nv_bfloat162 bf2_0 = *reinterpret_cast<nv_bfloat162*>(&data.x);
+    nv_bfloat162 bf2_1 = *reinterpret_cast<nv_bfloat162*>(&data.y);
+    nv_bfloat162 bf2_2 = *reinterpret_cast<nv_bfloat162*>(&data.z);
+    nv_bfloat162 bf2_3 = *reinterpret_cast<nv_bfloat162*>(&data.w);
+
+    // Convert to float and quantize
+    float v0 = __bfloat162float(__low2bfloat16(bf2_0));
+    float v1 = __bfloat162float(__high2bfloat16(bf2_0));
+    float v2 = __bfloat162float(__low2bfloat16(bf2_1));
+    float v3 = __bfloat162float(__high2bfloat16(bf2_1));
+    float v4 = __bfloat162float(__low2bfloat16(bf2_2));
+    float v5 = __bfloat162float(__high2bfloat16(bf2_2));
+    float v6 = __bfloat162float(__low2bfloat16(bf2_3));
+    float v7 = __bfloat162float(__high2bfloat16(bf2_3));
+
+    // Quantize all 8 values
     uint8_t q0 = bf16_to_nvf4_e2m1(v0);
     uint8_t q1 = bf16_to_nvf4_e2m1(v1);
+    uint8_t q2 = bf16_to_nvf4_e2m1(v2);
+    uint8_t q3 = bf16_to_nvf4_e2m1(v3);
+    uint8_t q4 = bf16_to_nvf4_e2m1(v4);
+    uint8_t q5 = bf16_to_nvf4_e2m1(v5);
+    uint8_t q6 = bf16_to_nvf4_e2m1(v6);
+    uint8_t q7 = bf16_to_nvf4_e2m1(v7);
 
-    // Pack: low nibble = first, high nibble = second
-    output[idx] = (q1 << 4) | (q0 & 0x0F);
+    // Pack into 4 bytes and write as uint32
+    uint32_t packed = ((q1 << 4) | (q0 & 0x0F))
+                    | (((q3 << 4) | (q2 & 0x0F)) << 8)
+                    | (((q5 << 4) | (q4 & 0x0F)) << 16)
+                    | (((q7 << 4) | (q6 & 0x0F)) << 24);
+
+    reinterpret_cast<uint32_t*>(output)[idx] = packed;
 }
 
 // GPU quantization: BF16 [K, N] RowMajor -> NVF4 [N, K] ColumnMajor packed (unit scale)
+// Uses 2D grid for better cache behavior on strided access
 __global__ void quantize_B_gpu_kernel(
     const nv_bfloat16* __restrict__ input,  // [K, N] RowMajor BF16
     uint8_t* __restrict__ output,            // Packed NVF4 ColMajor (size = N*K/2)
     int K, int N
 ) {
-    // Each thread handles one (n, k_pair) -> outputs 1 byte
-    int n = blockIdx.y;
+    // 2D thread mapping: (k_pair, n) with tiling for cache efficiency
     int k_pair = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = blockIdx.y * blockDim.y + threadIdx.y;
     int num_k_pairs = K / 2;
 
     if (n >= N || k_pair >= num_k_pairs) return;
@@ -222,11 +250,11 @@ __global__ void quantize_B_gpu_kernel(
     float v0 = __bfloat162float(input[k0 * N + n]);
     float v1 = __bfloat162float(input[k1 * N + n]);
 
+    // Branchless quantization
     uint8_t q0 = bf16_to_nvf4_e2m1(v0);
     uint8_t q1 = bf16_to_nvf4_e2m1(v1);
 
-    // Output is ColMajor [N, K]: linear index = n * K + k
-    // For packed: output index = (n * K + k_pair * 2) / 2 = n * (K/2) + k_pair
+    // Output is ColMajor [N, K]: packed index = n * (K/2) + k_pair
     int out_idx = n * num_k_pairs + k_pair;
     output[out_idx] = (q1 << 4) | (q0 & 0x0F);
 }
@@ -349,24 +377,28 @@ cudaError_t gemm_nvf4_bf16(
 
     // =========================================================================
     // GPU-side quantization: BF16 -> NVF4 (no host copies!)
+    // Optimized with vectorized loads and branchless quantization
     // =========================================================================
 
     constexpr int BLOCK_SIZE = 256;
 
-    // Quantize A: [M, K] RowMajor BF16 -> packed NVF4
+    // Quantize A: [M, K] RowMajor BF16 -> packed NVF4 (vectorized: 8 elements/thread)
     {
-        int total_pairs = (M * K) / 2;
-        int grid_size = (total_pairs + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        int total_quads = (M * K) / 8;  // Each thread handles 8 BF16 -> 4 bytes
+        int grid_size = (total_quads + BLOCK_SIZE - 1) / BLOCK_SIZE;
         quantize_A_gpu_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
             A, dev_A.get(), M, K
         );
     }
 
-    // Quantize B: [K, N] RowMajor BF16 -> [N, K] ColMajor packed NVF4
+    // Quantize B: [K, N] RowMajor BF16 -> [N, K] ColMajor packed NVF4 (2D tiled)
     {
         int num_k_pairs = K / 2;
-        dim3 grid((num_k_pairs + BLOCK_SIZE - 1) / BLOCK_SIZE, N);
-        quantize_B_gpu_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+        constexpr int TILE_K = 16;  // Threads per K dimension
+        constexpr int TILE_N = 16;  // Threads per N dimension
+        dim3 block(TILE_K, TILE_N);
+        dim3 grid((num_k_pairs + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N);
+        quantize_B_gpu_kernel<<<grid, block, 0, stream>>>(
             B, dev_B.get(), K, N
         );
     }
