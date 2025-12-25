@@ -175,97 +175,116 @@ uint8_t bf16_to_nvf4_e2m1(float val) {
     return sign | code;
 }
 
-// Scale factor block size (32 elements per scale factor for NVF4)
-constexpr int SF_BLOCK_SIZE = 32;
+// ============================================================================
+// GPU-side BF16 -> NVF4 Quantization Kernels (Unit Scale)
+// ============================================================================
 
-// Quantize A matrix: BF16 [M, K] RowMajor -> NVF4 with block scaling
-__global__ void quantize_A_bf16_to_nvf4_kernel(
+// Simple GPU quantization: BF16 [M, K] RowMajor -> NVF4 packed (unit scale)
+// Output format matches CUTLASS PackedVectorLayout: 2 elements per byte
+__global__ void quantize_A_gpu_kernel(
     const nv_bfloat16* __restrict__ input,  // [M, K] RowMajor BF16
-    uint8_t* __restrict__ output_data,       // Packed NVF4 (2 per byte)
-    uint8_t* __restrict__ output_sf,         // Scale factors
+    uint8_t* __restrict__ output,            // Packed NVF4 (size = M*K/2)
     int M, int K
 ) {
-    int m = blockIdx.y;
-    int k_block = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each thread handles 2 consecutive elements (1 output byte)
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_pairs = (M * K) / 2;
+    if (idx >= total_pairs) return;
 
-    int num_k_blocks = (K + SF_BLOCK_SIZE - 1) / SF_BLOCK_SIZE;
-    if (m >= M || k_block >= num_k_blocks) return;
+    int base = idx * 2;
+    float v0 = __bfloat162float(input[base]);
+    float v1 = __bfloat162float(input[base + 1]);
 
-    int k_start = k_block * SF_BLOCK_SIZE;
-    int k_end = min(k_start + SF_BLOCK_SIZE, K);
+    uint8_t q0 = bf16_to_nvf4_e2m1(v0);
+    uint8_t q1 = bf16_to_nvf4_e2m1(v1);
 
-    // Find max absolute value in block for scale factor
-    float max_val = 0.0f;
-    for (int k = k_start; k < k_end; ++k) {
-        float val = fabsf(__bfloat162float(input[m * K + k]));
-        max_val = fmaxf(max_val, val);
-    }
-
-    // Compute scale factor (stored as float_ue4m3_t)
-    float scale = (max_val > 1e-8f) ? (max_val / NVF4_MAX) : 1.0f;
-    float inv_scale = 1.0f / scale;
-
-    // Store scale factor (simplified - just store as uint8_t representation)
-    // Note: In production, should use proper float_ue4m3_t conversion
-    int sf_idx = m * num_k_blocks + k_block;
-    output_sf[sf_idx] = static_cast<uint8_t>(fminf(scale * 16.0f, 255.0f));
-
-    // Quantize and pack pairs
-    int out_base = (m * K + k_start) / 2;
-    for (int k = k_start; k < k_end; k += 2) {
-        float v0 = __bfloat162float(input[m * K + k]) * inv_scale;
-        float v1 = (k + 1 < k_end) ? __bfloat162float(input[m * K + k + 1]) * inv_scale : 0.0f;
-
-        uint8_t q0 = bf16_to_nvf4_e2m1(v0);
-        uint8_t q1 = bf16_to_nvf4_e2m1(v1);
-
-        // Pack: low nibble = first element, high nibble = second element
-        output_data[out_base + (k - k_start) / 2] = (q1 << 4) | (q0 & 0x0F);
-    }
+    // Pack: low nibble = first, high nibble = second
+    output[idx] = (q1 << 4) | (q0 & 0x0F);
 }
 
-// Quantize B matrix: BF16 [K, N] RowMajor -> NVF4 ColumnMajor with block scaling
-__global__ void quantize_B_bf16_to_nvf4_kernel(
+// GPU quantization: BF16 [K, N] RowMajor -> NVF4 [N, K] ColumnMajor packed (unit scale)
+__global__ void quantize_B_gpu_kernel(
     const nv_bfloat16* __restrict__ input,  // [K, N] RowMajor BF16
-    uint8_t* __restrict__ output_data,       // Packed NVF4 ColMajor
-    uint8_t* __restrict__ output_sf,         // Scale factors
+    uint8_t* __restrict__ output,            // Packed NVF4 ColMajor (size = N*K/2)
     int K, int N
 ) {
+    // Each thread handles one (n, k_pair) -> outputs 1 byte
     int n = blockIdx.y;
-    int k_block = blockIdx.x * blockDim.x + threadIdx.x;
+    int k_pair = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_k_pairs = K / 2;
 
-    int num_k_blocks = (K + SF_BLOCK_SIZE - 1) / SF_BLOCK_SIZE;
-    if (n >= N || k_block >= num_k_blocks) return;
+    if (n >= N || k_pair >= num_k_pairs) return;
 
-    int k_start = k_block * SF_BLOCK_SIZE;
-    int k_end = min(k_start + SF_BLOCK_SIZE, K);
+    int k0 = k_pair * 2;
+    int k1 = k0 + 1;
 
+    // Input is RowMajor [K, N]: element at (k, n) = input[k * N + n]
+    float v0 = __bfloat162float(input[k0 * N + n]);
+    float v1 = __bfloat162float(input[k1 * N + n]);
+
+    uint8_t q0 = bf16_to_nvf4_e2m1(v0);
+    uint8_t q1 = bf16_to_nvf4_e2m1(v1);
+
+    // Output is ColMajor [N, K]: linear index = n * K + k
+    // For packed: output index = (n * K + k_pair * 2) / 2 = n * (K/2) + k_pair
+    int out_idx = n * num_k_pairs + k_pair;
+    output[out_idx] = (q1 << 4) | (q0 & 0x0F);
+}
+
+// Initialize scale factors to 1.0 (UE4M3 encoding: 0x38)
+__global__ void init_scale_factors_kernel(
+    uint8_t* __restrict__ sf,
+    int count
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    sf[idx] = 0x38;  // float_ue4m3_t(1.0f) = 0x38
+}
+
+// ============================================================================
+// Host-side BF16 -> NVF4 Quantization Helpers
+// ============================================================================
+
+// Convert float to float_e2m1_t (NVF4 4-bit format)
+inline cutlass::float_e2m1_t float_to_e2m1(float val) {
+    // E2M1 representable values: 0, 0.5, 1, 1.5, 2, 3, 4, 6 (and negatives)
+    // Clamp to representable range
+    val = std::max(-6.0f, std::min(6.0f, val));
+    return cutlass::float_e2m1_t(val);
+}
+
+// Convert float to float_ue4m3_t (scale factor, unsigned 8-bit)
+inline cutlass::float_ue4m3_t float_to_ue4m3(float val) {
+    // UE4M3 range: approximately [2^-9, 448]
+    val = std::max(1.0f/512.0f, std::min(448.0f, val));
+    return cutlass::float_ue4m3_t(val);
+}
+
+// Quantize a block of floats to NVF4 with a computed scale factor
+// Returns the scale factor used
+inline float quantize_block_to_e2m1(
+    const float* input,
+    cutlass::float_e2m1_t* output,
+    int count
+) {
     // Find max absolute value in block
-    float max_val = 0.0f;
-    for (int k = k_start; k < k_end; ++k) {
-        float val = fabsf(__bfloat162float(input[k * N + n]));
-        max_val = fmaxf(max_val, val);
+    float max_abs = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        max_abs = std::max(max_abs, std::abs(input[i]));
     }
 
-    // Compute scale factor
-    float scale = (max_val > 1e-8f) ? (max_val / NVF4_MAX) : 1.0f;
+    // Compute scale factor: scale * 6.0 >= max_abs
+    // So scale = max_abs / 6.0 (6.0 is max representable in E2M1)
+    float scale = (max_abs > 1e-8f) ? (max_abs / 6.0f) : 1.0f;
     float inv_scale = 1.0f / scale;
 
-    // Store scale factor
-    int sf_idx = n * num_k_blocks + k_block;
-    output_sf[sf_idx] = static_cast<uint8_t>(fminf(scale * 16.0f, 255.0f));
-
-    // Quantize and pack pairs (ColumnMajor output)
-    int out_base = (n * K + k_start) / 2;
-    for (int k = k_start; k < k_end; k += 2) {
-        float v0 = __bfloat162float(input[k * N + n]) * inv_scale;
-        float v1 = (k + 1 < k_end) ? __bfloat162float(input[(k + 1) * N + n]) * inv_scale : 0.0f;
-
-        uint8_t q0 = bf16_to_nvf4_e2m1(v0);
-        uint8_t q1 = bf16_to_nvf4_e2m1(v1);
-
-        output_data[out_base + (k - k_start) / 2] = (q1 << 4) | (q0 & 0x0F);
+    // Quantize each element
+    for (int i = 0; i < count; ++i) {
+        float scaled_val = input[i] * inv_scale;
+        output[i] = float_to_e2m1(scaled_val);
     }
+
+    return scale;
 }
 
 // ============================================================================
@@ -273,25 +292,16 @@ __global__ void quantize_B_bf16_to_nvf4_kernel(
 // ============================================================================
 
 cudaError_t gemm_nvf4_bf16(
-    const nv_bfloat16* A,  // [M, K] BF16 input
-    const nv_bfloat16* B,  // [K, N] BF16 input
-    nv_bfloat16* D,        // [M, N] BF16 output
+    const nv_bfloat16* A,  // [M, K] BF16 input (device)
+    const nv_bfloat16* B,  // [K, N] BF16 input (device)
+    nv_bfloat16* D,        // [M, N] BF16 output (device)
     int M, int N, int K,
     float alpha,
     float beta,
     cudaStream_t stream
 ) {
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Starting M=%d, N=%d, K=%d\n", M, N, K);
-
-    // Compute sizes
-    int64_t size_A = static_cast<int64_t>(M) * K;
-    int64_t size_B = static_cast<int64_t>(K) * N;
-    int64_t size_C = static_cast<int64_t>(M) * N;
-    int64_t size_D = size_C;
-
-    // Packed NVF4 sizes (2 elements per byte)
-    int64_t packed_A = (size_A + 1) / 2;
-    int64_t packed_B = (size_B + 1) / 2;
+    // For SFA and SFB tensors layouts
+    using Sm1xxBlkScaledConfigLocal = typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
 
     // Build strides and layouts
     StrideA stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, 1));
@@ -300,111 +310,97 @@ cudaError_t gemm_nvf4_bf16(
     StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, 1));
 
     auto problem_shape = cute::make_shape(M, N, K, 1);
-    LayoutSFA layout_SFA = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFA(problem_shape);
-    LayoutSFB layout_SFB = Sm1xxBlkScaledConfig::tile_atom_to_shape_SFB(problem_shape);
+    LayoutSFA layout_SFA = Sm1xxBlkScaledConfigLocal::tile_atom_to_shape_SFA(problem_shape);
+    LayoutSFB layout_SFB = Sm1xxBlkScaledConfigLocal::tile_atom_to_shape_SFB(problem_shape);
 
-    // Compute scale factor sizes
-    size_t sfa_size = size(filter_zeros(layout_SFA));
-    size_t sfb_size = size(filter_zeros(layout_SFB));
+    // Compute sizes
+    int64_t size_A = static_cast<int64_t>(M) * K;
+    int64_t size_B = static_cast<int64_t>(K) * N;
+    int64_t size_C = static_cast<int64_t>(M) * N;
+    int64_t size_D = size_C;
+
+    size_t sfa_size = cute::size(cute::filter_zeros(layout_SFA));
+    size_t sfb_size = cute::size(cute::filter_zeros(layout_SFB));
 
     // WORKAROUND: Blackwell driver TMA bug requires >= 128KB allocations
-    // See CUTLASS v4.3.4 CHANGELOG
     constexpr size_t MIN_ALLOC_128KB = 128 * 1024;
-
-    // Calculate minimum element counts for 128KB
-    size_t min_sf_elements = MIN_ALLOC_128KB / sizeof(ScaleFactorType);  // 128KB / 1 byte
-    size_t min_data_elements = MIN_ALLOC_128KB / sizeof(DataTypeA);      // 128KB / 0.5 byte
-    size_t min_bf16_elements = MIN_ALLOC_128KB / sizeof(ElementC);       // 128KB / 2 bytes
+    size_t min_sf_elements = MIN_ALLOC_128KB / sizeof(ScaleFactorType);
 
     size_t sfa_padded = std::max(sfa_size, min_sf_elements);
     size_t sfb_padded = std::max(sfb_size, min_sf_elements);
 
-    // Also pad A, B, C, D to >= 128KB
-    size_t size_A_padded = std::max(static_cast<size_t>(size_A), min_data_elements);
-    size_t size_B_padded = std::max(static_cast<size_t>(size_B), min_data_elements);
-    size_t size_C_padded = std::max(static_cast<size_t>(size_C), min_bf16_elements);
-    size_t size_D_padded = std::max(static_cast<size_t>(size_D), min_bf16_elements);
+    // Allocate device memory directly (no host memory needed!)
+    // NVF4 packed: 2 elements per byte
+    size_t size_A_packed = (size_A + 1) / 2;  // Packed bytes for A
+    size_t size_B_packed = (size_B + 1) / 2;  // Packed bytes for B
 
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] 128KB padding applied to all tensors\n");
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] A: %zu->%zu, B: %zu->%zu, C: %zu->%zu, SFA: %zu->%zu, SFB: %zu->%zu\n",
-            size_A, size_A_padded, size_B, size_B_padded, size_C, size_C_padded, sfa_size, sfa_padded, sfb_size, sfb_padded);
+    cutlass::device_memory::allocation<uint8_t> dev_A(size_A_packed);
+    cutlass::device_memory::allocation<uint8_t> dev_B(size_B_packed);
+    cutlass::device_memory::allocation<uint8_t> dev_SFA(sfa_padded);
+    cutlass::device_memory::allocation<uint8_t> dev_SFB(sfb_padded);
+    cutlass::device_memory::allocation<ElementC> dev_C(size_C);
+    cutlass::device_memory::allocation<ElementD> dev_D_out(size_D);
 
-    // Allocate device memory using HostTensor for proper alignment
-    cutlass::HostTensor<DataTypeA, cutlass::layout::PackedVectorLayout> block_A;
-    cutlass::HostTensor<ScaleFactorType, cutlass::layout::PackedVectorLayout> block_SFA;
-    cutlass::HostTensor<DataTypeA, cutlass::layout::PackedVectorLayout> block_B;
-    cutlass::HostTensor<ScaleFactorType, cutlass::layout::PackedVectorLayout> block_SFB;
-    cutlass::HostTensor<ElementC, cutlass::layout::PackedVectorLayout> block_C;
-    cutlass::HostTensor<ElementD, cutlass::layout::PackedVectorLayout> block_D_out;
+    cudaError_t err;
 
-    auto layout_A = cute::make_layout(cute::make_shape(M, K, 1), stride_A);
-    auto layout_B = cute::make_layout(cute::make_shape(N, K, 1), stride_B);
-    auto layout_C_cute = cute::make_layout(cute::make_shape(M, N, 1), stride_C);
+    // Initialize C to zero
+    err = cudaMemsetAsync(dev_C.get(), 0, size_C * sizeof(ElementC), stream);
+    if (err != cudaSuccess) return err;
 
-    block_A.reset(cutlass::make_Coord(size_A_padded));
-    block_B.reset(cutlass::make_Coord(size_B_padded));
-    block_C.reset(cutlass::make_Coord(size_C_padded));
-    block_D_out.reset(cutlass::make_Coord(size_D_padded));
-    block_SFA.reset(cutlass::make_Coord(sfa_padded));
-    block_SFB.reset(cutlass::make_Coord(sfb_padded));
+    // =========================================================================
+    // GPU-side quantization: BF16 -> NVF4 (no host copies!)
+    // =========================================================================
 
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Buffers allocated\n");
+    constexpr int BLOCK_SIZE = 256;
 
-    // Use CUTLASS TensorFill for proper initialization
-    cutlass::reference::host::TensorFill(block_A.host_view(), DataTypeA(0));
-    cutlass::reference::host::TensorFill(block_B.host_view(), DataTypeA(0));
-    cutlass::reference::host::TensorFill(block_C.host_view(), ElementC(0.0f));
-    cutlass::reference::host::TensorFill(block_SFA.host_view(), ScaleFactorType(1.0f));
-    cutlass::reference::host::TensorFill(block_SFB.host_view(), ScaleFactorType(1.0f));
-
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Data initialized (TensorFill)\n");
-
-    // Sync to device
-    block_A.sync_device();
-    block_B.sync_device();
-    block_C.sync_device();
-    block_SFA.sync_device();
-    block_SFB.sync_device();
-
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Data prepared\n");
-
-    // ========================================================================
-    // Alignment Check: TMA requires 128B alignment for all base pointers
-    // ========================================================================
-    auto check_alignment = [](const void* ptr, const char* name) {
-        uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-        bool aligned = (addr & 0x7F) == 0;
-        fprintf(stderr, "[ALIGN CHECK] %s: %p -> %s (offset: %zu)\n",
-                name, ptr, aligned ? "OK" : "MISALIGNED", addr & 0x7F);
-        return aligned;
-    };
-
-    bool all_aligned = true;
-    all_aligned &= check_alignment(block_A.device_data(), "A_data");
-    all_aligned &= check_alignment(block_B.device_data(), "B_data");
-    all_aligned &= check_alignment(block_C.device_data(), "C_data");
-    all_aligned &= check_alignment(block_D_out.device_data(), "D_out");
-    all_aligned &= check_alignment(block_SFA.device_data(), "SFA");
-    all_aligned &= check_alignment(block_SFB.device_data(), "SFB");
-
-    if (!all_aligned) {
-        fprintf(stderr, "[NVF4 BF16 GEMM SM120] WARNING: Misaligned buffers detected!\n");
+    // Quantize A: [M, K] RowMajor BF16 -> packed NVF4
+    {
+        int total_pairs = (M * K) / 2;
+        int grid_size = (total_pairs + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        quantize_A_gpu_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+            A, dev_A.get(), M, K
+        );
     }
 
-    // Build GEMM arguments (matching example 79a structure)
+    // Quantize B: [K, N] RowMajor BF16 -> [N, K] ColMajor packed NVF4
+    {
+        int num_k_pairs = K / 2;
+        dim3 grid((num_k_pairs + BLOCK_SIZE - 1) / BLOCK_SIZE, N);
+        quantize_B_gpu_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+            B, dev_B.get(), K, N
+        );
+    }
+
+    // Initialize scale factors to 1.0 (UE4M3 encoding: 0x38)
+    {
+        int grid_sfa = (sfa_padded + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        int grid_sfb = (sfb_padded + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        init_scale_factors_kernel<<<grid_sfa, BLOCK_SIZE, 0, stream>>>(
+            dev_SFA.get(), static_cast<int>(sfa_padded)
+        );
+        init_scale_factors_kernel<<<grid_sfb, BLOCK_SIZE, 0, stream>>>(
+            dev_SFB.get(), static_cast<int>(sfb_padded)
+        );
+    }
+
+    // Wait for quantization to complete
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) return err;
+
+    // Build GEMM arguments using device memory directly
     typename Gemm::Arguments arguments {
         cutlass::gemm::GemmUniversalMode::kGemm,
         {M, N, K, 1},
         { // Mainloop arguments
-            block_A.device_data(), stride_A,
-            block_B.device_data(), stride_B,
-            block_SFA.device_data(), layout_SFA,
-            block_SFB.device_data(), layout_SFB
+            reinterpret_cast<DataTypeA*>(dev_A.get()), stride_A,
+            reinterpret_cast<DataTypeA*>(dev_B.get()), stride_B,
+            reinterpret_cast<ScaleFactorType*>(dev_SFA.get()), layout_SFA,
+            reinterpret_cast<ScaleFactorType*>(dev_SFB.get()), layout_SFB
         },
         { // Epilogue arguments
             {alpha, beta},
-            block_C.device_data(), stride_C,
-            block_D_out.device_data(), stride_D
+            dev_C.get(), stride_C,
+            dev_D_out.get(), stride_D
         }
     };
 
@@ -413,52 +409,36 @@ cudaError_t gemm_nvf4_bf16(
 
     cutlass::Status status = gemm_op.can_implement(arguments);
     if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "[NVF4 BF16 GEMM SM120] can_implement failed: %d\n", static_cast<int>(status));
+        fprintf(stderr, "[NVF4 GEMM] can_implement failed: %d\n", static_cast<int>(status));
         return cudaErrorInvalidValue;
     }
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] can_implement OK\n");
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Workspace size: %zu bytes\n", workspace_size);
 
     status = gemm_op.initialize(arguments, workspace.get());
     if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "[NVF4 BF16 GEMM SM120] initialize failed: %d\n", static_cast<int>(status));
+        fprintf(stderr, "[NVF4 GEMM] initialize failed: %d\n", static_cast<int>(status));
         return cudaErrorInvalidValue;
     }
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] initialize OK\n");
 
-    status = gemm_op.run();
-    cudaError_t launch_err = cudaGetLastError();
+    status = gemm_op.run(stream);
     if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "[NVF4 BF16 GEMM SM120] run failed: status=%d, cuda=%s\n",
-                static_cast<int>(status), cudaGetErrorString(launch_err));
+        fprintf(stderr, "[NVF4 GEMM] run failed: %d\n", static_cast<int>(status));
         return cudaErrorLaunchFailure;
     }
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] run OK\n");
 
-    // Sync immediately after run to catch any kernel errors
-    cudaError_t kernel_err = cudaDeviceSynchronize();
-    if (kernel_err != cudaSuccess) {
-        fprintf(stderr, "[NVF4 BF16 GEMM SM120] Kernel execution failed: %s\n",
-                cudaGetErrorString(kernel_err));
-        return kernel_err;
-    }
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Kernel sync OK\n");
-
-    // Copy result to user buffer
-    cudaError_t err = cudaMemcpy(D, block_D_out.device_data(),
-                                 size_D * sizeof(nv_bfloat16),
-                                 cudaMemcpyDeviceToDevice);
+    // Copy result from CUTLASS output buffer to user-provided D buffer (D2D only!)
+    err = cudaMemcpyAsync(D, dev_D_out.get(),
+                          size_D * sizeof(nv_bfloat16),
+                          cudaMemcpyDeviceToDevice, stream);
     if (err != cudaSuccess) {
-        fprintf(stderr, "[NVF4 BF16 GEMM SM120] Memcpy failed: %s\n",
-                cudaGetErrorString(err));
         return err;
     }
-    fprintf(stderr, "[NVF4 BF16 GEMM SM120] Complete\n");
 
-    return cudaSuccess;
+    // Wait for everything to complete
+    err = cudaStreamSynchronize(stream);
+    return err;
 }
 
 bool is_available() {

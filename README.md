@@ -548,6 +548,19 @@ For LLM decode (M=1), custom GEMV kernels significantly outperform cuBLASLt:
 
 > **Note:** For large K (8192+), NVF4 matches BF16 speed while using 73% less memory. Ideal for memory-constrained LLM inference.
 
+### NVF4-BF16 GEMM Performance (RTX 5090, SM120a)
+
+4-bit NVF4 GEMM with BF16 I/O using CUTLASS block-scaled tensor operations:
+
+| Matrix Size | TFLOPS (median) | TFLOPS (max) | Time (ms) |
+|-------------|-----------------|--------------|-----------|
+| 4096×4096 | 53 | 55 | 2.6 |
+| 8192×8192 | 141 | 143 | 7.8 |
+| 12288×12288 | 201 | 216 | 18.5 |
+| 16384×16384 | **246** | **252** | 35.8 |
+
+> **Note:** GPU-side BF16→NVF4 quantization with unit scaling. No host-device copies. Ideal for memory-bound LLM inference with 4x bandwidth reduction vs BF16.
+
 ---
 
 ## Installation
