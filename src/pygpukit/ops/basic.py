@@ -25,11 +25,13 @@ from pygpukit.ops._common import (
 from pygpukit.ops.elementwise import (
     add,
     add_inplace,
+    clamp,
     copy_to,
     div,
     mul,
     mul_inplace,
     sub,
+    where,
 )
 
 # Re-export embedding operations
@@ -79,17 +81,22 @@ from pygpukit.ops.nn import (
     sdpa_causal,
     sdpa_causal_fixed_cache,
     sdpa_causal_fixed_cache_ptr,
+    sigmoid,
     silu,
     slice_rows_range_ptr,
     split_qkv_batch,
+    tanh,
 )
 
 # Re-export reduction operations
 from pygpukit.ops.reduction import (
+    argmax,
     max,
     mean,
+    min,
     softmax,
     sum,
+    sum_axis,
 )
 
 # Re-export sampling operations
@@ -118,9 +125,15 @@ from pygpukit.ops.tensor import (
 
 # Re-export unary operations
 from pygpukit.ops.unary import (
+    abs,
+    cos,
     exp,
     log,
+    neg,
     relu,
+    rsqrt,
+    sin,
+    sqrt,
 )
 
 __all__ = [
@@ -136,15 +149,26 @@ __all__ = [
     "add_inplace",
     "mul_inplace",
     "copy_to",
+    "clamp",
+    "where",
     # Unary
+    "abs",
+    "cos",
     "exp",
     "log",
+    "neg",
     "relu",
+    "rsqrt",
+    "sin",
+    "sqrt",
     # Reduction
-    "sum",
-    "mean",
+    "argmax",
     "max",
+    "mean",
+    "min",
     "softmax",
+    "sum",
+    "sum_axis",
     # Matmul
     "matmul",
     "batched_matmul",
@@ -168,7 +192,9 @@ __all__ = [
     "quantize_bf16_to_nvf4",
     # Neural Network
     "gelu",
+    "sigmoid",
     "silu",
+    "tanh",
     "layernorm",
     "rmsnorm",
     "bias_add_inplace",

@@ -144,6 +144,78 @@ void init_ops_bindings(py::module_& m) {
           py::arg("a"), py::arg("out"),
           "Element-wise ReLU with output array");
 
+    // Sin
+    m.def("sin", py::overload_cast<const GPUArray&>(&ops::sin),
+          py::arg("a"),
+          "Element-wise sine");
+
+    m.def("sin_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::sin),
+          py::arg("a"), py::arg("out"),
+          "Element-wise sine with output array");
+
+    // Cos
+    m.def("cos", py::overload_cast<const GPUArray&>(&ops::cos),
+          py::arg("a"),
+          "Element-wise cosine");
+
+    m.def("cos_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::cos),
+          py::arg("a"), py::arg("out"),
+          "Element-wise cosine with output array");
+
+    // Sqrt
+    m.def("sqrt", py::overload_cast<const GPUArray&>(&ops::sqrt),
+          py::arg("a"),
+          "Element-wise square root");
+
+    m.def("sqrt_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::sqrt),
+          py::arg("a"), py::arg("out"),
+          "Element-wise square root with output array");
+
+    // Rsqrt
+    m.def("rsqrt", py::overload_cast<const GPUArray&>(&ops::rsqrt),
+          py::arg("a"),
+          "Element-wise reciprocal square root: 1/sqrt(x)");
+
+    m.def("rsqrt_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::rsqrt),
+          py::arg("a"), py::arg("out"),
+          "Element-wise reciprocal square root with output array");
+
+    // Abs
+    m.def("abs", py::overload_cast<const GPUArray&>(&ops::abs),
+          py::arg("a"),
+          "Element-wise absolute value");
+
+    m.def("abs_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::abs),
+          py::arg("a"), py::arg("out"),
+          "Element-wise absolute value with output array");
+
+    // Neg
+    m.def("neg", py::overload_cast<const GPUArray&>(&ops::neg),
+          py::arg("a"),
+          "Element-wise negation: -x");
+
+    m.def("neg_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::neg),
+          py::arg("a"), py::arg("out"),
+          "Element-wise negation with output array");
+
+    // Clamp
+    m.def("clamp", py::overload_cast<const GPUArray&, float, float>(&ops::clamp),
+          py::arg("a"), py::arg("min_val"), py::arg("max_val"),
+          "Element-wise clamp: clamp(x, min, max)");
+
+    m.def("clamp_", py::overload_cast<const GPUArray&, GPUArray&, float, float>(&ops::clamp),
+          py::arg("a"), py::arg("out"), py::arg("min_val"), py::arg("max_val"),
+          "Element-wise clamp with output array");
+
+    // Where (conditional select)
+    m.def("where", py::overload_cast<const GPUArray&, const GPUArray&, const GPUArray&>(&ops::where),
+          py::arg("cond"), py::arg("a"), py::arg("b"),
+          "Conditional select: where(cond, a, b) = cond ? a : b");
+
+    m.def("where_", py::overload_cast<const GPUArray&, const GPUArray&, const GPUArray&, GPUArray&>(&ops::where),
+          py::arg("cond"), py::arg("a"), py::arg("b"), py::arg("out"),
+          "Conditional select with output array");
+
     // ========================================================================
     // Matrix operations
     // ========================================================================
@@ -180,6 +252,19 @@ void init_ops_bindings(py::module_& m) {
     m.def("max", &ops::max,
           py::arg("a"),
           "Max of all elements (float32/float64 only), returns scalar GPUArray");
+
+    m.def("min", &ops::min,
+          py::arg("a"),
+          "Min of all elements, returns scalar GPUArray");
+
+    m.def("argmax", &ops::argmax,
+          py::arg("a"),
+          "Index of maximum element, returns int64 GPUArray");
+
+    m.def("sum_axis", &ops::sum_axis,
+          py::arg("a"), py::arg("axis"),
+          "Sum along specified axis (0 or 1) for 2D tensors.\n"
+          "axis=0: sum rows -> [N], axis=1: sum columns -> [M]");
 
     // ========================================================================
     // Neural Network operations
@@ -247,6 +332,24 @@ void init_ops_bindings(py::module_& m) {
     m.def("silu_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::silu),
           py::arg("input"), py::arg("out"),
           "SiLU with output buffer (for CUDA Graph capture)");
+
+    // Sigmoid activation
+    m.def("sigmoid", py::overload_cast<const GPUArray&>(&ops::sigmoid),
+          py::arg("input"),
+          "Sigmoid activation: y = 1 / (1 + exp(-x))");
+
+    m.def("sigmoid_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::sigmoid),
+          py::arg("input"), py::arg("out"),
+          "Sigmoid with output buffer (for CUDA Graph capture)");
+
+    // Tanh activation
+    m.def("tanh", py::overload_cast<const GPUArray&>(&ops::tanh),
+          py::arg("input"),
+          "Tanh activation");
+
+    m.def("tanh_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::tanh),
+          py::arg("input"), py::arg("out"),
+          "Tanh with output buffer (for CUDA Graph capture)");
 
     // RoPE (Rotary Position Embedding) - In-place
     m.def("rope_inplace", &ops::rope_inplace,

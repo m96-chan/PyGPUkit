@@ -112,6 +112,67 @@ def _silu_native(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
         return GPUArray._wrap_native(c_native)
 
 
+def sigmoid(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
+    """Sigmoid activation: y = 1 / (1 + exp(-x)).
+
+    Args:
+        a: Input array.
+        out: Optional pre-allocated output array.
+
+    Returns:
+        A new GPUArray containing the sigmoid-activated values.
+    """
+    _validate_float_dtype(a, "sigmoid")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        a_native = a._get_native()
+
+        if out is not None:
+            out_native = out._get_native()
+            native.sigmoid_(a_native, out_native)
+            return out
+        else:
+            return GPUArray._wrap_native(native.sigmoid(a_native))
+    else:
+        x = a.to_numpy()
+        result = 1.0 / (1.0 + np.exp(-x))
+        return from_numpy(result)
+
+
+def tanh(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
+    """Tanh activation.
+
+    Args:
+        a: Input array.
+        out: Optional pre-allocated output array.
+
+    Returns:
+        A new GPUArray containing the tanh-activated values.
+    """
+    _validate_float_dtype(a, "tanh")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        a_native = a._get_native()
+
+        if out is not None:
+            out_native = out._get_native()
+            native.tanh_(a_native, out_native)
+            return out
+        else:
+            return GPUArray._wrap_native(native.tanh(a_native))
+    else:
+        x = a.to_numpy()
+        return from_numpy(np.tanh(x))
+
+
 # =============================================================================
 # Normalization Layers
 # =============================================================================

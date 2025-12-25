@@ -34,6 +34,14 @@ GPUArray sub(const GPUArray& a, const GPUArray& b);
 void div(const GPUArray& a, const GPUArray& b, GPUArray& c);
 GPUArray div(const GPUArray& a, const GPUArray& b);
 
+// Clamp: c = clamp(a, min_val, max_val)
+void clamp(const GPUArray& a, GPUArray& c, float min_val, float max_val);
+GPUArray clamp(const GPUArray& a, float min_val, float max_val);
+
+// Where: c = cond ? a : b (conditional select)
+void where(const GPUArray& cond, const GPUArray& a, const GPUArray& b, GPUArray& c);
+GPUArray where(const GPUArray& cond, const GPUArray& a, const GPUArray& b);
+
 // ============================================================================
 // Unary Operations
 // ============================================================================
@@ -50,6 +58,30 @@ GPUArray log(const GPUArray& a);
 void relu(const GPUArray& a, GPUArray& c);
 GPUArray relu(const GPUArray& a);
 
+// Sin: c = sin(a)
+void sin(const GPUArray& a, GPUArray& c);
+GPUArray sin(const GPUArray& a);
+
+// Cos: c = cos(a)
+void cos(const GPUArray& a, GPUArray& c);
+GPUArray cos(const GPUArray& a);
+
+// Sqrt: c = sqrt(a)
+void sqrt(const GPUArray& a, GPUArray& c);
+GPUArray sqrt(const GPUArray& a);
+
+// Rsqrt: c = 1/sqrt(a)
+void rsqrt(const GPUArray& a, GPUArray& c);
+GPUArray rsqrt(const GPUArray& a);
+
+// Abs: c = |a|
+void abs(const GPUArray& a, GPUArray& c);
+GPUArray abs(const GPUArray& a);
+
+// Neg: c = -a
+void neg(const GPUArray& a, GPUArray& c);
+GPUArray neg(const GPUArray& a);
+
 // ============================================================================
 // Reduction Operations
 // ============================================================================
@@ -62,6 +94,16 @@ GPUArray mean(const GPUArray& a);
 
 // Max: scalar max of all elements
 GPUArray max(const GPUArray& a);
+
+// Min: scalar min of all elements
+GPUArray min(const GPUArray& a);
+
+// Argmax: index of maximum element
+GPUArray argmax(const GPUArray& a);
+
+// Sum with axis: sum along specified axis (0 or 1)
+// input: [M, N], axis=0 -> output: [N], axis=1 -> output: [M]
+GPUArray sum_axis(const GPUArray& a, int axis);
 
 // ============================================================================
 // Matrix Multiplication
@@ -115,6 +157,14 @@ GPUArray silu(const GPUArray& input);
 
 // SiLU with output buffer (for CUDA Graph capture)
 void silu(const GPUArray& input, GPUArray& out);
+
+// Sigmoid activation: y = 1 / (1 + exp(-x))
+GPUArray sigmoid(const GPUArray& input);
+void sigmoid(const GPUArray& input, GPUArray& out);
+
+// Tanh activation
+GPUArray tanh(const GPUArray& input);
+void tanh(const GPUArray& input, GPUArray& out);
 
 // RoPE (Rotary Position Embedding) - In-place
 // q: [seq_len, n_heads_q, head_dim]

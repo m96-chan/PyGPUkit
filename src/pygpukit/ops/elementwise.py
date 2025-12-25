@@ -241,3 +241,60 @@ def copy_to(src: GPUArray, dst: GPUArray) -> None:
     src_native = src._get_native()
     dst_native = dst._get_native()
     native.copy_to(src_native, dst_native)
+
+
+def clamp(a: GPUArray, min_val: float, max_val: float) -> GPUArray:
+    """Element-wise clamp: clamp(x, min, max).
+
+    Args:
+        a: Input array (float types).
+        min_val: Minimum value.
+        max_val: Maximum value.
+
+    Returns:
+        A new GPUArray with values clamped to [min_val, max_val].
+    """
+    import numpy as np
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.clamp(a._get_native(), min_val, max_val))
+    else:
+        a_np = a.to_numpy()
+        return from_numpy(np.clip(a_np, min_val, max_val))
+
+
+def where(cond: GPUArray, a: GPUArray, b: GPUArray) -> GPUArray:
+    """Conditional select: where(cond, a, b) = cond ? a : b.
+
+    Args:
+        cond: Boolean condition array (uint8 or int8, 0=False, nonzero=True).
+        a: Values to use where condition is True.
+        b: Values to use where condition is False.
+
+    Returns:
+        A new GPUArray with values selected from a or b based on cond.
+    """
+    import numpy as np
+
+    _validate_same_shape(a, b, "where")
+    _validate_same_dtype(a, b, "where")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(
+            native.where(cond._get_native(), a._get_native(), b._get_native())
+        )
+    else:
+        cond_np: np.ndarray = cond.to_numpy().astype(bool)
+        a_np = a.to_numpy()
+        b_np = b.to_numpy()
+        return from_numpy(np.where(cond_np, a_np, b_np))

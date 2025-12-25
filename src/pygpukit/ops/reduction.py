@@ -222,3 +222,80 @@ def _softmax_native_nd(input: GPUArray) -> GPUArray:
 
     # Reshape back to original shape
     return result_2d.reshape(original_shape)
+
+
+def min(a: GPUArray) -> GPUArray:
+    """Min of all elements.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A scalar GPUArray (shape [1]) containing the minimum value.
+    """
+    _validate_float_dtype(a, "min")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.min(a._get_native()))
+    else:
+        a_np = a.to_numpy()
+        return from_numpy(np.array([np.min(a_np)], dtype=a_np.dtype))
+
+
+def argmax(a: GPUArray) -> GPUArray:
+    """Index of maximum element.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A scalar GPUArray (shape [1], dtype int64) containing the index of the maximum value.
+    """
+    _validate_float_dtype(a, "argmax")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.argmax(a._get_native()))
+    else:
+        a_np = a.to_numpy()
+        return from_numpy(np.array([np.argmax(a_np)], dtype=np.int64))
+
+
+def sum_axis(a: GPUArray, axis: int) -> GPUArray:
+    """Sum along specified axis for 2D tensors.
+
+    Args:
+        a: Input 2D array [M, N] (float types).
+        axis: Axis to sum along (0 or 1).
+            axis=0: sum rows -> output [N]
+            axis=1: sum columns -> output [M]
+
+    Returns:
+        A GPUArray with the sum along the specified axis.
+
+    Raises:
+        ValueError: If input is not 2D or axis is not 0 or 1.
+    """
+    _validate_float_dtype(a, "sum_axis")
+    if a.ndim != 2:
+        raise ValueError(f"sum_axis requires 2D input, got {a.ndim}D")
+    if axis not in (0, 1):
+        raise ValueError(f"sum_axis: axis must be 0 or 1, got {axis}")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.sum_axis(a._get_native(), axis))
+    else:
+        a_np = a.to_numpy()
+        return from_numpy(np.sum(a_np, axis=axis))

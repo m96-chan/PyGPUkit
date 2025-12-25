@@ -262,5 +262,117 @@ GPUArray div(const GPUArray& a, const GPUArray& b) {
     return c;
 }
 
+// ============================================================================
+// Clamp
+// ============================================================================
+
+void clamp(const GPUArray& a, GPUArray& c, float min_val, float max_val) {
+    validate_same_shape(a, c, "clamp");
+    validate_same_dtype(a, c, "clamp");
+
+    if (a.dtype() != DataType::Float32 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("clamp only supports float types");
+    }
+
+    size_t n = a.size();
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    switch (a.dtype()) {
+        case DataType::Float32:
+            clamp_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const float*>(a.data()),
+                static_cast<float*>(c.data()),
+                min_val, max_val, n);
+            break;
+        case DataType::Float16:
+            clamp_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __half*>(a.data()),
+                static_cast<__half*>(c.data()),
+                min_val, max_val, n);
+            break;
+        case DataType::BFloat16:
+            clamp_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<__nv_bfloat16*>(c.data()),
+                min_val, max_val, n);
+            break;
+        default:
+            break;
+    }
+    sync_and_check("clamp kernel failed");
+}
+
+GPUArray clamp(const GPUArray& a, float min_val, float max_val) {
+    if (a.dtype() != DataType::Float32 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("clamp only supports float types");
+    }
+    GPUArray c(a.shape(), a.dtype());
+    clamp(a, c, min_val, max_val);
+    return c;
+}
+
+// ============================================================================
+// Where (conditional select)
+// ============================================================================
+
+void where(const GPUArray& cond, const GPUArray& a, const GPUArray& b, GPUArray& c) {
+    validate_same_shape(a, b, "where");
+    validate_same_shape(a, c, "where");
+    validate_same_dtype(a, b, "where");
+    validate_same_dtype(a, c, "where");
+
+    if (cond.size() != a.size()) {
+        throw std::runtime_error("where: condition shape must match input shape");
+    }
+    if (cond.dtype() != DataType::UInt8 && cond.dtype() != DataType::Int8) {
+        throw std::runtime_error("where: condition must be uint8 or int8 type (boolean)");
+    }
+
+    if (a.dtype() != DataType::Float32 &&
+        a.dtype() != DataType::Float16 && a.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("where only supports float types");
+    }
+
+    size_t n = a.size();
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    switch (a.dtype()) {
+        case DataType::Float32:
+            where_f32_kernel<<<grid_size, block_size>>>(
+                static_cast<const uint8_t*>(cond.data()),
+                static_cast<const float*>(a.data()),
+                static_cast<const float*>(b.data()),
+                static_cast<float*>(c.data()), n);
+            break;
+        case DataType::Float16:
+            where_f16_kernel<<<grid_size, block_size>>>(
+                static_cast<const uint8_t*>(cond.data()),
+                static_cast<const __half*>(a.data()),
+                static_cast<const __half*>(b.data()),
+                static_cast<__half*>(c.data()), n);
+            break;
+        case DataType::BFloat16:
+            where_bf16_kernel<<<grid_size, block_size>>>(
+                static_cast<const uint8_t*>(cond.data()),
+                static_cast<const __nv_bfloat16*>(a.data()),
+                static_cast<const __nv_bfloat16*>(b.data()),
+                static_cast<__nv_bfloat16*>(c.data()), n);
+            break;
+        default:
+            break;
+    }
+    sync_and_check("where kernel failed");
+}
+
+GPUArray where(const GPUArray& cond, const GPUArray& a, const GPUArray& b) {
+    GPUArray c(a.shape(), a.dtype());
+    where(cond, a, b, c);
+    return c;
+}
+
 } // namespace ops
 } // namespace pygpukit
