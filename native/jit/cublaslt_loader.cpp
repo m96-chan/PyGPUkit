@@ -394,7 +394,7 @@ bool is_available() {
 
     // SM 120 (Blackwell GeForce) has cuBLASLt compatibility issues
     // AlgoGetHeuristic returns NOT_SUPPORTED (status=15) for most operations
-    // Disable cuBLASLt on SM >= 120 until CUDA/driver fixes this
+    // Disable cuBLASLt on SM >= 120 unless PYGPUKIT_CUBLASLT_SM120=1
     if (g_state.available.load(std::memory_order_relaxed)) {
         int device_id = 0;
         cudaGetDevice(&device_id);
@@ -402,8 +402,13 @@ bool is_available() {
         cudaGetDeviceProperties(&props, device_id);
         int sm_version = props.major * 10 + props.minor;
         if (sm_version >= 120) {
-            fprintf(stderr, "[cuBLASLt] Disabled on SM %d (Blackwell GeForce compatibility issue)\n", sm_version);
-            g_state.available.store(false, std::memory_order_relaxed);
+            const char* force_sm120 = std::getenv("PYGPUKIT_CUBLASLT_SM120");
+            if (force_sm120 && std::string(force_sm120) == "1") {
+                fprintf(stderr, "[cuBLASLt] Force-enabled on SM %d (PYGPUKIT_CUBLASLT_SM120=1)\n", sm_version);
+            } else {
+                fprintf(stderr, "[cuBLASLt] Disabled on SM %d (set PYGPUKIT_CUBLASLT_SM120=1 to force)\n", sm_version);
+                g_state.available.store(false, std::memory_order_relaxed);
+            }
         }
     }
 
