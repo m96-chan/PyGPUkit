@@ -157,6 +157,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/matmul_fp8_sm100.cu
     ops/matmul/matmul_fp8_sm120.cu
     ops/matmul/matmul_fp8_bf16_sm120.cu
+    ops/matmul/matmul_nvf4_bf16_sm120.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu

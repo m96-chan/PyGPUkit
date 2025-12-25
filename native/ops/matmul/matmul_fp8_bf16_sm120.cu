@@ -225,15 +225,14 @@ cudaError_t gemm_fp8_bf16(
     LayoutSFA layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(problem_shape);
     LayoutSFB layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(problem_shape);
 
-    fprintf(stderr, "[FP8 BF16 GEMM SM120] Scale layouts computed
-");
+    fprintf(stderr, "[FP8 BF16 GEMM SM120] Scale layouts computed\n");
 
-    size_t sfa_size = size(filter_zeros(layout_SFA));
-    size_t sfb_size = size(filter_zeros(layout_SFB));
+    size_t sfa_size = static_cast<size_t>(size(filter_zeros(layout_SFA)));
+    size_t sfb_size = static_cast<size_t>(size(filter_zeros(layout_SFB)));
 
     // Pad to at least 32 floats (128 bytes) for TMA alignment
-    size_t sfa_padded = std::max(sfa_size, size_t(32));
-    size_t sfb_padded = std::max(sfb_size, size_t(32));
+    size_t sfa_padded = (sfa_size > 32) ? sfa_size : 32;
+    size_t sfb_padded = (sfb_size > 32) ? sfb_size : 32;
 
     cutlass::device_memory::allocation<float> buf_SFA(sfa_padded);
     cutlass::device_memory::allocation<float> buf_SFB(sfb_padded);
@@ -242,6 +241,28 @@ cudaError_t gemm_fp8_bf16(
     auto* d_SFB = buf_SFB.get();
 
     fprintf(stderr, "[FP8 BF16 GEMM SM120] Buffers allocated\n");
+
+    // ========================================================================
+    // Alignment Check: TMA requires 128B alignment for all base pointers
+    // ========================================================================
+    auto check_alignment = [](const void* ptr, const char* name) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+        bool aligned = (addr & 0x7F) == 0;
+        fprintf(stderr, "[ALIGN CHECK] %s: %p -> %s (offset: %zu)\n",
+                name, ptr, aligned ? "OK" : "MISALIGNED", addr & 0x7F);
+        return aligned;
+    };
+
+    bool all_aligned = true;
+    all_aligned &= check_alignment(d_A_fp8, "A_fp8");
+    all_aligned &= check_alignment(d_B_fp8, "B_fp8");
+    all_aligned &= check_alignment(d_C_bf16, "C_bf16");
+    all_aligned &= check_alignment(d_SFA, "SFA");
+    all_aligned &= check_alignment(d_SFB, "SFB");
+
+    if (!all_aligned) {
+        fprintf(stderr, "[FP8 BF16 GEMM SM120] WARNING: Misaligned buffers detected!\n");
+    }
 
     // Quantize A and B
     int threads = 256;
@@ -284,6 +305,7 @@ cudaError_t gemm_fp8_bf16(
     auto* d_D_internal = buf_D_bf16.get();
 
     fprintf(stderr, "[FP8 BF16 GEMM SM120] Output buffer: internal=%p, user=%p\n", (void*)d_D_internal, (void*)D);
+    check_alignment(d_D_internal, "D_internal");
     typename Gemm::Arguments arguments{
         cutlass::gemm::GemmUniversalMode::kGemm,
         {M, N, K, 1},

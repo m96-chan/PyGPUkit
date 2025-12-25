@@ -895,9 +895,13 @@ def matmul_fp8_bf16_sm120(
     from pygpukit.core.dtypes import bfloat16
 
     if a.ndim != 2:
-        raise ValueError(f"matmul_fp8_bf16_sm120 requires 2D arrays, got {a.ndim}D for first argument")
+        raise ValueError(
+            f"matmul_fp8_bf16_sm120 requires 2D arrays, got {a.ndim}D for first argument"
+        )
     if b.ndim != 2:
-        raise ValueError(f"matmul_fp8_bf16_sm120 requires 2D arrays, got {b.ndim}D for second argument")
+        raise ValueError(
+            f"matmul_fp8_bf16_sm120 requires 2D arrays, got {b.ndim}D for second argument"
+        )
 
     if a.shape[1] != b.shape[0]:
         raise ValueError(
@@ -947,6 +951,106 @@ def _matmul_fp8_bf16_sm120_native(
 
     # Call FP8 BF16 GEMM
     native.gemm_fp8_bf16_sm120(a_native, b_native, out_native)
+
+    return out
+
+
+def nvf4_bf16_sm120_available() -> bool:
+    """Check if NVF4 (4-bit) BF16 GEMM is available on SM120 (Blackwell GeForce).
+
+    This variant uses NVF4 (4-bit float) for 2x memory bandwidth compared to FP8,
+    making it ideal for memory-bound LLM inference workloads.
+
+    Returns:
+        True if NVF4 BF16 SM120 GEMM is available, False otherwise.
+    """
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return native.nvf4_bf16_sm120_available()
+    else:
+        return False
+
+
+def matmul_nvf4_bf16_sm120(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """NVF4 (4-bit) GEMM with BF16 input/output for SM120 (Blackwell GeForce).
+
+    This variant uses NVF4 (float_e2m1_t, 4-bit) for the internal computation,
+    providing 2x memory bandwidth compared to FP8. Ideal for memory-bound
+    LLM inference workloads.
+
+    Data flow: BF16 input -> NVF4 quantize with block scaling -> GEMM -> BF16 output
+
+    Args:
+        a: First input array (M x K), BF16.
+        b: Second input array (K x N), BF16.
+        out: Optional output array (M x N), BF16.
+
+    Returns:
+        The result GPUArray (M x N), BF16.
+
+    Raises:
+        ValueError: If arrays are not 2D, not BF16, or dimensions don't match.
+        RuntimeError: If NVF4 BF16 SM120 GEMM is not available.
+    """
+    from pygpukit.core.dtypes import bfloat16
+
+    if a.ndim != 2:
+        raise ValueError(f"matmul_nvf4_bf16_sm120 requires 2D arrays, got {a.ndim}D")
+    if b.ndim != 2:
+        raise ValueError(f"matmul_nvf4_bf16_sm120 requires 2D arrays, got {b.ndim}D")
+
+    if a.shape[1] != b.shape[0]:
+        raise ValueError(f"matmul_nvf4_bf16_sm120 dimension mismatch: {a.shape} @ {b.shape}")
+
+    if a.dtype != bfloat16 or b.dtype != bfloat16:
+        raise ValueError("matmul_nvf4_bf16_sm120 requires bfloat16 inputs")
+
+    if not nvf4_bf16_sm120_available():
+        raise RuntimeError("NVF4 BF16 SM120 GEMM is not available. Requires SM120+ GPU.")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _matmul_nvf4_bf16_sm120_native(a, b, out=out)
+    else:
+        raise RuntimeError("NVF4 BF16 SM120 GEMM requires native backend")
+
+
+def _matmul_nvf4_bf16_sm120_native(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Native C++ implementation of NVF4 BF16 GEMM for SM120."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+
+    # Get native arrays
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Allocate output if needed
+    if out is None:
+        M, K = a.shape
+        N = b.shape[1]
+        out_native = native.empty([M, N], native.DataType.BFloat16)
+        out = GPUArray._wrap_native(out_native)
+    else:
+        out_native = out._get_native()
+
+    # Call NVF4 BF16 GEMM
+    native.gemm_nvf4_bf16_sm120(a_native, b_native, out_native)
 
     return out
 
