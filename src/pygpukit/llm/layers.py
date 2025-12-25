@@ -26,6 +26,7 @@ from pygpukit.ops.basic import (
     concat_axis0,
     copy_to,
     gelu,
+    gemv_bf16,
     kv_cache_prefill_gqa,
     kv_cache_update_gqa,
     layernorm,
@@ -58,7 +59,13 @@ class Linear:
     """Linear layer: y = xW^T + b
 
     Weights are stored as [out_features, in_features] (PyTorch convention).
+
+    For M=1 (single token decode), uses custom GEMV kernel which is 4-6x faster
+    than cuBLASLt matmul. Automatically falls back to matmul for batch > 1.
     """
+
+    # Class-level flag to enable/disable GEMV optimization
+    _use_gemv: bool = True
 
     def __init__(self, weight: GPUArray, bias: GPUArray | None = None):
         if weight.ndim != 2:
@@ -85,7 +92,23 @@ class Linear:
         if self._weight_t is None:
             self._weight_t = transpose(self.weight)
 
-        y = matmul(x, self._weight_t, out=out)
+        # Use GEMV for M=1 with BF16 (4-6x faster than cuBLASLt)
+        use_gemv = Linear._use_gemv and x.shape[0] == 1 and x.dtype == dt_bfloat16
+
+        if use_gemv:
+            # GEMV path: zero-copy view to 1D, call gemv_bf16, view back to 2D
+            x_1d = x.view((self.in_features,))
+            y_1d = gemv_bf16(x_1d, self._weight_t)
+
+            if out is not None:
+                # Copy to output buffer
+                copy_to(y_1d.view((1, self.out_features)), out)
+                y = out
+            else:
+                y = y_1d.view((1, self.out_features))
+        else:
+            # Standard matmul path
+            y = matmul(x, self._weight_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)
