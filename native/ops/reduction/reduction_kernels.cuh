@@ -325,6 +325,123 @@ __global__ void reduce_max_bf16_kernel(const __nv_bfloat16* __restrict__ input, 
 }
 
 // ============================================================================
+// Min reduction kernels
+// ============================================================================
+
+__device__ __forceinline__ float warp_reduce_min(float val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = fminf(val, __shfl_down_sync(0xffffffff, val, offset));
+    }
+    return val;
+}
+
+__global__ void reduce_min_f32_kernel(const float* __restrict__ input, float* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float min_val = INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        min_val = fminf(min_val, input[i]);
+    }
+
+    min_val = warp_reduce_min(min_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = min_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        min_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : INFINITY;
+        min_val = warp_reduce_min(min_val);
+        if (lane == 0) {
+            int* addr = (int*)output;
+            int expected = *addr;
+            while (min_val < __int_as_float(expected)) {
+                int old = atomicCAS(addr, expected, __float_as_int(min_val));
+                if (old == expected) break;
+                expected = old;
+            }
+        }
+    }
+}
+
+__global__ void reduce_min_f16_kernel(const __half* __restrict__ input, __half* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float min_val = INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        min_val = fminf(min_val, __half2float(input[i]));
+    }
+
+    min_val = warp_reduce_min(min_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = min_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        min_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : INFINITY;
+        min_val = warp_reduce_min(min_val);
+        if (lane == 0) {
+            float old_val = __half2float(*output);
+            if (min_val < old_val) {
+                *output = __float2half(min_val);
+            }
+        }
+    }
+}
+
+__global__ void reduce_min_bf16_kernel(const __nv_bfloat16* __restrict__ input, __nv_bfloat16* __restrict__ output, size_t n) {
+    __shared__ float shared[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float min_val = INFINITY;
+    for (size_t i = idx; i < n; i += stride) {
+        min_val = fminf(min_val, bf16_to_float(input[i]));
+    }
+
+    min_val = warp_reduce_min(min_val);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared[warp_id] = min_val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        min_val = (tid < (blockDim.x + 31) / 32) ? shared[lane] : INFINITY;
+        min_val = warp_reduce_min(min_val);
+        if (lane == 0) {
+            float old_val = bf16_to_float(*output);
+            if (min_val < old_val) {
+                *output = float_to_bf16(min_val);
+            }
+        }
+    }
+}
+
+__global__ void init_min_f32_kernel(float* output) { *output = INFINITY; }
+__global__ void init_min_f16_kernel(__half* output) { *output = __float2half(INFINITY); }
+__global__ void init_min_bf16_kernel(__nv_bfloat16* output) { *output = float_to_bf16(INFINITY); }
+
+// ============================================================================
 // Argmax reduction kernels - find index of maximum value
 // ============================================================================
 
