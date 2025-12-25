@@ -530,6 +530,24 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 
 > **Note:** CUTLASS is automatic for compatible sizes (16-aligned). Use `PYGPUKIT_NO_TF32=1` for full FP32 precision.
 
+### GEMV Performance (RTX 5090, SM120a)
+
+For LLM decode (M=1), custom GEMV kernels significantly outperform cuBLASLt:
+
+| Model Layer | K | N | cuBLASLt | BF16 GEMV | NVF4 GEMV | Memory |
+|-------------|------|-------|----------|-----------|-----------|--------|
+| Qwen-7B hidden | 4096 | 4096 | 413us | **97us** | 152us | 73% less |
+| Qwen-7B MLP | 4096 | 11008 | 418us | **96us** | 153us | 73% less |
+| Qwen-72B hidden | 8192 | 8192 | 799us | 266us | **265us** | 73% less |
+| Qwen-72B MLP | 8192 | 29568 | 1603us | **375us** | 454us | 73% less |
+
+| Kernel | Description | Use Case |
+|--------|-------------|----------|
+| **BF16 GEMV** | Custom BF16 kernel optimized for M=1 | Speed priority |
+| **NVF4 GEMV** | 4-bit NVF4 weights with block scaling | Memory priority (73% reduction) |
+
+> **Note:** For large K (8192+), NVF4 matches BF16 speed while using 73% less memory. Ideal for memory-constrained LLM inference.
+
 ---
 
 ## Installation
