@@ -1931,6 +1931,93 @@ __global__ void spectral_contrast_kernel(
     contrast[frame_idx * n_bands + band_idx] = logf(peak + 1e-10f) - logf(valley + 1e-10f);
 }
 
+// ============================================================================
+// Conv1D - 1D convolution for audio/signal processing
+// Input: [batch, in_channels, length]
+// Kernel: [out_channels, in_channels, kernel_size]
+// Output: [batch, out_channels, out_length]
+// ============================================================================
+
+__global__ void conv1d_f32_kernel(
+    const float* __restrict__ input,    // [B, C_in, L]
+    const float* __restrict__ weight,   // [C_out, C_in, K]
+    const float* __restrict__ bias,     // [C_out] or nullptr
+    float* __restrict__ output,         // [B, C_out, L_out]
+    int batch, int in_channels, int out_channels,
+    int in_length, int kernel_size, int stride, int padding
+) {
+    int out_length = (in_length + 2 * padding - kernel_size) / stride + 1;
+    int total = batch * out_channels * out_length;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    int b = idx / (out_channels * out_length);
+    int rem = idx % (out_channels * out_length);
+    int oc = rem / out_length;
+    int ol = rem % out_length;
+
+    float sum = 0.0f;
+    int in_start = ol * stride - padding;
+
+    for (int ic = 0; ic < in_channels; ++ic) {
+        for (int k = 0; k < kernel_size; ++k) {
+            int il = in_start + k;
+            if (il >= 0 && il < in_length) {
+                float in_val = input[b * in_channels * in_length + ic * in_length + il];
+                float w_val = weight[oc * in_channels * kernel_size + ic * kernel_size + k];
+                sum += in_val * w_val;
+            }
+        }
+    }
+
+    if (bias != nullptr) {
+        sum += bias[oc];
+    }
+
+    output[b * out_channels * out_length + oc * out_length + ol] = sum;
+}
+
+__global__ void conv1d_f16_kernel(
+    const __half* __restrict__ input,
+    const __half* __restrict__ weight,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
+    int batch, int in_channels, int out_channels,
+    int in_length, int kernel_size, int stride, int padding
+) {
+    int out_length = (in_length + 2 * padding - kernel_size) / stride + 1;
+    int total = batch * out_channels * out_length;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    int b = idx / (out_channels * out_length);
+    int rem = idx % (out_channels * out_length);
+    int oc = rem / out_length;
+    int ol = rem % out_length;
+
+    float sum = 0.0f;
+    int in_start = ol * stride - padding;
+
+    for (int ic = 0; ic < in_channels; ++ic) {
+        for (int k = 0; k < kernel_size; ++k) {
+            int il = in_start + k;
+            if (il >= 0 && il < in_length) {
+                float in_val = __half2float(input[b * in_channels * in_length + ic * in_length + il]);
+                float w_val = __half2float(weight[oc * in_channels * kernel_size + ic * kernel_size + k]);
+                sum += in_val * w_val;
+            }
+        }
+    }
+
+    if (bias != nullptr) {
+        sum += __half2float(bias[oc]);
+    }
+
+    output[b * out_channels * out_length + oc * out_length + ol] = __float2half(sum);
+}
+
 }  // namespace audio
 }  // namespace ops
 }  // namespace pygpukit

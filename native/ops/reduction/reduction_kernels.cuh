@@ -442,6 +442,85 @@ __global__ void init_min_f16_kernel(__half* output) { *output = __float2half(INF
 __global__ void init_min_bf16_kernel(__nv_bfloat16* output) { *output = float_to_bf16(INFINITY); }
 
 // ============================================================================
+// Sum with axis kernels - reduce along specified axis
+// For 2D tensor [M, N]: axis=0 reduces to [N], axis=1 reduces to [M]
+// ============================================================================
+
+// Sum along axis 0: [M, N] -> [N]
+__global__ void sum_axis0_f32_kernel(const float* __restrict__ input, float* __restrict__ output,
+                                      int M, int N) {
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+
+    float sum = 0.0f;
+    for (int m = 0; m < M; ++m) {
+        sum += input[m * N + n];
+    }
+    output[n] = sum;
+}
+
+__global__ void sum_axis0_f16_kernel(const __half* __restrict__ input, __half* __restrict__ output,
+                                      int M, int N) {
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+
+    float sum = 0.0f;
+    for (int m = 0; m < M; ++m) {
+        sum += __half2float(input[m * N + n]);
+    }
+    output[n] = __float2half(sum);
+}
+
+__global__ void sum_axis0_bf16_kernel(const __nv_bfloat16* __restrict__ input, __nv_bfloat16* __restrict__ output,
+                                       int M, int N) {
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    if (n >= N) return;
+
+    float sum = 0.0f;
+    for (int m = 0; m < M; ++m) {
+        sum += bf16_to_float(input[m * N + n]);
+    }
+    output[n] = float_to_bf16(sum);
+}
+
+// Sum along axis 1: [M, N] -> [M]
+__global__ void sum_axis1_f32_kernel(const float* __restrict__ input, float* __restrict__ output,
+                                      int M, int N) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= M) return;
+
+    float sum = 0.0f;
+    for (int n = 0; n < N; ++n) {
+        sum += input[m * N + n];
+    }
+    output[m] = sum;
+}
+
+__global__ void sum_axis1_f16_kernel(const __half* __restrict__ input, __half* __restrict__ output,
+                                      int M, int N) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= M) return;
+
+    float sum = 0.0f;
+    for (int n = 0; n < N; ++n) {
+        sum += __half2float(input[m * N + n]);
+    }
+    output[m] = __float2half(sum);
+}
+
+__global__ void sum_axis1_bf16_kernel(const __nv_bfloat16* __restrict__ input, __nv_bfloat16* __restrict__ output,
+                                       int M, int N) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= M) return;
+
+    float sum = 0.0f;
+    for (int n = 0; n < N; ++n) {
+        sum += bf16_to_float(input[m * N + n]);
+    }
+    output[m] = float_to_bf16(sum);
+}
+
+// ============================================================================
 // Argmax reduction kernels - find index of maximum value
 // ============================================================================
 

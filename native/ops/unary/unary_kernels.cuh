@@ -112,6 +112,56 @@ __global__ void relu_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, size_
 }
 
 // ============================================================================
+// Sin kernels
+// ============================================================================
+
+__global__ void sin_f32_kernel(const float* a, float* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = sinf(a[idx]);
+    }
+}
+
+__global__ void sin_f16_kernel(const __half* a, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = __float2half(sinf(__half2float(a[idx])));
+    }
+}
+
+__global__ void sin_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = float_to_bf16(sinf(bf16_to_float(a[idx])));
+    }
+}
+
+// ============================================================================
+// Cos kernels
+// ============================================================================
+
+__global__ void cos_f32_kernel(const float* a, float* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = cosf(a[idx]);
+    }
+}
+
+__global__ void cos_f16_kernel(const __half* a, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = __float2half(cosf(__half2float(a[idx])));
+    }
+}
+
+__global__ void cos_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = float_to_bf16(cosf(bf16_to_float(a[idx])));
+    }
+}
+
+// ============================================================================
 // Sqrt kernels
 // ============================================================================
 

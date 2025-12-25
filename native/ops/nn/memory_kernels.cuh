@@ -626,6 +626,73 @@ __global__ void copy_i32_kernel(
     }
 }
 
+// ============================================================================
+// Arange - generate sequence [start, start+step, start+2*step, ...]
+// ============================================================================
+
+__global__ void arange_f32_kernel(float* output, float start, float step, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = start + static_cast<float>(idx) * step;
+    }
+}
+
+__global__ void arange_i32_kernel(int* output, int start, int step, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = start + static_cast<int>(idx) * step;
+    }
+}
+
+__global__ void arange_i64_kernel(int64_t* output, int64_t start, int64_t step, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = start + static_cast<int64_t>(idx) * step;
+    }
+}
+
+// ============================================================================
+// Scatter Add - indexed accumulation: output[indices[i]] += src[i]
+// ============================================================================
+
+__global__ void scatter_add_f32_kernel(
+    float* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const float* __restrict__ src,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        atomicAdd(&output[indices[idx]], src[idx]);
+    }
+}
+
+__global__ void scatter_add_f16_kernel(
+    __half* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const __half* __restrict__ src,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // FP16 atomicAdd requires sm_70+
+        atomicAdd(&output[indices[idx]], src[idx]);
+    }
+}
+
+__global__ void scatter_add_bf16_kernel(
+    __nv_bfloat16* __restrict__ output,
+    const int64_t* __restrict__ indices,
+    const __nv_bfloat16* __restrict__ src,
+    size_t n
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        // BF16 atomicAdd requires sm_80+
+        atomicAdd(&output[indices[idx]], src[idx]);
+    }
+}
+
 } // namespace nn
 } // namespace ops
 } // namespace pygpukit
