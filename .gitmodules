@@ -1,3 +1,4 @@
 [submodule "third_party/cutlass"]
 	path = third_party/cutlass
-	url = https://github.com/NVIDIA/cutlass.git
+	url = https://github.com/m96-chan/cutlass.git
+	branch = fix/sm120-alignment
