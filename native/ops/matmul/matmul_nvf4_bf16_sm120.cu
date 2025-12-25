@@ -73,8 +73,8 @@ using ElementAccumulator = float;
 using ArchTag = cutlass::arch::Sm120;
 using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
 
-// Tile shapes
-using ThreadBlockShape = Shape<_128, _128, _128>;
+// Tile shapes - K=256 is recommended for NVF4 in CUTLASS tests
+using ThreadBlockShape = Shape<_128, _128, _256>;
 using ClusterShape = Shape<_1, _1, _1>;  // GeForce: no cluster support
 
 // Epilogue
@@ -88,7 +88,7 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     cutlass::epilogue::collective::EpilogueScheduleAuto
 >::CollectiveOp;
 
-// Mainloop
+// Mainloop - using PingPong schedule for better performance
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
     ElementA, LayoutATag, AlignmentA,
@@ -97,7 +97,7 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
     ThreadBlockShape, ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    cutlass::gemm::collective::KernelScheduleAuto
+    cutlass::gemm::KernelTmaWarpSpecializedPingpong  // Explicit pingpong schedule
 >::CollectiveOp;
 
 // GEMM Kernel
@@ -367,7 +367,7 @@ cudaError_t gemm_nvf4_bf16(
     cutlass::device_memory::allocation<uint8_t> dev_SFA(sfa_padded);
     cutlass::device_memory::allocation<uint8_t> dev_SFB(sfb_padded);
     cutlass::device_memory::allocation<ElementC> dev_C(size_C);
-    cutlass::device_memory::allocation<ElementD> dev_D_out(size_D);
+    // D is used directly - no intermediate allocation needed
 
     cudaError_t err;
 
@@ -419,7 +419,7 @@ cudaError_t gemm_nvf4_bf16(
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) return err;
 
-    // Build GEMM arguments using device memory directly
+    // Build GEMM arguments - write directly to user buffer D
     typename Gemm::Arguments arguments {
         cutlass::gemm::GemmUniversalMode::kGemm,
         {M, N, K, 1},
@@ -429,10 +429,10 @@ cudaError_t gemm_nvf4_bf16(
             reinterpret_cast<ScaleFactorType*>(dev_SFA.get()), layout_SFA,
             reinterpret_cast<ScaleFactorType*>(dev_SFB.get()), layout_SFB
         },
-        { // Epilogue arguments
+        { // Epilogue arguments - output directly to D
             {alpha, beta},
             dev_C.get(), stride_C,
-            dev_D_out.get(), stride_D
+            reinterpret_cast<ElementD*>(D), stride_D
         }
     };
 
@@ -460,17 +460,8 @@ cudaError_t gemm_nvf4_bf16(
         return cudaErrorLaunchFailure;
     }
 
-    // Copy result from CUTLASS output buffer to user-provided D buffer (D2D only!)
-    err = cudaMemcpyAsync(D, dev_D_out.get(),
-                          size_D * sizeof(nv_bfloat16),
-                          cudaMemcpyDeviceToDevice, stream);
-    if (err != cudaSuccess) {
-        return err;
-    }
-
-    // Wait for everything to complete
-    err = cudaStreamSynchronize(stream);
-    return err;
+    // CUTLASS writes directly to D - no copy needed
+    return cudaSuccess;
 }
 
 bool is_available() {

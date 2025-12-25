@@ -33,6 +33,7 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/dispatch_policy.hpp"
+#include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #include "cutlass/detail/sm100_blockscaled_layout.hpp"
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/device_memory.h"
@@ -70,7 +71,7 @@ using ElementAccumulator = float;
 using ArchTag = cutlass::arch::Sm120;
 using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
 
-// Tile shapes
+// Tile shapes - 128x128x128 (baseline, optimal for SM120)
 using ThreadBlockShape = Shape<_128, _128, _128>;
 using ClusterShape = Shape<_1, _1, _1>;  // GeForce: no cluster support
 
@@ -85,7 +86,7 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     cutlass::epilogue::collective::EpilogueScheduleAuto
 >::CollectiveOp;
 
-// Mainloop
+// Mainloop - Pingpong schedule (best so far)
 using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
     ArchTag, OperatorClass,
     ElementA, LayoutATag, AlignmentA,
@@ -94,15 +95,14 @@ using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder
     ThreadBlockShape, ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    cutlass::gemm::collective::KernelScheduleAuto
+    cutlass::gemm::KernelTmaWarpSpecializedPingpong
 >::CollectiveOp;
 
 // GEMM Kernel
 using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
     Shape<int, int, int, int>,
     CollectiveMainloop,
-    CollectiveEpilogue,
-    void
+    CollectiveEpilogue
 >;
 
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
@@ -275,13 +275,12 @@ cudaError_t benchmark_gemm_nvf4(
     size_t size_A_padded = std::max(size_A_packed, MIN_ALLOC_128KB);
     size_t size_B_padded = std::max(size_B_packed, MIN_ALLOC_128KB);
 
-    // Allocate ALL device memory
+    // Allocate device memory (no need to allocate D - use user buffer directly)
     cutlass::device_memory::allocation<uint8_t> dev_A(size_A_padded);
     cutlass::device_memory::allocation<uint8_t> dev_B(size_B_padded);
     cutlass::device_memory::allocation<uint8_t> dev_SFA(sfa_padded);
     cutlass::device_memory::allocation<uint8_t> dev_SFB(sfb_padded);
     cutlass::device_memory::allocation<ElementC> dev_C(size_C);
-    cutlass::device_memory::allocation<ElementD> dev_D_out(size_D);
 
     cudaError_t err;
 
@@ -311,7 +310,7 @@ cudaError_t benchmark_gemm_nvf4(
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) return err;
 
-    // Build GEMM arguments
+    // Build GEMM arguments - use D directly (no intermediate buffer)
     typename Gemm::Arguments arguments {
         cutlass::gemm::GemmUniversalMode::kGemm,
         {M, N, K, 1},
@@ -321,10 +320,10 @@ cudaError_t benchmark_gemm_nvf4(
             reinterpret_cast<ScaleFactorType*>(dev_SFA.get()), layout_SFA,
             reinterpret_cast<ScaleFactorType*>(dev_SFB.get()), layout_SFB
         },
-        { // Epilogue arguments
+        { // Epilogue arguments - write directly to user buffer
             {alpha, beta},
             dev_C.get(), stride_C,
-            dev_D_out.get(), stride_D
+            reinterpret_cast<ElementD*>(D), stride_D
         }
     };
 
@@ -352,14 +351,8 @@ cudaError_t benchmark_gemm_nvf4(
         return cudaErrorLaunchFailure;
     }
 
-    // Copy result to user buffer
-    err = cudaMemcpyAsync(D, dev_D_out.get(),
-                          size_D * sizeof(nv_bfloat16),
-                          cudaMemcpyDeviceToDevice, stream);
-    if (err != cudaSuccess) return err;
-
-    // Wait for everything
-    return cudaStreamSynchronize(stream);
+    // No D2D copy needed - CUTLASS writes directly to user buffer D
+    return cudaSuccess;
 }
 
 bool is_available() {
