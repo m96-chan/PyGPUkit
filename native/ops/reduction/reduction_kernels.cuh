@@ -325,6 +325,135 @@ __global__ void reduce_max_bf16_kernel(const __nv_bfloat16* __restrict__ input, 
 }
 
 // ============================================================================
+// Argmax reduction kernels - find index of maximum value
+// ============================================================================
+
+// Warp-level argmax primitive
+__device__ __forceinline__ void warp_reduce_argmax(float& val, int& idx) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        float other_val = __shfl_down_sync(0xffffffff, val, offset);
+        int other_idx = __shfl_down_sync(0xffffffff, idx, offset);
+        if (other_val > val) {
+            val = other_val;
+            idx = other_idx;
+        }
+    }
+}
+
+__global__ void argmax_f32_kernel(const float* __restrict__ input, int64_t* __restrict__ output, size_t n) {
+    __shared__ float shared_val[32];
+    __shared__ int shared_idx[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float max_val = -INFINITY;
+    int max_idx = 0;
+    for (size_t i = idx; i < n; i += stride) {
+        if (input[i] > max_val) {
+            max_val = input[i];
+            max_idx = static_cast<int>(i);
+        }
+    }
+
+    warp_reduce_argmax(max_val, max_idx);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared_val[warp_id] = max_val;
+        shared_idx[warp_id] = max_idx;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared_val[lane] : -INFINITY;
+        max_idx = (tid < (blockDim.x + 31) / 32) ? shared_idx[lane] : 0;
+        warp_reduce_argmax(max_val, max_idx);
+        if (lane == 0) {
+            *output = static_cast<int64_t>(max_idx);
+        }
+    }
+}
+
+__global__ void argmax_f16_kernel(const __half* __restrict__ input, int64_t* __restrict__ output, size_t n) {
+    __shared__ float shared_val[32];
+    __shared__ int shared_idx[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float max_val = -INFINITY;
+    int max_idx = 0;
+    for (size_t i = idx; i < n; i += stride) {
+        float v = __half2float(input[i]);
+        if (v > max_val) {
+            max_val = v;
+            max_idx = static_cast<int>(i);
+        }
+    }
+
+    warp_reduce_argmax(max_val, max_idx);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared_val[warp_id] = max_val;
+        shared_idx[warp_id] = max_idx;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared_val[lane] : -INFINITY;
+        max_idx = (tid < (blockDim.x + 31) / 32) ? shared_idx[lane] : 0;
+        warp_reduce_argmax(max_val, max_idx);
+        if (lane == 0) {
+            *output = static_cast<int64_t>(max_idx);
+        }
+    }
+}
+
+__global__ void argmax_bf16_kernel(const __nv_bfloat16* __restrict__ input, int64_t* __restrict__ output, size_t n) {
+    __shared__ float shared_val[32];
+    __shared__ int shared_idx[32];
+
+    const size_t tid = threadIdx.x;
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t stride = blockDim.x * gridDim.x;
+
+    float max_val = -INFINITY;
+    int max_idx = 0;
+    for (size_t i = idx; i < n; i += stride) {
+        float v = bf16_to_float(input[i]);
+        if (v > max_val) {
+            max_val = v;
+            max_idx = static_cast<int>(i);
+        }
+    }
+
+    warp_reduce_argmax(max_val, max_idx);
+
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
+    if (lane == 0) {
+        shared_val[warp_id] = max_val;
+        shared_idx[warp_id] = max_idx;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        max_val = (tid < (blockDim.x + 31) / 32) ? shared_val[lane] : -INFINITY;
+        max_idx = (tid < (blockDim.x + 31) / 32) ? shared_idx[lane] : 0;
+        warp_reduce_argmax(max_val, max_idx);
+        if (lane == 0) {
+            *output = static_cast<int64_t>(max_idx);
+        }
+    }
+}
+
+// ============================================================================
 // Output initialization kernels
 // ============================================================================
 
