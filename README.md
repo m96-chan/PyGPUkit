@@ -789,6 +789,9 @@ PyGPUkit/
   rust/            # Rust backend (memory pool, scheduler)
     pygpukit-core/   # Pure Rust core logic
     pygpukit-python/ # PyO3 bindings
+  .claude/         # Claude Code configuration
+    skills/          # Development workflow skills
+    agents/          # Specialized subagents
   docs/            # Documentation guides
   examples/        # Demo scripts
   scripts/         # Build scripts, benchmarks
@@ -854,8 +857,18 @@ APIs to be removed will emit `DeprecationWarning` for at least one minor version
 ---
 
 ## Contributing
-Contributions and discussions are welcome!
-Please open Issues for feature requests, bugs, or design proposals.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+**Quick Start:**
+1. Fork and clone
+2. Create feature branch
+3. Build: `./build.sh 86` (Git Bash)
+4. Run checks: `ruff check`, `mypy`, `pytest`
+5. Submit PR
+
+**We Accept:** Performance improvements, bug fixes, new GPU ops, documentation
+**We Reject:** cuda-python dependencies, training features, SM < 80 support
 
 ---
 

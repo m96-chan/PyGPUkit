@@ -988,3 +988,44 @@ tokenizer = Tokenizer.from_file("/path/to/tokenizer.json")
 # TinyLlama-1.1B
 /c/Users/y_har/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/*/
 ```
+
+---
+
+## Claude Code Configuration
+
+### Skills (.claude/skills/)
+
+Development workflow automation:
+
+| Skill | Description |
+|-------|-------------|
+| `build` | Build native module with SM selection |
+| `benchmark` | Run matmul performance benchmarks |
+| `lint` | Ruff lint + format |
+| `typecheck` | Mypy type check |
+| `test` | Run pytest |
+| `precommit` | Pre-commit checks (lint + typecheck) |
+| `check-all` | Full validation (lint + typecheck + test) |
+| `chat-test` | LLM inference testing |
+| `kernel-dev` | Kernel development workflow |
+
+### Subagents (.claude/agents/)
+
+Specialized agents for specific tasks:
+
+| Agent | Model | Description |
+|-------|-------|-------------|
+| `kernel-reviewer` | opus | CUDA kernel code review |
+| `perf-analyzer` | opus | Benchmark analysis and optimization |
+| `api-designer` | sonnet | Python API design review |
+| `commit-helper` | haiku | Commit message and PR generation |
+| `doc-generator` | haiku | Documentation updates |
+
+### Usage
+
+Skills and agents are automatically invoked based on task context. Examples:
+
+- "Build for RTX 3090 Ti" -> `build` skill
+- "Review the kernel changes" -> `kernel-reviewer` agent
+- "Analyze benchmark results" -> `perf-analyzer` agent
+- "Commit these changes" -> `commit-helper` agent
