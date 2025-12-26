@@ -241,13 +241,14 @@ pinned_ptr = pinned_malloc(size_bytes)
 memcpy_host_to_device_async(device_ptr, pinned_ptr, size_bytes, stream)
 ```
 
-### Dual CUDA Build Support
-Release wheels now include modules for both CUDA 12.x and 13.x:
+### CUDA 13.x Required
+Starting from v0.2.15, PyGPUkit requires **CUDA 13.0+** for SM120 (Blackwell) support:
 
 | Module | CUDA Version | SM Support |
 |--------|-------------|------------|
-| `_pygpukit_native_cu129` | CUDA 12.9 | SM 80-90 |
 | `_pygpukit_native_cu131` | CUDA 13.1 | SM 80-120 (Blackwell) |
+
+> **Note:** CUDA 12.x builds have been discontinued. SM120 features (FP8 I/O GEMM, NVF4 GEMM) require CUDA 13.0+.
 
 ### RTX 5090 Support
 Full support for NVIDIA Blackwell consumer GPUs (SM120) via CUDA 13.x build.
@@ -663,7 +664,14 @@ pip install -e .
 ### Requirements
 - Python 3.10+
 - NVIDIA GPU with drivers installed
+- **CUDA 13.0+** (required for SM120/Blackwell features)
 - **Optional:** CUDA Toolkit (for JIT compilation of custom kernels)
+
+#### Minimum Driver Versions (CUDA 13.x)
+| Platform | Minimum Driver |
+|----------|---------------|
+| Linux | **590.44.01** or later |
+| Windows | **572.16** or later (Game Ready/Studio) |
 
 > **Note:** NVRTC (NVIDIA Runtime Compiler) is included in CUDA Toolkit.
 > Pre-compiled GPU operations (matmul, add, mul, etc.) work with just GPU drivers.
@@ -675,7 +683,7 @@ pip install -e .
 | **Ampere** | SM80-86 | A100, RTX 3090, RTX 3080 | Fully supported |
 | **Ada Lovelace** | SM89 | RTX 4090, RTX 4080 | Fully supported |
 | **Hopper** | SM90 | H100, H200 | Fully supported |
-| **Blackwell** | SM100-120 | B100, B200 | Supported (CUDA 13.x) |
+| **Blackwell** | SM100-120 | B100, B200, RTX 5090 | **CUDA 13.0+ required** |
 | Turing/Older | SM < 80 | RTX 20XX, GTX 10XX | **NOT supported** |
 
 ### Runtime Modes

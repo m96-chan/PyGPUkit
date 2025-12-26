@@ -42,56 +42,57 @@ jobs:
           path: dist/*.tar.gz
 
   # ============================================================================
-  # Linux: Build native modules for CUDA 12.x and 13.x separately
+  # Linux: Build native module for CUDA 13.x
+  # NOTE: CUDA 12.x build commented out - kept for future CUDA 14.x parallel builds
   # ============================================================================
 
-  build-linux-native-cu12:
-    runs-on: ubuntu-22.04
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install CUDA Toolkit 12.6
-        uses: Jimver/cuda-toolkit@v0.2.29
-        with:
-          cuda: "12.6.2"
-          method: "network"
-          linux-local-args: '["--toolkit"]'
-
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pybind11 ninja cmake
-
-      - name: Build native module (CUDA 12.x)
-        run: |
-          mkdir -p build-cu12
-          cd build-cu12
-          cmake ../native \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPYBIND11_FINDPYTHON=ON \
-            -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
-            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
-            -DMODULE_SUFFIX="_cu129"
-          cmake --build . --config Release -j$(nproc)
-
-          # Find and copy the built module
-          find . -name "_pygpukit_native_cu129*.so" -exec cp {} ../native_cu129.so \;
-          ls -la ../native_cu129.so
-
-      - name: Upload native module
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-native-cu129
-          path: native_cu129.so
+  # build-linux-native-cu12:
+  #   runs-on: ubuntu-22.04
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
+  #         fetch-depth: 1
+  #
+  #     - name: Set up Python 3.12
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.12"
+  #
+  #     - name: Install CUDA Toolkit 12.6
+  #       uses: Jimver/cuda-toolkit@v0.2.29
+  #       with:
+  #         cuda: "12.6.2"
+  #         method: "network"
+  #         linux-local-args: '["--toolkit"]'
+  #
+  #     - name: Install build dependencies
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install pybind11 ninja cmake
+  #
+  #     - name: Build native module (CUDA 12.x)
+  #       run: |
+  #         mkdir -p build-cu12
+  #         cd build-cu12
+  #         cmake ../native \
+  #           -DCMAKE_BUILD_TYPE=Release \
+  #           -DPYBIND11_FINDPYTHON=ON \
+  #           -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
+  #           -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" \
+  #           -DMODULE_SUFFIX="_cu129"
+  #         cmake --build . --config Release -j$(nproc)
+  #
+  #         # Find and copy the built module
+  #         find . -name "_pygpukit_native_cu129*.so" -exec cp {} ../native_cu129.so \;
+  #         ls -la ../native_cu129.so
+  #
+  #     - name: Upload native module
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: linux-native-cu129
+  #         path: native_cu129.so
 
   build-linux-native-cu13:
     runs-on: ubuntu-22.04
@@ -144,7 +145,7 @@ jobs:
   # Merge Linux native modules into final wheel
   build-linux:
     runs-on: ubuntu-22.04
-    needs: [build-linux-native-cu12, build-linux-native-cu13]
+    needs: [build-linux-native-cu13]
 
     steps:
       - uses: actions/checkout@v4
@@ -169,11 +170,12 @@ jobs:
           method: "network"
           linux-local-args: '["--toolkit"]'
 
-      - name: Download CUDA 12.x native module
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-native-cu129
-          path: prebuilt
+      # NOTE: CUDA 12.x module download commented out
+      # - name: Download CUDA 12.x native module
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: linux-native-cu129
+      #     path: prebuilt
 
       - name: Download CUDA 13.x native module
         uses: actions/download-artifact@v4
@@ -193,7 +195,7 @@ jobs:
           echo "Python extension suffix: $SUFFIX"
 
           # Rename and copy to src/pygpukit/
-          cp prebuilt/native_cu129.so "src/pygpukit/_pygpukit_native_cu129${SUFFIX}"
+          # NOTE: Only CUDA 13.x module included
           cp prebuilt/native_cu131.so "src/pygpukit/_pygpukit_native_cu131${SUFFIX}"
           ls -la src/pygpukit/_pygpukit_native*
 
@@ -303,76 +305,77 @@ jobs:
           path: dist/*.whl
 
   # ============================================================================
-  # Windows: Build native modules for CUDA 12.x and 13.x separately
+  # Windows: Build native module for CUDA 13.x
+  # NOTE: CUDA 12.x build commented out - kept for future CUDA 14.x parallel builds
   # ============================================================================
 
-  build-windows-native-cu12:
-    runs-on: [self-hosted, Windows, X64, cuda]
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
-
-      - name: Set up Python 3.12
-        shell: pwsh
-        run: |
-          pyenv install 3.12 --skip-existing
-          pyenv local 3.12
-          python --version
-
-      - name: Clean previous builds
-        shell: pwsh
-        run: |
-          if (Test-Path build-cu12) { Remove-Item -Recurse -Force build-cu12 }
-
-      - name: Install build dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          pip install pybind11 ninja cmake
-
-      - name: Build native module (CUDA 12.x)
-        shell: cmd
-        run: |
-          @REM Set up VS environment
-          call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-          @REM Use CUDA 12.x
-          set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
-          set "PATH=%CUDA_PATH%\bin;%PATH%"
-
-          @REM Get pybind11 cmake dir
-          for /f "delims=" %%i in ('python -c "import pybind11; print(pybind11.get_cmake_dir())"') do set PYBIND11_DIR=%%i
-
-          mkdir build-cu12
-          cd build-cu12
-          cmake ..\native -G Ninja ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DPYBIND11_FINDPYTHON=ON ^
-            -Dpybind11_DIR="%PYBIND11_DIR%" ^
-            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" ^
-            -DMODULE_SUFFIX="_cu129"
-          cmake --build . --config Release
-
-      - name: Copy native module
-        shell: pwsh
-        run: |
-          $ext = Get-ChildItem build-cu12 -Filter "_pygpukit_native_cu129*.pyd" -Recurse | Select-Object -First 1
-          if ($ext) {
-            Copy-Item $ext.FullName "native_cu129.pyd"
-            Write-Host "Copied: $($ext.Name)"
-          } else {
-            Write-Error "Native module not found!"
-            exit 1
-          }
-          Get-ChildItem native_cu129.pyd
-
-      - name: Upload native module
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-native-cu129
-          path: native_cu129.pyd
+  # build-windows-native-cu12:
+  #   runs-on: [self-hosted, Windows, X64, cuda]
+  #
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
+  #         fetch-depth: 1
+  #
+  #     - name: Set up Python 3.12
+  #       shell: pwsh
+  #       run: |
+  #         pyenv install 3.12 --skip-existing
+  #         pyenv local 3.12
+  #         python --version
+  #
+  #     - name: Clean previous builds
+  #       shell: pwsh
+  #       run: |
+  #         if (Test-Path build-cu12) { Remove-Item -Recurse -Force build-cu12 }
+  #
+  #     - name: Install build dependencies
+  #       shell: pwsh
+  #       run: |
+  #         python -m pip install --upgrade pip
+  #         pip install pybind11 ninja cmake
+  #
+  #     - name: Build native module (CUDA 12.x)
+  #       shell: cmd
+  #       run: |
+  #         @REM Set up VS environment
+  #         call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+  #         @REM Use CUDA 12.x
+  #         set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
+  #         set "PATH=%CUDA_PATH%\bin;%PATH%"
+  #
+  #         @REM Get pybind11 cmake dir
+  #         for /f "delims=" %%i in ('python -c "import pybind11; print(pybind11.get_cmake_dir())"') do set PYBIND11_DIR=%%i
+  #
+  #         mkdir build-cu12
+  #         cd build-cu12
+  #         cmake ..\native -G Ninja ^
+  #           -DCMAKE_BUILD_TYPE=Release ^
+  #           -DPYBIND11_FINDPYTHON=ON ^
+  #           -Dpybind11_DIR="%PYBIND11_DIR%" ^
+  #           -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90" ^
+  #           -DMODULE_SUFFIX="_cu129"
+  #         cmake --build . --config Release
+  #
+  #     - name: Copy native module
+  #       shell: pwsh
+  #       run: |
+  #         $ext = Get-ChildItem build-cu12 -Filter "_pygpukit_native_cu129*.pyd" -Recurse | Select-Object -First 1
+  #         if ($ext) {
+  #           Copy-Item $ext.FullName "native_cu129.pyd"
+  #           Write-Host "Copied: $($ext.Name)"
+  #         } else {
+  #           Write-Error "Native module not found!"
+  #           exit 1
+  #         }
+  #         Get-ChildItem native_cu129.pyd
+  #
+  #     - name: Upload native module
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: windows-native-cu129
+  #         path: native_cu129.pyd
 
   build-windows-native-cu13:
     runs-on: [self-hosted, Windows, X64, cuda]
@@ -445,7 +448,7 @@ jobs:
   # Merge Windows native modules into final wheel
   build-windows:
     runs-on: [self-hosted, Windows, X64, cuda]
-    needs: [build-windows-native-cu12, build-windows-native-cu13]
+    needs: [build-windows-native-cu13]
 
     steps:
       - uses: actions/checkout@v4
@@ -483,11 +486,12 @@ jobs:
           if (Test-Path rust/target) { Remove-Item -Recurse -Force rust/target }
           Get-ChildItem -Filter "*.egg-info" -Directory | Remove-Item -Recurse -Force
 
-      - name: Download CUDA 12.x native module
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-native-cu129
-          path: prebuilt
+      # NOTE: CUDA 12.x module download commented out
+      # - name: Download CUDA 12.x native module
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: windows-native-cu129
+      #     path: prebuilt
 
       - name: Download CUDA 13.x native module
         uses: actions/download-artifact@v4
@@ -509,7 +513,7 @@ jobs:
           Write-Host "Python extension suffix: $suffix"
 
           # Rename and copy to src/pygpukit/
-          Copy-Item "prebuilt/native_cu129.pyd" "src/pygpukit/_pygpukit_native_cu129$suffix"
+          # NOTE: Only CUDA 13.x module included
           Copy-Item "prebuilt/native_cu131.pyd" "src/pygpukit/_pygpukit_native_cu131$suffix"
           Get-ChildItem src/pygpukit/_pygpukit_native*
 
