@@ -41,6 +41,7 @@ from pygpukit.llm.layers import (
 )
 
 if TYPE_CHECKING:
+    from pygpukit.llm import SafeTensorsFile, ShardedSafeTensorsFile
     from pygpukit.llm.model import CausalTransformerModel
 
 
@@ -99,7 +100,7 @@ def _get_fp8_e4m3_table() -> np.ndarray:
         elif exp == 0:
             # Subnormal (exponent = 0)
             # Value = (-1)^sign * 2^(-6) * (0.mantissa)
-            value = (mant / 8.0) * (2.0 ** -6)
+            value = (mant / 8.0) * (2.0**-6)
             table[i] = -value if sign else value
         else:
             # Normal
@@ -165,7 +166,7 @@ def is_fp8_weight(tensor_name: str, tensor_names: list[str]) -> bool:
 
 
 def load_fp8_weight_direct(
-    st: SafeTensorsFile,
+    st: SafeTensorsFile | ShardedSafeTensorsFile,
     weight_name: str,
     block_size: tuple[int, int] = (128, 128),
 ) -> tuple[GPUArray, GPUArray]:
@@ -177,6 +178,7 @@ def load_fp8_weight_direct(
         - scale_inv: [out/block_h, in/block_w] as bf16
     """
     from pygpukit.core.factory import from_numpy
+    from pygpukit.llm import Dtype
 
     # Load FP8 weight as uint8
     info = st.tensor_info(weight_name)
@@ -632,7 +634,9 @@ def load_model_from_safetensors(
                 hf_config = json.load(f)
             fp8_config = FP8QuantConfig.from_config(hf_config)
             if fp8_config is not None:
-                print(f"[FP8] Detected FP8 quantization: {fp8_config.fmt}, block_size={fp8_config.weight_block_size}")
+                print(
+                    f"[FP8] Detected FP8 quantization: {fp8_config.fmt}, block_size={fp8_config.weight_block_size}"
+                )
     except Exception:
         pass
 
@@ -651,7 +655,9 @@ def load_model_from_safetensors(
         if is_fp8_weight(weight_name):
             # FP8 path: load as LinearFP8 without dequantization
             weight_fp8, scale_inv = load_fp8_weight_direct(
-                st, weight_name, fp8_config.weight_block_size  # type: ignore
+                st,
+                weight_name,
+                fp8_config.weight_block_size,  # type: ignore
             )
             # Load bias if specified (bias is not quantized)
             bias = None
@@ -943,18 +949,12 @@ def load_model_from_safetensors(
             # Router gate: [hidden_size, num_experts]
             gate_weight = load_tensor(required_name(spec.moe_gate, layer_idx))
 
-            # Load all expert weights
-            expert_weights: list[tuple[GPUArray, GPUArray, GPUArray]] = []
+            # Load all expert weights (using load_linear for FP8 support)
+            expert_weights: list = []
             for expert_idx in range(num_experts):
-                exp_gate = load_tensor(
-                    expert_name(spec.expert_gate_proj, layer_idx, expert_idx)
-                )
-                exp_up = load_tensor(
-                    expert_name(spec.expert_up_proj, layer_idx, expert_idx)
-                )
-                exp_down = load_tensor(
-                    expert_name(spec.expert_down_proj, layer_idx, expert_idx)
-                )
+                exp_gate = load_linear(expert_name(spec.expert_gate_proj, layer_idx, expert_idx))
+                exp_up = load_linear(expert_name(spec.expert_up_proj, layer_idx, expert_idx))
+                exp_down = load_linear(expert_name(spec.expert_down_proj, layer_idx, expert_idx))
                 expert_weights.append((exp_gate, exp_up, exp_down))
 
             mlp = MoELayer(transformer_config, gate_weight, expert_weights)

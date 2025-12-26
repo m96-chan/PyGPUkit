@@ -456,8 +456,15 @@ class Attention:
         self.v_dim = self.num_kv_heads * self.head_dim
 
         # Create fused QKV projection (reduces 3 matmuls to 1)
-        qkv_weight = concat_axis0(concat_axis0(q_proj, k_proj), v_proj)
-        self.qkv_proj = Linear(qkv_weight, None)
+        # Skip fusion for FP8 (LinearFP8 can't be concatenated)
+        self.qkv_proj: Linear | None = None
+        if not isinstance(self.q_proj, LinearFP8):
+            # Extract weights from Linear for concatenation
+            q_weight = self.q_proj.weight if isinstance(self.q_proj, Linear) else q_proj
+            k_weight = self.k_proj.weight if isinstance(self.k_proj, Linear) else k_proj
+            v_weight = self.v_proj.weight if isinstance(self.v_proj, Linear) else v_proj
+            qkv_weight = concat_axis0(concat_axis0(q_weight, k_weight), v_weight)
+            self.qkv_proj = Linear(qkv_weight, None)
 
         # Precompute RoPE if enabled
         self._cos: np.ndarray | None
@@ -652,19 +659,25 @@ class Attention:
         assert self._k_cache is not None, "Call init_fixed_cache first"
         assert x.shape[0] == 1, "forward_fixed_cache expects single token"
 
-        # Fused QKV projection
-        qkv = self.qkv_proj(x)
-        q_2d = qkv.narrow(0, self.q_dim)
-        k_2d = qkv.narrow(self.q_dim, self.k_dim)
-        v_2d = qkv.narrow(self.q_dim + self.k_dim, self.v_dim)
+        if self.qkv_proj is not None:
+            # Fused QKV projection (faster for non-FP8)
+            qkv = self.qkv_proj(x)
+            q_2d = qkv.narrow(0, self.q_dim)
+            k_2d = qkv.narrow(self.q_dim, self.k_dim)
+            v_2d = qkv.narrow(self.q_dim + self.k_dim, self.v_dim)
 
-        # Apply biases separately
-        if self.q_proj.bias is not None:
-            bias_add_inplace(q_2d, self.q_proj.bias)
-        if self.k_proj.bias is not None:
-            bias_add_inplace(k_2d, self.k_proj.bias)
-        if self.v_proj.bias is not None:
-            bias_add_inplace(v_2d, self.v_proj.bias)
+            # Apply biases separately
+            if self.q_proj.bias is not None:
+                bias_add_inplace(q_2d, self.q_proj.bias)
+            if self.k_proj.bias is not None:
+                bias_add_inplace(k_2d, self.k_proj.bias)
+            if self.v_proj.bias is not None:
+                bias_add_inplace(v_2d, self.v_proj.bias)
+        else:
+            # Separate projections (for FP8)
+            q_2d = self.q_proj(x)
+            k_2d = self.k_proj(x)
+            v_2d = self.v_proj(x)
 
         # Zero-copy reshape
         q = q_2d.view((1, self.num_heads, self.head_dim))
@@ -733,24 +746,30 @@ class Attention:
         if seq_len == 1:
             return self.forward_fixed_cache(x, start_position, context_len)
 
-        # Fused QKV projection
-        qkv = self.qkv_proj(x)
-        qkv_np = qkv.to_numpy()
-        q_np = qkv_np[:, : self.q_dim]
-        k_np = qkv_np[:, self.q_dim : self.q_dim + self.k_dim]
-        v_np = qkv_np[:, self.q_dim + self.k_dim :]
+        if self.qkv_proj is not None:
+            # Fused QKV projection (faster for non-FP8)
+            qkv = self.qkv_proj(x)
+            qkv_np = qkv.to_numpy()
+            q_np = qkv_np[:, : self.q_dim]
+            k_np = qkv_np[:, self.q_dim : self.q_dim + self.k_dim]
+            v_np = qkv_np[:, self.q_dim + self.k_dim :]
 
-        # Apply biases
-        if self.q_proj.bias is not None:
-            q_np = q_np + self.q_proj.bias.to_numpy()
-        if self.k_proj.bias is not None:
-            k_np = k_np + self.k_proj.bias.to_numpy()
-        if self.v_proj.bias is not None:
-            v_np = v_np + self.v_proj.bias.to_numpy()
+            # Apply biases
+            if self.q_proj.bias is not None:
+                q_np = q_np + self.q_proj.bias.to_numpy()
+            if self.k_proj.bias is not None:
+                k_np = k_np + self.k_proj.bias.to_numpy()
+            if self.v_proj.bias is not None:
+                v_np = v_np + self.v_proj.bias.to_numpy()
 
-        q_2d = from_numpy(q_np.astype(qkv_np.dtype))
-        k_2d = from_numpy(k_np.astype(qkv_np.dtype))
-        v_2d = from_numpy(v_np.astype(qkv_np.dtype))
+            q_2d = from_numpy(q_np.astype(qkv_np.dtype))
+            k_2d = from_numpy(k_np.astype(qkv_np.dtype))
+            v_2d = from_numpy(v_np.astype(qkv_np.dtype))
+        else:
+            # Separate projections (for FP8)
+            q_2d = self.q_proj(x)
+            k_2d = self.k_proj(x)
+            v_2d = self.v_proj(x)
 
         q = reshape_copy(q_2d, (seq_len, self.num_heads, self.head_dim))
         k = reshape_copy(k_2d, (seq_len, self.num_kv_heads, self.head_dim))
@@ -820,26 +839,36 @@ class Attention:
         assert self._k_cache is not None, "Call init_fixed_cache first"
         seq_len = x.shape[0]
 
-        # QKV projection into pre-allocated buffer
-        qkv_out = buffers.qkv_proj_out_batch.slice_rows(seq_len)
-        self.qkv_proj(x, out=qkv_out)
-
-        # Split QKV
         q_out = buffers.q_batch.view((seq_len, self.num_heads, self.head_dim))
         k_out = buffers.k_batch.view((seq_len, self.num_kv_heads, self.head_dim))
         v_out = buffers.v_batch.view((seq_len, self.num_kv_heads, self.head_dim))
-        split_qkv_batch(qkv_out, q_out, k_out, v_out, self.q_dim, self.k_dim, self.v_dim)
 
-        # Apply biases
-        if self.q_proj.bias is not None:
-            q_out_2d = q_out.view((seq_len, self.q_dim))
-            bias_add_inplace(q_out_2d, self.q_proj.bias)
-        if self.k_proj.bias is not None:
-            k_out_2d = k_out.view((seq_len, self.k_dim))
-            bias_add_inplace(k_out_2d, self.k_proj.bias)
-        if self.v_proj.bias is not None:
-            v_out_2d = v_out.view((seq_len, self.v_dim))
-            bias_add_inplace(v_out_2d, self.v_proj.bias)
+        if self.qkv_proj is not None:
+            # Fused QKV projection into pre-allocated buffer
+            qkv_out = buffers.qkv_proj_out_batch.slice_rows(seq_len)
+            self.qkv_proj(x, out=qkv_out)
+
+            # Split QKV
+            split_qkv_batch(qkv_out, q_out, k_out, v_out, self.q_dim, self.k_dim, self.v_dim)
+
+            # Apply biases
+            if self.q_proj.bias is not None:
+                q_out_2d = q_out.view((seq_len, self.q_dim))
+                bias_add_inplace(q_out_2d, self.q_proj.bias)
+            if self.k_proj.bias is not None:
+                k_out_2d = k_out.view((seq_len, self.k_dim))
+                bias_add_inplace(k_out_2d, self.k_proj.bias)
+            if self.v_proj.bias is not None:
+                v_out_2d = v_out.view((seq_len, self.v_dim))
+                bias_add_inplace(v_out_2d, self.v_proj.bias)
+        else:
+            # Separate projections (for FP8 - allocates, not zero-alloc)
+            q_2d = self.q_proj(x)
+            k_2d = self.k_proj(x)
+            v_2d = self.v_proj(x)
+            copy_to(reshape_copy(q_2d, (seq_len, self.num_heads, self.head_dim)), q_out)
+            copy_to(reshape_copy(k_2d, (seq_len, self.num_kv_heads, self.head_dim)), k_out)
+            copy_to(reshape_copy(v_2d, (seq_len, self.num_kv_heads, self.head_dim)), v_out)
 
         # QK Norm
         if self.q_norm is not None and buffers.q_flat_batch is not None:
@@ -981,13 +1010,15 @@ class MoELayer:
         2. Top-K selection with softmax
         3. Expert FFN (SwiGLU) for each selected expert
         4. Weighted combination of expert outputs
+
+    Supports FP8 quantized expert weights via LinearFP8.
     """
 
     def __init__(
         self,
         config: TransformerConfig,
         gate_weight: GPUArray,  # [num_experts, hidden_size] - router
-        expert_weights: list[tuple[GPUArray, GPUArray, GPUArray]],  # [(gate, up, down), ...]
+        expert_weights: list,  # [(gate, up, down), ...] - GPUArray or Linear/LinearFP8
     ):
         self.config = config
         self.num_experts = config.num_experts or len(expert_weights)
