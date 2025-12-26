@@ -227,6 +227,59 @@ QWEN3_SPEC = ModelSpec(
 )
 
 
+# Qwen3 MoE spec - Qwen3 attention + MoE FFN
+QWEN3_MOE_SPEC = ModelSpec(
+    name="qwen3_moe",
+    # Embeddings
+    embed_tokens="model.embed_tokens.weight",
+    position_embed=None,
+    lm_head="lm_head.weight",
+    final_norm="model.norm.weight",
+    final_norm_bias=None,
+    # Attention (same as Qwen3 with QK norm)
+    attn_norm="model.layers.{layer}.input_layernorm.weight",
+    attn_norm_bias=None,
+    q_proj="model.layers.{layer}.self_attn.q_proj.weight",
+    k_proj="model.layers.{layer}.self_attn.k_proj.weight",
+    v_proj="model.layers.{layer}.self_attn.v_proj.weight",
+    o_proj="model.layers.{layer}.self_attn.o_proj.weight",
+    q_bias=None,
+    k_bias=None,
+    v_bias=None,
+    o_bias=None,
+    q_norm="model.layers.{layer}.self_attn.q_norm.weight",
+    k_norm="model.layers.{layer}.self_attn.k_norm.weight",
+    # MLP norm (used before MoE)
+    mlp_norm="model.layers.{layer}.post_attention_layernorm.weight",
+    mlp_norm_bias=None,
+    # Standard MLP weights (not used for MoE)
+    fc1=None,
+    fc1_bias=None,
+    fc2=None,
+    fc2_bias=None,
+    gate_proj=None,
+    up_proj=None,
+    down_proj=None,
+    # MoE weights (Qwen3 MoE uses mlp.gate and mlp.experts.{expert}.{gate,up,down}_proj)
+    moe_gate="model.layers.{layer}.mlp.gate.weight",
+    expert_gate_proj="model.layers.{layer}.mlp.experts.{expert}.gate_proj.weight",
+    expert_up_proj="model.layers.{layer}.mlp.experts.{expert}.up_proj.weight",
+    expert_down_proj="model.layers.{layer}.mlp.experts.{expert}.down_proj.weight",
+    # Architecture
+    norm_type="rmsnorm",
+    activation="silu",
+    use_rope=True,
+    use_qk_norm=True,
+    use_position_embed=False,
+    qkv_combined=False,
+    weight_transpose=False,
+    is_moe=True,
+    default_norm_eps=1e-6,
+    default_rope_theta=10000000.0,  # Qwen3-MoE uses 10M rope_theta
+    hf_model_type="qwen3_moe",
+)
+
+
 # Qwen2 spec - like LLaMA but with QKV biases
 QWEN2_SPEC = ModelSpec(
     name="qwen2",
@@ -331,6 +384,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
     "gpt2": GPT2_SPEC,
     "llama": LLAMA_SPEC,
     "qwen3": QWEN3_SPEC,
+    "qwen3_moe": QWEN3_MOE_SPEC,
     "qwen2": QWEN2_SPEC,
     "mixtral": MIXTRAL_SPEC,
 }
@@ -351,8 +405,13 @@ def detect_model_spec(tensor_names: list[str]) -> ModelSpec:
     # Check for Mixtral MoE (has block_sparse_moe)
     if any("block_sparse_moe" in name for name in tensor_names):
         return MIXTRAL_SPEC
-    # Check for Qwen3-specific QK norm
-    if any("q_norm" in name for name in tensor_names):
+    # Check for Qwen3 MoE (has mlp.experts and q_norm)
+    has_qwen3_moe = any("mlp.experts" in name for name in tensor_names)
+    has_qk_norm = any("q_norm" in name for name in tensor_names)
+    if has_qwen3_moe and has_qk_norm:
+        return QWEN3_MOE_SPEC
+    # Check for Qwen3-specific QK norm (dense model)
+    if has_qk_norm:
         return QWEN3_SPEC
     # Check for Qwen2-style structure (has QKV biases)
     if (
