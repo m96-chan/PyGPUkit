@@ -30,7 +30,15 @@ from pygpukit.llm.config import (
     TransformerConfig,
     detect_model_spec,
 )
-from pygpukit.llm.layers import MLP, Attention, MoELayer, Norm, TransformerBlock
+from pygpukit.llm.layers import (
+    MLP,
+    Attention,
+    Linear,
+    LinearFP8,
+    MoELayer,
+    Norm,
+    TransformerBlock,
+)
 
 if TYPE_CHECKING:
     from pygpukit.llm.model import CausalTransformerModel
@@ -628,50 +636,41 @@ def load_model_from_safetensors(
     except Exception:
         pass
 
-    # Helper to load tensor with dtype conversion (and FP8 dequantization)
+    # Helper to check if a weight is FP8 quantized
+    def is_fp8_weight(name: str) -> bool:
+        scale_inv_name = name + "_scale_inv"
+        return fp8_config is not None and scale_inv_name in st.tensor_names
+
+    # Helper to load Linear layer (returns Linear or LinearFP8)
+    def load_linear(
+        weight_name: str,
+        bias_name: str | None = None,
+        do_transpose: bool = False,
+    ) -> Linear | LinearFP8:
+        """Load a linear layer, using LinearFP8 for FP8 weights."""
+        if is_fp8_weight(weight_name):
+            # FP8 path: load as LinearFP8 without dequantization
+            weight_fp8, scale_inv = load_fp8_weight_direct(
+                st, weight_name, fp8_config.weight_block_size  # type: ignore
+            )
+            # Load bias if specified (bias is not quantized)
+            bias = None
+            if bias_name and bias_name in st.tensor_names:
+                bias = load_tensor(bias_name)
+            return LinearFP8(weight_fp8, scale_inv, bias, fp8_config.weight_block_size)  # type: ignore
+        else:
+            # Standard path: load as Linear
+            weight = load_tensor(weight_name, do_transpose)
+            bias = None
+            if bias_name and bias_name in st.tensor_names:
+                bias = load_tensor(bias_name)
+            return Linear(weight, bias)
+
+    # Helper to load tensor with dtype conversion (no FP8 dequant - use load_linear for weights)
     def load_tensor(name: str, do_transpose: bool = False) -> GPUArray:
         info = st.tensor_info(name)
 
-        # Check for FP8 weight (has corresponding _scale_inv tensor)
-        scale_inv_name = name + "_scale_inv"
-        is_fp8 = fp8_config is not None and scale_inv_name in st.tensor_names
-
-        if is_fp8:
-            # FP8 dequantization path
-            # Load FP8 weight as raw bytes (uint8)
-            data = st.tensor_bytes(name)
-            fp8_bytes = np.frombuffer(data, dtype=np.uint8).reshape(info.shape)
-
-            # Load scale_inv tensor
-            scale_info = st.tensor_info(scale_inv_name)
-            scale_data = st.tensor_bytes(scale_inv_name)
-
-            # scale_inv is typically bfloat16
-            if scale_info.dtype == Dtype.BFloat16:
-                scale_inv = np.frombuffer(scale_data, dtype=np.uint16).reshape(scale_info.shape)
-            else:
-                scale_inv = np.frombuffer(scale_data, dtype=np.float32).reshape(scale_info.shape)
-
-            # Dequantize to float32
-            arr_f32 = dequantize_fp8_e4m3_block(
-                fp8_bytes, scale_inv, fp8_config.weight_block_size
-            )
-
-            # Convert to target dtype
-            if target_dtype_id == Dtype.BFloat16:
-                uint32_view = arr_f32.view(np.uint32)
-                arr = ((uint32_view + 0x7FFF + ((uint32_view >> 16) & 1)) >> 16).astype(np.uint16)
-            elif target_dtype_id == Dtype.Float16:
-                arr = arr_f32.astype(np.float16)
-            else:
-                arr = arr_f32
-
-            if do_transpose and arr.ndim == 2:
-                arr = arr.T.copy()
-
-            return from_numpy(arr)
-
-        # Direct mmap-to-GPU transfer for matching dtypes (non-FP8 path)
+        # Direct mmap-to-GPU transfer for matching dtypes
         if use_direct_transfer and not do_transpose and info.dtype == target_dtype_id:
             ptr, size_bytes = st.tensor_data_ptr(name)
             gpu_arr = empty(info.shape, target_dt)
@@ -901,28 +900,32 @@ def load_model_from_safetensors(
             )
         else:
             # Separate Q, K, V projections (LLaMA/Qwen3 style)
-            q_weight = load_tensor(required_name(spec.q_proj, layer_idx))
-            k_weight = load_tensor(required_name(spec.k_proj, layer_idx))
-            v_weight = load_tensor(required_name(spec.v_proj, layer_idx))
-            o_weight = load_tensor(required_name(spec.o_proj, layer_idx))
-
-            q_bias = try_load(layer_name(spec.q_bias, layer_idx))
-            k_bias = try_load(layer_name(spec.k_bias, layer_idx))
-            v_bias = try_load(layer_name(spec.v_bias, layer_idx))
-            o_bias = try_load(layer_name(spec.o_bias, layer_idx))
+            # Use load_linear to get Linear or LinearFP8 depending on quantization
+            q_proj = load_linear(
+                required_name(spec.q_proj, layer_idx),
+                layer_name(spec.q_bias, layer_idx),
+            )
+            k_proj = load_linear(
+                required_name(spec.k_proj, layer_idx),
+                layer_name(spec.k_bias, layer_idx),
+            )
+            v_proj = load_linear(
+                required_name(spec.v_proj, layer_idx),
+                layer_name(spec.v_bias, layer_idx),
+            )
+            o_proj = load_linear(
+                required_name(spec.o_proj, layer_idx),
+                layer_name(spec.o_bias, layer_idx),
+            )
 
             attn = Attention(
-                q_weight,
-                k_weight,
-                v_weight,
-                o_weight,
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
                 transformer_config,
-                q_bias,
-                k_bias,
-                v_bias,
-                o_bias,
-                q_norm_layer,
-                k_norm_layer,
+                q_norm=q_norm_layer,
+                k_norm=k_norm_layer,
             )
 
         # MLP norm (required)
@@ -972,15 +975,15 @@ def load_model_from_safetensors(
                 fc2_bias=fc2_bias,
             )
         elif spec.gate_proj is not None and spec.up_proj is not None and spec.down_proj is not None:
-            # SwiGLU
-            gate_proj = load_tensor(required_name(spec.gate_proj, layer_idx))
-            up_proj = load_tensor(required_name(spec.up_proj, layer_idx))
-            down_proj = load_tensor(required_name(spec.down_proj, layer_idx))
+            # SwiGLU - use load_linear for FP8 support
+            gate_proj_linear = load_linear(required_name(spec.gate_proj, layer_idx))
+            up_proj_linear = load_linear(required_name(spec.up_proj, layer_idx))
+            down_proj_linear = load_linear(required_name(spec.down_proj, layer_idx))
             mlp = MLP(
                 transformer_config,
-                gate_proj=gate_proj,
-                up_proj=up_proj,
-                down_proj=down_proj,
+                gate_proj=gate_proj_linear,
+                up_proj=up_proj_linear,
+                down_proj=down_proj_linear,
             )
         else:
             raise ValueError(f"ModelSpec {spec.name} has invalid MLP configuration")

@@ -409,14 +409,15 @@ class Attention:
     - RoPE: enabled via config.use_rope
     - QK Norm: optional normalization of Q and K (Qwen3 style)
     - Hybrid execution: CPU for seq_len=1, GPU for longer sequences
+    - FP8 quantized weights via LinearFP8
     """
 
     def __init__(
         self,
-        q_proj: GPUArray,
-        k_proj: GPUArray,
-        v_proj: GPUArray,
-        o_proj: GPUArray,
+        q_proj: GPUArray | Linear | LinearFP8,
+        k_proj: GPUArray | Linear | LinearFP8,
+        v_proj: GPUArray | Linear | LinearFP8,
+        o_proj: GPUArray | Linear | LinearFP8,
         config: TransformerConfig,
         q_bias: GPUArray | None = None,
         k_bias: GPUArray | None = None,
@@ -425,10 +426,18 @@ class Attention:
         q_norm: Norm | None = None,
         k_norm: Norm | None = None,
     ):
-        self.q_proj = Linear(q_proj, q_bias)
-        self.k_proj = Linear(k_proj, k_bias)
-        self.v_proj = Linear(v_proj, v_bias)
-        self.o_proj = Linear(o_proj, o_bias)
+        # Accept either GPUArray (wrapped in Linear) or pre-built Linear/LinearFP8
+        def wrap_linear(
+            proj: GPUArray | Linear | LinearFP8, bias: GPUArray | None
+        ) -> Linear | LinearFP8:
+            if isinstance(proj, (Linear, LinearFP8)):
+                return proj
+            return Linear(proj, bias)
+
+        self.q_proj = wrap_linear(q_proj, q_bias)
+        self.k_proj = wrap_linear(k_proj, k_bias)
+        self.v_proj = wrap_linear(v_proj, v_bias)
+        self.o_proj = wrap_linear(o_proj, o_bias)
 
         # QK Norm (Qwen3 style)
         self.q_norm = q_norm
@@ -891,41 +900,62 @@ class MLP:
 
     SwiGLU (LLaMA style):
         gate_proj -> SiLU -> * up_proj -> down_proj
+
+    Supports FP8 quantized weights via LinearFP8.
     """
 
     def __init__(
         self,
         config: TransformerConfig,
-        # GELU path weights
-        fc1_weight: GPUArray | None = None,
+        # GELU path weights (GPUArray or Linear/LinearFP8)
+        fc1_weight: GPUArray | Linear | LinearFP8 | None = None,
         fc1_bias: GPUArray | None = None,
-        fc2_weight: GPUArray | None = None,
+        fc2_weight: GPUArray | Linear | LinearFP8 | None = None,
         fc2_bias: GPUArray | None = None,
-        # SwiGLU path weights
-        gate_proj: GPUArray | None = None,
-        up_proj: GPUArray | None = None,
-        down_proj: GPUArray | None = None,
+        # SwiGLU path weights (GPUArray or Linear/LinearFP8)
+        gate_proj: GPUArray | Linear | LinearFP8 | None = None,
+        up_proj: GPUArray | Linear | LinearFP8 | None = None,
+        down_proj: GPUArray | Linear | LinearFP8 | None = None,
     ):
         self.config = config
         self.activation = config.activation
 
+        # Helper to wrap GPUArray in Linear, or use pre-built Linear/LinearFP8
+        def wrap_linear(
+            proj: GPUArray | Linear | LinearFP8 | None, bias: GPUArray | None = None
+        ) -> Linear | LinearFP8 | None:
+            if proj is None:
+                return None
+            if isinstance(proj, (Linear, LinearFP8)):
+                return proj
+            return Linear(proj, bias)
+
         if config.activation == "gelu":
             if fc1_weight is None or fc2_weight is None:
                 raise ValueError("GELU MLP requires fc1_weight and fc2_weight")
-            self.fc1 = Linear(fc1_weight, fc1_bias)
-            self.fc2 = Linear(fc2_weight, fc2_bias)
+            self.fc1 = wrap_linear(fc1_weight, fc1_bias)
+            self.fc2 = wrap_linear(fc2_weight, fc2_bias)
         else:  # silu (SwiGLU)
             if gate_proj is None or up_proj is None or down_proj is None:
                 raise ValueError("SwiGLU MLP requires gate_proj, up_proj, down_proj")
-            self.gate_proj = Linear(gate_proj)
-            self.up_proj = Linear(up_proj)
-            self.down_proj = Linear(down_proj)
 
-            self.intermediate_size = gate_proj.shape[0]
+            self.gate_proj = wrap_linear(gate_proj)
+            self.up_proj = wrap_linear(up_proj)
+            self.down_proj = wrap_linear(down_proj)
 
-            # Create fused gate_up projection
-            gate_up_weight = concat_axis0(gate_proj, up_proj)
-            self.gate_up_proj = Linear(gate_up_weight, None)
+            # Get intermediate size from the projection
+            if isinstance(gate_proj, (Linear, LinearFP8)):
+                self.intermediate_size = gate_proj.out_features
+            else:
+                self.intermediate_size = gate_proj.shape[0]
+
+            # Fused gate_up projection only for non-FP8 (GPUArray) weights
+            # FP8 weights can't be concatenated trivially
+            if isinstance(gate_proj, GPUArray) and isinstance(up_proj, GPUArray):
+                gate_up_weight = concat_axis0(gate_proj, up_proj)
+                self.gate_up_proj: Linear | None = Linear(gate_up_weight, None)
+            else:
+                self.gate_up_proj = None
 
     def __call__(self, x: GPUArray) -> GPUArray:
         if self.activation == "gelu":
