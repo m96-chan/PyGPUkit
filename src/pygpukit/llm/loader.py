@@ -636,7 +636,7 @@ def load_model_from_safetensors(
         if use_direct_transfer and not do_transpose and info.dtype == target_dtype_id:
             ptr, size_bytes = st.tensor_data_ptr(name)
             gpu_arr = empty(info.shape, target_dt)
-            memcpy_ptr_to_device(gpu_arr._array, ptr, size_bytes)
+            memcpy_ptr_to_device(gpu_arr._native, ptr, size_bytes)
             return gpu_arr
 
         # Fallback: load via numpy with dtype conversion
