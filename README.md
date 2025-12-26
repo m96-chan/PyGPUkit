@@ -869,6 +869,7 @@ MIT License
 Inspired by and built upon:
 - [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) - Runtime, Driver API, NVRTC
 - [CUTLASS](https://github.com/NVIDIA/cutlass) - TensorCore GEMM optimization techniques
+- [Codon](https://github.com/exaloop/codon) - High-performance Python compiler with GPU support
 - [CuPy](https://github.com/cupy/cupy)
 - [Triton](https://github.com/triton-lang/triton)
 
