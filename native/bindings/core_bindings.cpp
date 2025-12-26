@@ -189,12 +189,21 @@ void init_core_bindings(py::module_& m) {
                 dtype = DataType::Int32;
             } else if (itemsize == 2) {
                 dtype = DataType::Int16;
+            } else if (itemsize == 1) {
+                dtype = DataType::Int8;
             } else {
                 throw std::runtime_error("Unsupported int dtype size: " + std::to_string(itemsize));
             }
-        } else if (kind == 'u' && itemsize == 2) {
-            // uint16 can be used for bfloat16 storage
-            dtype = DataType::BFloat16;
+        } else if (kind == 'u') {
+            // Unsigned integer types
+            if (itemsize == 1) {
+                dtype = DataType::UInt8;
+            } else if (itemsize == 2) {
+                // uint16 can be used for bfloat16 storage
+                dtype = DataType::BFloat16;
+            } else {
+                throw std::runtime_error("Unsupported uint dtype size: " + std::to_string(itemsize));
+            }
         } else {
             throw std::runtime_error("Unsupported numpy dtype");
         }

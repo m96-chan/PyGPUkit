@@ -1,8 +1,9 @@
 """Test FP8 GEMM with compute-sanitizer."""
-import pygpukit as gpk
-from pygpukit.ops import fp8_sm120_available, matmul_fp8_sm120
-from pygpukit.core.factory import from_numpy
+
 import numpy as np
+
+from pygpukit.core.factory import from_numpy
+from pygpukit.ops import fp8_sm120_available, matmul_fp8_sm120
 
 print(f"FP8 SM120 available: {fp8_sm120_available()}")
 
@@ -17,7 +18,7 @@ if fp8_sm120_available():
     A_gpu = from_numpy(A)
     B_gpu = from_numpy(B)
 
-    print(f"Running FP8 GEMM...")
+    print("Running FP8 GEMM...")
     try:
         C_gpu = matmul_fp8_sm120(A_gpu, B_gpu)
         print("FP8 GEMM succeeded!")

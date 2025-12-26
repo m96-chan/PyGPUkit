@@ -572,6 +572,259 @@ def fp8_sm120_available() -> bool:
         return False
 
 
+def fp8_fp8_sm120_available() -> bool:
+    """Check if Pure FP8 I/O GEMM is available on SM120 (Blackwell GeForce).
+
+    This is for FP8 models where weights and activations are already in FP8 format.
+
+    Returns:
+        True if Pure FP8 GEMM is available (requires SM120+ and CUTLASS SM120 support).
+    """
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return native.fp8_fp8_sm120_available()
+    else:
+        return False
+
+
+def matmul_fp8_fp8_sm120(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Pure FP8 I/O matrix multiplication for SM120 (Blackwell GeForce).
+
+    This function takes FP8 E4M3 inputs directly (no conversion from FP32),
+    performs the GEMM using CUTLASS FP8 kernels, and returns FP8 E4M3 output.
+
+    This is optimized for FP8 models (Llama 3.1 FP8, etc.) where weights
+    and activations are already quantized to FP8.
+
+    Args:
+        a: First input array (M x K), FP8 E4M3 stored as uint8.
+        b: Second input array (K x N), FP8 E4M3 stored as uint8.
+           Should be in ColumnMajor format (pre-transposed).
+        out: Optional output array (M x N), uint8. If provided, result is
+            written to this array instead of allocating a new one.
+
+    Returns:
+        The result GPUArray (M x N), FP8 E4M3 stored as uint8.
+
+    Raises:
+        ValueError: If arrays are not 2D, dtypes are not uint8, or dimensions don't match.
+        RuntimeError: If FP8 SM120 is not available.
+
+    Example:
+        >>> import pygpukit as gk
+        >>> # Assuming A and B are already FP8 quantized (stored as uint8)
+        >>> A = gk.from_numpy(fp8_a_data)  # [M, K] uint8
+        >>> B = gk.from_numpy(fp8_b_data)  # [K, N] uint8 (ColumnMajor)
+        >>> C = gk.ops.matmul_fp8_fp8_sm120(A, B)  # [M, N] uint8
+    """
+    from pygpukit.core.dtypes import uint8
+
+    if a.ndim != 2:
+        raise ValueError(
+            f"matmul_fp8_fp8_sm120 requires 2D arrays, got {a.ndim}D for first argument"
+        )
+    if b.ndim != 2:
+        raise ValueError(
+            f"matmul_fp8_fp8_sm120 requires 2D arrays, got {b.ndim}D for second argument"
+        )
+
+    if a.shape[1] != b.shape[0]:
+        raise ValueError(
+            f"matmul_fp8_fp8_sm120 dimension mismatch: {a.shape} @ {b.shape} "
+            f"(inner dimensions {a.shape[1]} and {b.shape[0]} must match)"
+        )
+
+    if a.dtype != uint8 or b.dtype != uint8:
+        raise ValueError("matmul_fp8_fp8_sm120 requires uint8 inputs (FP8 E4M3)")
+
+    if not fp8_fp8_sm120_available():
+        raise RuntimeError("Pure FP8 SM120 GEMM is not available. Requires SM120+ GPU.")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _matmul_fp8_fp8_sm120_native(a, b, out=out)
+    else:
+        raise RuntimeError("Pure FP8 SM120 GEMM requires native backend")
+
+
+def _matmul_fp8_fp8_sm120_native(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Native C++ implementation of Pure FP8 I/O GEMM for SM120."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+
+    # Get native arrays
+    a_native = a._get_native()
+    b_native = b._get_native()
+
+    # Allocate output if needed
+    if out is None:
+        M, K = a.shape
+        N = b.shape[1]
+        out_native = native.empty([M, N], native.DataType.UInt8)
+        out = GPUArray._wrap_native(out_native)
+    else:
+        out_native = out._get_native()
+
+    # Call Pure FP8 GEMM
+    native.gemm_fp8_fp8_sm120(a_native, b_native, out_native)
+
+    return out
+
+
+def fp8_fp8_get_scale_sizes(M: int, N: int, K: int) -> tuple[int, int]:
+    """Get scale factor sizes for FP8 blockwise GEMM.
+
+    Returns the required sizes for scale_A and scale_B arrays for the
+    given problem dimensions. These sizes depend on the internal tile
+    configuration of the CUTLASS kernel.
+
+    Args:
+        M: Number of rows in A and output.
+        N: Number of columns in B and output.
+        K: Inner dimension (columns of A, rows of B).
+
+    Returns:
+        Tuple of (scale_A_size, scale_B_size) as integers.
+
+    Example:
+        >>> sfa_size, sfb_size = fp8_fp8_get_scale_sizes(256, 256, 256)
+        >>> scale_A = pk.from_numpy(np.ones(sfa_size, dtype=np.float32))
+        >>> scale_B = pk.from_numpy(np.ones(sfb_size, dtype=np.float32))
+    """
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return native.fp8_fp8_get_scale_sizes(M, N, K)
+    else:
+        return (0, 0)
+
+
+def matmul_fp8_fp8_blockwise_sm120(
+    a: GPUArray,
+    b: GPUArray,
+    scale_a: GPUArray,
+    scale_b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Blockwise scaled FP8 I/O matrix multiplication for SM120.
+
+    This function takes FP8 E4M3 inputs with per-block scale factors,
+    performs the GEMM using CUTLASS FP8 kernels, and returns FP8 E4M3 output.
+
+    The scale factors are applied per block during the GEMM computation,
+    enabling better precision for FP8 models with varied value ranges.
+
+    Args:
+        a: First input array (M x K), FP8 E4M3 stored as uint8.
+        b: Second input array (K x N), FP8 E4M3 stored as uint8.
+           Should be in ColumnMajor format (pre-transposed).
+        scale_a: Scale factors for A, float32. Size from fp8_fp8_get_scale_sizes().
+        scale_b: Scale factors for B, float32. Size from fp8_fp8_get_scale_sizes().
+        out: Optional output array (M x N), uint8. If provided, result is
+            written to this array instead of allocating a new one.
+
+    Returns:
+        The result GPUArray (M x N), FP8 E4M3 stored as uint8.
+
+    Raises:
+        ValueError: If arrays are not 2D, dtypes are wrong, or dimensions don't match.
+        RuntimeError: If FP8 SM120 is not available.
+
+    Example:
+        >>> import pygpukit as gk
+        >>> from pygpukit.ops import fp8_fp8_get_scale_sizes, matmul_fp8_fp8_blockwise_sm120
+        >>> M, N, K = 256, 256, 256
+        >>> sfa_size, sfb_size = fp8_fp8_get_scale_sizes(M, N, K)
+        >>> scale_A = gk.from_numpy(np.ones(sfa_size, dtype=np.float32))
+        >>> scale_B = gk.from_numpy(np.ones(sfb_size, dtype=np.float32))
+        >>> C = matmul_fp8_fp8_blockwise_sm120(A_fp8, B_fp8, scale_A, scale_B)
+    """
+    from pygpukit.core.dtypes import float32, uint8
+
+    if a.ndim != 2:
+        raise ValueError(f"matmul_fp8_fp8_blockwise_sm120 requires 2D arrays, got {a.ndim}D for A")
+    if b.ndim != 2:
+        raise ValueError(f"matmul_fp8_fp8_blockwise_sm120 requires 2D arrays, got {b.ndim}D for B")
+
+    if a.shape[1] != b.shape[0]:
+        raise ValueError(
+            f"matmul_fp8_fp8_blockwise_sm120 dimension mismatch: {a.shape} @ {b.shape} "
+            f"(inner dimensions {a.shape[1]} and {b.shape[0]} must match)"
+        )
+
+    if a.dtype != uint8 or b.dtype != uint8:
+        raise ValueError("matmul_fp8_fp8_blockwise_sm120 requires uint8 inputs (FP8)")
+
+    if scale_a.dtype != float32 or scale_b.dtype != float32:
+        raise ValueError("matmul_fp8_fp8_blockwise_sm120 requires float32 scale factors")
+
+    if not fp8_fp8_sm120_available():
+        raise RuntimeError("FP8 blockwise SM120 GEMM is not available. Requires SM120+.")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _matmul_fp8_fp8_blockwise_sm120_native(a, b, scale_a, scale_b, out=out)
+    else:
+        raise RuntimeError("FP8 blockwise SM120 GEMM requires native backend")
+
+
+def _matmul_fp8_fp8_blockwise_sm120_native(
+    a: GPUArray,
+    b: GPUArray,
+    scale_a: GPUArray,
+    scale_b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Native C++ implementation of blockwise FP8 I/O GEMM for SM120."""
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+
+    # Get native arrays
+    a_native = a._get_native()
+    b_native = b._get_native()
+    scale_a_native = scale_a._get_native()
+    scale_b_native = scale_b._get_native()
+
+    # Allocate output if needed
+    if out is None:
+        M, K = a.shape
+        N = b.shape[1]
+        out_native = native.empty([M, N], native.DataType.UInt8)
+        out = GPUArray._wrap_native(out_native)
+    else:
+        out_native = out._get_native()
+
+    # Call blockwise FP8 GEMM
+    native.gemm_fp8_fp8_blockwise_sm120(
+        a_native, b_native, out_native, scale_a_native, scale_b_native
+    )
+
+    return out
+
+
 def matmul_fp8_sm100(
     a: GPUArray,
     b: GPUArray,

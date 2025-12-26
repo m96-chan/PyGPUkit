@@ -554,7 +554,7 @@ Edit → Build → Validate → Benchmark → Commit
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
 ./build.sh 120      # SM 120のみ (RTX 5090)
-./build.sh          # デフォルト: SM 86
+./build.sh          # デフォルト: SM 120a
 ```
 
 **Windows cmd.exeからビルド（代替）：**
@@ -963,7 +963,7 @@ accepted_tokens = model.jacobi_decode_step(draft_tokens, position)
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
 ./build.sh 120      # SM 120のみ (RTX 5090)
-./build.sh          # デフォルト: SM 86
+./build.sh          # デフォルト: SM 120a
 ```
 
 **サポートSM:** 80, 86, 89, 90, 100, 120

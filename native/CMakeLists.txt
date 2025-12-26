@@ -155,7 +155,8 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/matmul_cutlass.cu
     ops/matmul/matmul_fp8_sm90.cu
     ops/matmul/matmul_fp8_sm100.cu
-    ops/matmul/matmul_fp8_sm120.cu
+    ops/matmul/matmul_fp8_fp32_sm120.cu
+    ops/matmul/matmul_fp8_fp8_sm120.cu
     ops/matmul/matmul_nvf4_bf16_sm120.cu
     ops/matmul/matmul_nvf4_nvf4_sm120.cu
     ops/gemv/gemv_nvf4.cu

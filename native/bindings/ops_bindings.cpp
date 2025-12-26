@@ -37,6 +37,28 @@ extern "C" {
     );
     bool pygpukit_fp8_sm120_available();
 
+    // SM120 (Blackwell GeForce) - Pure FP8 I/O GEMM
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120(
+        const uint8_t* A, const uint8_t* B, uint8_t* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    );
+    bool pygpukit_fp8_fp8_sm120_available();
+
+    // SM120 (Blackwell GeForce) - Pure FP8 I/O GEMM with blockwise scaling
+    cudaError_t pygpukit_gemm_fp8_fp8_blockwise_sm120(
+        const uint8_t* A, const uint8_t* B, uint8_t* D,
+        const float* scale_A, const float* scale_B,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    );
+    void pygpukit_fp8_fp8_get_scale_sizes(
+        int M, int N, int K,
+        size_t* sfa_size, size_t* sfb_size
+    );
+
     // SM120 (Blackwell GeForce) - NVF4 (4-bit) with BF16 I/O
     cudaError_t pygpukit_gemm_nvf4_bf16_sm120(
         const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* D,
@@ -1422,6 +1444,102 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        "FP8 GEMM for SM120: D = A @ B (with FP8 quantization internally)");
+
+    // ========================================================================
+    // Pure FP8 I/O GEMM for SM120 (FP8 models)
+    // ========================================================================
+
+    m.def("fp8_fp8_sm120_available", []() {
+        return pygpukit_fp8_fp8_sm120_available();
+    }, "Check if Pure FP8 I/O GEMM is available on SM120");
+
+    m.def("gemm_fp8_fp8_sm120", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
+        // FP8 is stored as UInt8 in GPUArray
+        if (A.dtype() != DataType::UInt8 || B.dtype() != DataType::UInt8 || D.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemm_fp8_fp8_sm120: all inputs must be uint8 (FP8 E4M3)");
+        }
+        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
+            throw std::runtime_error("gemm_fp8_fp8_sm120: all inputs must be 2D");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B.shape()[1];
+
+        // B is expected to be in ColumnMajor format [K, N] stored as [N, K] transposed
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemm_fp8_fp8_sm120: A.shape[1] must equal B.shape[0]");
+        }
+        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemm_fp8_fp8_sm120: D shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemm_fp8_fp8_sm120(
+            static_cast<const uint8_t*>(A.data()),
+            static_cast<const uint8_t*>(B.data()),
+            static_cast<uint8_t*>(D.data()),
+            M, N, K,
+            1.0f, 0.0f,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemm_fp8_fp8_sm120 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("D"),
+       "Pure FP8 I/O GEMM for SM120: D = A @ B (FP8 E4M3 input/output)");
+
+    // Blockwise scaled FP8 GEMM
+    m.def("gemm_fp8_fp8_blockwise_sm120", [](
+        const GPUArray& A, const GPUArray& B, GPUArray& D,
+        const GPUArray& scale_A, const GPUArray& scale_B
+    ) {
+        // FP8 is stored as UInt8 in GPUArray
+        if (A.dtype() != DataType::UInt8 || B.dtype() != DataType::UInt8 || D.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemm_fp8_fp8_blockwise_sm120: A, B, D must be uint8 (FP8 E4M3)");
+        }
+        if (scale_A.dtype() != DataType::Float32 || scale_B.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemm_fp8_fp8_blockwise_sm120: scale_A, scale_B must be float32");
+        }
+        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
+            throw std::runtime_error("gemm_fp8_fp8_blockwise_sm120: A, B, D must be 2D");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B.shape()[1];
+
+        if (B.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemm_fp8_fp8_blockwise_sm120: A.shape[1] must equal B.shape[0]");
+        }
+        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemm_fp8_fp8_blockwise_sm120: D shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemm_fp8_fp8_blockwise_sm120(
+            static_cast<const uint8_t*>(A.data()),
+            static_cast<const uint8_t*>(B.data()),
+            static_cast<uint8_t*>(D.data()),
+            static_cast<const float*>(scale_A.data()),
+            static_cast<const float*>(scale_B.data()),
+            M, N, K,
+            1.0f, 0.0f,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemm_fp8_fp8_blockwise_sm120 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("D"), py::arg("scale_A"), py::arg("scale_B"),
+       "Blockwise scaled FP8 I/O GEMM for SM120: D = (A * scale_A) @ (B * scale_B)");
+
+    // Get scale factor sizes for FP8 blockwise GEMM
+    m.def("fp8_fp8_get_scale_sizes", [](int M, int N, int K) {
+        size_t sfa_size, sfb_size;
+        pygpukit_fp8_fp8_get_scale_sizes(M, N, K, &sfa_size, &sfb_size);
+        return py::make_tuple(sfa_size, sfb_size);
+    }, py::arg("M"), py::arg("N"), py::arg("K"),
+       "Get scale factor sizes for FP8 blockwise GEMM (returns (sfa_size, sfb_size))");
 
     // ========================================================================
     // NVF4 (4-bit) GEMM for SM120 with BF16 I/O

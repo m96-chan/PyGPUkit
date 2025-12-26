@@ -6,7 +6,6 @@ Benchmarks NVF4 (4-bit) GEMM with BF16 I/O.
 NVF4 provides 2x memory bandwidth compared to FP8.
 """
 
-import struct
 import time
 
 import numpy as np
@@ -29,9 +28,10 @@ def f32_to_bf16(f32: np.ndarray) -> np.ndarray:
 
 def benchmark_nvf4_bf16(sizes: list[int], warmup: int = 5, iterations: int = 20):
     """Benchmark NVF4-BF16 GEMM at various sizes."""
-    from pygpukit.core.factory import from_numpy
     from pygpukit.core.backend import get_native_module
-    from pygpukit.ops import nvf4_bf16_sm120_available, matmul_nvf4_bf16_sm120
+    from pygpukit.core.factory import from_numpy
+    from pygpukit.ops import matmul_nvf4_bf16_sm120, nvf4_bf16_sm120_available
+
     native = get_native_module()
 
     if not nvf4_bf16_sm120_available():
@@ -94,18 +94,22 @@ def benchmark_nvf4_bf16(sizes: list[int], warmup: int = 5, iterations: int = 20)
         tflops_median = flops / median_time / 1e12
         tflops_max = flops / min_time / 1e12
 
-        results.append({
-            "size": size,
-            "tflops_median": tflops_median,
-            "tflops_max": tflops_max,
-            "time_ms": median_time * 1000,
-            "rel_error": rel_error,
-        })
+        results.append(
+            {
+                "size": size,
+                "tflops_median": tflops_median,
+                "tflops_max": tflops_max,
+                "time_ms": median_time * 1000,
+                "rel_error": rel_error,
+            }
+        )
 
         status = "PASS" if rel_error < 0.05 else "FAIL"
-        print(f"{M}x{N}x{K}: {tflops_median:.2f} TFLOPS (median), "
-              f"{tflops_max:.2f} TFLOPS (max), "
-              f"rel_error={rel_error:.2e} [{status}]")
+        print(
+            f"{M}x{N}x{K}: {tflops_median:.2f} TFLOPS (median), "
+            f"{tflops_max:.2f} TFLOPS (max), "
+            f"rel_error={rel_error:.2e} [{status}]"
+        )
 
     print()
     print("=" * 70)
@@ -114,8 +118,10 @@ def benchmark_nvf4_bf16(sizes: list[int], warmup: int = 5, iterations: int = 20)
     print("| Size | TFLOPS (median) | TFLOPS (max) | Time (ms) |")
     print("|------|-----------------|--------------|-----------|")
     for r in results:
-        print(f"| {r['size']}x{r['size']} | {r['tflops_median']:.2f} | "
-              f"{r['tflops_max']:.2f} | {r['time_ms']:.2f} |")
+        print(
+            f"| {r['size']}x{r['size']} | {r['tflops_median']:.2f} | "
+            f"{r['tflops_max']:.2f} | {r['time_ms']:.2f} |"
+        )
 
     return results
 
@@ -124,13 +130,15 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="NVF4-BF16 GEMM Benchmark")
-    parser.add_argument("--sizes", nargs="+", type=int,
-                        default=[1024, 2048, 4096, 8192],
-                        help="Matrix sizes to benchmark")
-    parser.add_argument("--warmup", type=int, default=5,
-                        help="Number of warmup iterations")
-    parser.add_argument("--iterations", type=int, default=20,
-                        help="Number of benchmark iterations")
+    parser.add_argument(
+        "--sizes",
+        nargs="+",
+        type=int,
+        default=[1024, 2048, 4096, 8192],
+        help="Matrix sizes to benchmark",
+    )
+    parser.add_argument("--warmup", type=int, default=5, help="Number of warmup iterations")
+    parser.add_argument("--iterations", type=int, default=20, help="Number of benchmark iterations")
 
     args = parser.parse_args()
 

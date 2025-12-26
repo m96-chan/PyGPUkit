@@ -1,11 +1,9 @@
 """Test NVF4-BF16 GEMM for SM120 (Blackwell GeForce)."""
 
-import struct
-
 import numpy as np
 
 from pygpukit.core.factory import from_numpy
-from pygpukit.ops import nvf4_bf16_sm120_available, matmul_nvf4_bf16_sm120
+from pygpukit.ops import matmul_nvf4_bf16_sm120, nvf4_bf16_sm120_available
 
 
 def bf16_to_f32(bf16_uint16: np.ndarray) -> np.ndarray:
@@ -55,8 +53,8 @@ def test_nvf4_bf16_gemm():
     A_bf16 = f32_to_bf16(A_f32)
     B_bf16 = f32_to_bf16(B_f32)
 
-    print(f"A[0,0] as uint16: {A_bf16[0,0]} (0x{A_bf16[0,0]:04X})")
-    print(f"B[0,0] as uint16: {B_bf16[0,0]} (0x{B_bf16[0,0]:04X})")
+    print(f"A[0,0] as uint16: {A_bf16[0, 0]} (0x{A_bf16[0, 0]:04X})")
+    print(f"B[0,0] as uint16: {B_bf16[0, 0]} (0x{B_bf16[0, 0]:04X})")
 
     # Upload to GPU
     A_gpu = from_numpy(A_bf16)
@@ -72,11 +70,11 @@ def test_nvf4_bf16_gemm():
 
         # Get result as uint16 (raw BFloat16 storage)
         C_uint16 = C_gpu.to_numpy()
-        print(f"C[0,0] as uint16: {C_uint16[0,0]} (0x{C_uint16[0,0]:04X})")
+        print(f"C[0,0] as uint16: {C_uint16[0, 0]} (0x{C_uint16[0, 0]:04X})")
 
         # Convert to float32 for verification
         C_f32 = bf16_to_f32(C_uint16)
-        print(f"C[0,0] as float32: {C_f32[0,0]}")
+        print(f"C[0,0] as float32: {C_f32[0, 0]}")
         print(f"Output shape: {C_f32.shape}, dtype: {C_f32.dtype}")
 
         # Expected: 2.0 * 2.0 * 128 = 512.0
@@ -92,7 +90,9 @@ def test_nvf4_bf16_gemm():
         # Test with NVF4-appropriate random values
         # NVF4 values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0} and negatives
         print("\n--- Testing with NVF4-appropriate random values ---")
-        nvf4_values = np.array([0.5, 1.0, 1.5, 2.0, 3.0, 4.0])  # Positive values only for simpler test
+        nvf4_values = np.array(
+            [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+        )  # Positive values only for simpler test
         A_rand = np.random.choice(nvf4_values, size=(M, K)).astype(np.float32)
         B_rand = np.random.choice(nvf4_values, size=(K, N)).astype(np.float32)
 
@@ -128,6 +128,7 @@ def test_nvf4_bf16_gemm():
     except Exception as e:
         print(f"NVF4-BF16 GEMM failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

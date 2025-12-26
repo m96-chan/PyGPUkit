@@ -33,6 +33,90 @@ PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and idea
 
 ---
 
+## What's New in v0.2.15
+
+### FP8 I/O GEMM (SM120)
+Pure FP8 input/output GEMM for FP8 model inference (Llama 3.1 FP8, Qwen FP8, etc.):
+
+| Function | Description |
+|----------|-------------|
+| `matmul_fp8_fp8_sm120` | FP8 E4M3 input -> FP8 E4M3 output (unity scaling) |
+| `matmul_fp8_fp8_blockwise_sm120` | FP8 with block-wise scale_A / scale_B |
+| `fp8_fp8_get_scale_sizes` | Get required scale factor sizes for (M, N, K) |
+| `fp8_fp8_sm120_available` | Check SM120 FP8 I/O availability |
+
+```python
+import pygpukit as gpk
+import numpy as np
+
+# Check availability
+if gpk.fp8_fp8_sm120_available():
+    # Get scale sizes for blockwise scaling
+    sfa_size, sfb_size = gpk.fp8_fp8_get_scale_sizes(M, N, K)
+
+    # Blockwise scaled FP8 GEMM (for real FP8 models)
+    scale_a = gpk.from_numpy(np.ones(sfa_size, dtype=np.float32))
+    scale_b = gpk.from_numpy(np.ones(sfb_size, dtype=np.float32))
+    C = gpk.matmul_fp8_fp8_blockwise_sm120(A_fp8, B_fp8, scale_a, scale_b)
+```
+
+### Pure NVF4 GEMM (446 TFLOPS)
+GPU-side BF16->NVF4 quantization with 3-stage pipeline for maximum throughput:
+
+| Matrix Size | TFLOPS | Notes |
+|-------------|--------|-------|
+| 8192x8192 | 320 | Branchless vectorized loads |
+| 12288x12288 | 400 | 3-stage async pipeline |
+| 16384x16384 | **446** | Direct write to user buffer |
+
+### New Math Operations
+Extended math operations for GPU computing:
+
+| Category | Operations |
+|----------|------------|
+| **Trigonometric** | `sin`, `cos` |
+| **Power/Root** | `sqrt`, `rsqrt` |
+| **Sign** | `abs`, `neg` |
+| **Comparison** | `clamp`, `where` |
+| **Activation** | `sigmoid`, `tanh` |
+| **Reduction** | `argmax`, `min`, `sum_axis` |
+
+```python
+import pygpukit as gpk
+
+# Trigonometric
+y = gpk.sin(x)
+y = gpk.cos(x)
+
+# Power operations
+y = gpk.sqrt(x)
+y = gpk.rsqrt(x)  # 1/sqrt(x)
+
+# Element-wise comparison
+y = gpk.clamp(x, min_val=-1.0, max_val=1.0)
+y = gpk.where(cond, x, y)  # cond ? x : y
+
+# New activations
+y = gpk.sigmoid(x)
+y = gpk.tanh(x)
+
+# New reductions
+idx = gpk.argmax(x)     # Index of maximum
+val = gpk.min(x)        # Minimum value
+y = gpk.sum_axis(x, 1)  # Sum along axis
+```
+
+### uint8/int8 NumPy Support
+`from_numpy` now supports uint8 and int8 arrays for FP8 data handling:
+
+```python
+# FP8 data stored as uint8
+fp8_data = np.array([...], dtype=np.uint8)
+gpu_fp8 = gpk.from_numpy(fp8_data)
+```
+
+---
+
 ## What's New in v0.2.14
 
 ### Packaging Fixes
@@ -43,10 +127,10 @@ v0.2.13 and v0.2.14 fix wheel RECORD file issues that caused PyPI deprecation wa
 | v0.2.14 | Windows wheel missing `licenses/LICENSE` in RECORD | Added `-Recurse` to scan dist-info subdirectories |
 | v0.2.13 | Hardcoded version in release workflow | Dynamic dist-info folder detection |
 
-**Recommended:** Use v0.2.14 or later.
+**Recommended:** Use v0.2.15 or later.
 
 ```bash
-pip install pygpukit>=0.2.14
+pip install pygpukit>=0.2.15
 ```
 
 ---
@@ -726,6 +810,7 @@ PyGPUkit/
 | **v0.2.10** | **Dynamic cuBLASLt loading**, CUDA Graph optimizations, descriptor caching |
 | **v0.2.11** | **Batch decode** (6.8x speedup), Decode Strategy framework, Driver API async, Dual CUDA builds, RTX 5090 (SM120) |
 | **v0.2.12** | **Advanced audio processing** (ISTFT, Griffin-Lim, HPSS, CQT, pitch detection, time stretch) |
+| **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
 
 ### Planned
 
