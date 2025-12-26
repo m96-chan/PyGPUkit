@@ -2,6 +2,24 @@
 
 All notable changes to PyGPUkit will be documented in this file.
 
+## [0.2.15] - 2025-12-26
+
+### Added
+- **FP8 I/O GEMM (SM120)**: Pure FP8 E4M3 input/output GEMM for FP8 model inference
+  - `matmul_fp8_fp8_sm120`: FP8 GEMM with unity scaling
+  - `matmul_fp8_fp8_blockwise_sm120`: FP8 GEMM with per-block scale factors
+  - `fp8_fp8_get_scale_sizes`: Get required scale factor sizes for (M, N, K)
+  - `fp8_fp8_sm120_available`: Check SM120 FP8 I/O availability
+- **Pure NVF4 GEMM**: GPU-side BF16->NVF4 quantization with 3-stage pipeline (446 TFLOPS)
+- **New math operations**: sin, cos, sqrt, rsqrt, abs, neg
+- **New comparison operations**: clamp, where
+- **New activation functions**: sigmoid, tanh
+- **New reduction operations**: argmax, min, sum_axis
+- **uint8/int8 NumPy support**: `from_numpy` now supports uint8 and int8 arrays
+
+### Changed
+- Renamed `matmul_fp8_sm120.cu` to `matmul_fp8_fp32_sm120.cu` for clarity (FP8 compute, FP32 output)
+
 ## [0.2.14] - 2025-12-23
 
 ### Fixed

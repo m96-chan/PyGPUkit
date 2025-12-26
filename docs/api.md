@@ -186,11 +186,89 @@ def log(a: GPUArray) -> GPUArray:
     """Element-wise natural logarithm: ln(x)"""
 ```
 
+### sin
+
+```python
+def sin(a: GPUArray) -> GPUArray:
+    """Element-wise sine: sin(x)"""
+```
+
+### cos
+
+```python
+def cos(a: GPUArray) -> GPUArray:
+    """Element-wise cosine: cos(x)"""
+```
+
+### sqrt
+
+```python
+def sqrt(a: GPUArray) -> GPUArray:
+    """Element-wise square root: sqrt(x)"""
+```
+
+### rsqrt
+
+```python
+def rsqrt(a: GPUArray) -> GPUArray:
+    """Element-wise reciprocal square root: 1/sqrt(x)"""
+```
+
+### abs
+
+```python
+def abs(a: GPUArray) -> GPUArray:
+    """Element-wise absolute value: |x|"""
+```
+
+### neg
+
+```python
+def neg(a: GPUArray) -> GPUArray:
+    """Element-wise negation: -x"""
+```
+
 **Example:**
 ```python
 a = gpk.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
-b = gpk.exp(a)  # [e^1, e^2, e^3]
-c = gpk.log(a)  # [0, ln(2), ln(3)]
+b = gpk.exp(a)   # [e^1, e^2, e^3]
+c = gpk.log(a)   # [0, ln(2), ln(3)]
+d = gpk.sin(a)   # [sin(1), sin(2), sin(3)]
+e = gpk.cos(a)   # [cos(1), cos(2), cos(3)]
+f = gpk.sqrt(a)  # [1, 1.414, 1.732]
+g = gpk.rsqrt(a) # [1, 0.707, 0.577]
+```
+
+---
+
+## Comparison Operations
+
+### clamp
+
+```python
+def clamp(a: GPUArray, min_val: float, max_val: float) -> GPUArray:
+    """Clamp values to range [min_val, max_val]."""
+```
+
+### where
+
+```python
+def where(cond: GPUArray, x: GPUArray, y: GPUArray) -> GPUArray:
+    """Element-wise conditional: cond ? x : y"""
+```
+
+**Example:**
+```python
+x = gpk.from_numpy(np.array([-2.0, 0.5, 3.0], dtype=np.float32))
+
+# Clamp to [-1, 1]
+y = gpk.clamp(x, -1.0, 1.0)  # [-1.0, 0.5, 1.0]
+
+# Conditional selection
+cond = gpk.from_numpy(np.array([1.0, 0.0, 1.0], dtype=np.float32))
+a = gpk.from_numpy(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+b = gpk.from_numpy(np.array([4.0, 5.0, 6.0], dtype=np.float32))
+result = gpk.where(cond, a, b)  # [1.0, 5.0, 3.0]
 ```
 
 ---
@@ -211,11 +289,27 @@ def gelu(a: GPUArray) -> GPUArray:
     """GELU activation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))"""
 ```
 
+### sigmoid
+
+```python
+def sigmoid(a: GPUArray) -> GPUArray:
+    """Sigmoid activation: 1 / (1 + exp(-x))"""
+```
+
+### tanh
+
+```python
+def tanh(a: GPUArray) -> GPUArray:
+    """Hyperbolic tangent activation: tanh(x)"""
+```
+
 **Example:**
 ```python
 x = gpk.from_numpy(np.array([-1.0, 0.0, 1.0, 2.0], dtype=np.float32))
-y_relu = gpk.relu(x)  # [0, 0, 1, 2]
-y_gelu = gpk.gelu(x)  # [-0.159, 0, 0.841, 1.955]
+y_relu = gpk.relu(x)     # [0, 0, 1, 2]
+y_gelu = gpk.gelu(x)     # [-0.159, 0, 0.841, 1.955]
+y_sigmoid = gpk.sigmoid(x)  # [0.269, 0.5, 0.731, 0.881]
+y_tanh = gpk.tanh(x)     # [-0.762, 0, 0.762, 0.964]
 ```
 
 ---
@@ -305,16 +399,52 @@ def max(a: GPUArray) -> GPUArray:
     """Maximum element."""
 ```
 
+### min
+
+```python
+def min(a: GPUArray) -> GPUArray:
+    """Minimum element."""
+```
+
+### argmax
+
+```python
+def argmax(a: GPUArray) -> GPUArray:
+    """Index of maximum element."""
+```
+
+### sum_axis
+
+```python
+def sum_axis(a: GPUArray, axis: int) -> GPUArray:
+    """Sum along specified axis.
+
+    Args:
+        a: Input array
+        axis: Axis to reduce (0 for rows, 1 for columns)
+
+    Returns:
+        Reduced array with axis removed
+    """
+```
+
 **Example:**
 ```python
 a = gpk.from_numpy(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
 
-total = gpk.sum(a)    # [10.0]
-avg = gpk.mean(a)     # [2.5]
-maximum = gpk.max(a)  # [4.0]
+total = gpk.sum(a)      # [10.0]
+avg = gpk.mean(a)       # [2.5]
+maximum = gpk.max(a)    # [4.0]
+minimum = gpk.min(a)    # [1.0]
+max_idx = gpk.argmax(a) # [3] (index of 4.0)
 
 # Get scalar value
 print(total.to_numpy()[0])  # 10.0
+
+# Sum along axis
+mat = gpk.from_numpy(np.array([[1, 2], [3, 4]], dtype=np.float32))
+row_sum = gpk.sum_axis(mat, axis=1)  # [3, 7]
+col_sum = gpk.sum_axis(mat, axis=0)  # [4, 6]
 ```
 
 ---
@@ -414,6 +544,108 @@ output = gpk.linear_bias_gelu(input, weight, bias)
 
 # Equivalent unfused operations (multiple GPU kernels)
 # output = gpk.gelu(gpk.matmul(input, gpk.transpose(weight)) + bias)
+```
+
+---
+
+## FP8 Operations (SM120+)
+
+FP8 E4M3 GEMM operations for Blackwell GPUs (RTX 5090, B100, B200).
+
+### fp8_fp8_sm120_available
+
+```python
+def fp8_fp8_sm120_available() -> bool:
+    """Check if FP8 I/O GEMM is available (requires SM120+)."""
+```
+
+### fp8_fp8_get_scale_sizes
+
+```python
+def fp8_fp8_get_scale_sizes(M: int, N: int, K: int) -> tuple[int, int]:
+    """Get required scale factor sizes for blockwise FP8 GEMM.
+
+    Args:
+        M: Number of rows in A
+        N: Number of columns in B
+        K: Inner dimension
+
+    Returns:
+        Tuple of (scale_A_size, scale_B_size)
+    """
+```
+
+### matmul_fp8_fp8_sm120
+
+```python
+def matmul_fp8_fp8_sm120(
+    a: GPUArray,
+    b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """FP8 E4M3 GEMM with unity scaling.
+
+    Args:
+        a: FP8 E4M3 matrix [M, K] (stored as uint8)
+        b: FP8 E4M3 matrix [K, N] (stored as uint8)
+        out: Optional output buffer [M, N]
+
+    Returns:
+        FP8 E4M3 result [M, N] (stored as uint8)
+    """
+```
+
+### matmul_fp8_fp8_blockwise_sm120
+
+```python
+def matmul_fp8_fp8_blockwise_sm120(
+    a: GPUArray,
+    b: GPUArray,
+    scale_a: GPUArray,
+    scale_b: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """FP8 E4M3 GEMM with blockwise scaling.
+
+    For FP8 models (Llama 3.1 FP8, Qwen FP8, etc.) that store
+    per-block scale factors alongside quantized weights.
+
+    Args:
+        a: FP8 E4M3 matrix [M, K] (stored as uint8)
+        b: FP8 E4M3 matrix [K, N] (stored as uint8)
+        scale_a: Scale factors for A (size from fp8_fp8_get_scale_sizes)
+        scale_b: Scale factors for B (size from fp8_fp8_get_scale_sizes)
+        out: Optional output buffer [M, N]
+
+    Returns:
+        FP8 E4M3 result [M, N] (stored as uint8)
+
+    Note:
+        Minimum matrix size is 128x128x128 due to CUTLASS tile requirements.
+    """
+```
+
+**Example:**
+```python
+import pygpukit as gpk
+import numpy as np
+
+if gpk.fp8_fp8_sm120_available():
+    M, N, K = 4096, 4096, 4096
+
+    # Create FP8 data (stored as uint8)
+    A = gpk.from_numpy(np.random.randint(0, 255, (M, K), dtype=np.uint8))
+    B = gpk.from_numpy(np.random.randint(0, 255, (K, N), dtype=np.uint8))
+
+    # Get scale sizes and create scale factors
+    sfa_size, sfb_size = gpk.fp8_fp8_get_scale_sizes(M, N, K)
+    scale_A = gpk.from_numpy(np.ones(sfa_size, dtype=np.float32))
+    scale_B = gpk.from_numpy(np.ones(sfb_size, dtype=np.float32))
+
+    # Blockwise scaled FP8 GEMM
+    C = gpk.matmul_fp8_fp8_blockwise_sm120(A, B, scale_A, scale_B)
 ```
 
 ---

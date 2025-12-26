@@ -25,11 +25,13 @@ from pygpukit.ops._common import (
 from pygpukit.ops.elementwise import (
     add,
     add_inplace,
+    clamp,
     copy_to,
     div,
     mul,
     mul_inplace,
     sub,
+    where,
 )
 
 # Re-export embedding operations
@@ -46,8 +48,29 @@ from pygpukit.ops.embedding import (
 
 # Re-export matmul operations
 from pygpukit.ops.matmul import (
+    batched_matmul,
+    fp8_available,
+    fp8_fp8_get_scale_sizes,
+    fp8_fp8_sm120_available,
+    fp8_sm90_available,
+    fp8_sm100_available,
+    fp8_sm120_available,
+    # GEMV operations
+    gemv_bf16,
+    gemv_nvf4_available,
+    gemv_nvf4_bf16,
     linear_bias_gelu,
     matmul,
+    matmul_fp8,
+    matmul_fp8_fp8_blockwise_sm120,
+    matmul_fp8_fp8_sm120,
+    matmul_fp8_sm90,
+    matmul_fp8_sm100,
+    matmul_fp8_sm120,
+    matmul_nvf4_bf16_sm120,
+    nvf4_bf16_sm120_available,
+    nvf4_get_sizes,
+    quantize_bf16_to_nvf4,
     transpose,
 )
 
@@ -62,17 +85,22 @@ from pygpukit.ops.nn import (
     sdpa_causal,
     sdpa_causal_fixed_cache,
     sdpa_causal_fixed_cache_ptr,
+    sigmoid,
     silu,
     slice_rows_range_ptr,
     split_qkv_batch,
+    tanh,
 )
 
 # Re-export reduction operations
 from pygpukit.ops.reduction import (
+    argmax,
     max,
     mean,
+    min,
     softmax,
     sum,
+    sum_axis,
 )
 
 # Re-export sampling operations
@@ -96,13 +124,20 @@ from pygpukit.ops.tensor import (
     repeat_interleave_axis1,
     reshape_copy,
     transpose_3d_021,
+    transpose_4d_0213,
 )
 
 # Re-export unary operations
 from pygpukit.ops.unary import (
+    abs,
+    cos,
     exp,
     log,
+    neg,
     relu,
+    rsqrt,
+    sin,
+    sqrt,
 )
 
 __all__ = [
@@ -118,22 +153,56 @@ __all__ = [
     "add_inplace",
     "mul_inplace",
     "copy_to",
+    "clamp",
+    "where",
     # Unary
+    "abs",
+    "cos",
     "exp",
     "log",
+    "neg",
     "relu",
+    "rsqrt",
+    "sin",
+    "sqrt",
     # Reduction
-    "sum",
-    "mean",
+    "argmax",
     "max",
+    "mean",
+    "min",
     "softmax",
+    "sum",
+    "sum_axis",
     # Matmul
     "matmul",
+    "batched_matmul",
     "transpose",
     "linear_bias_gelu",
+    "matmul_fp8",
+    "matmul_fp8_sm90",
+    "matmul_fp8_sm100",
+    "matmul_fp8_sm120",
+    "matmul_nvf4_bf16_sm120",
+    "fp8_available",
+    "fp8_fp8_sm120_available",
+    "fp8_fp8_get_scale_sizes",
+    "fp8_sm90_available",
+    "fp8_sm100_available",
+    "fp8_sm120_available",
+    "matmul_fp8_fp8_blockwise_sm120",
+    "matmul_fp8_fp8_sm120",
+    "nvf4_bf16_sm120_available",
+    # GEMV
+    "gemv_bf16",
+    "gemv_nvf4_bf16",
+    "gemv_nvf4_available",
+    "nvf4_get_sizes",
+    "quantize_bf16_to_nvf4",
     # Neural Network
     "gelu",
+    "sigmoid",
     "silu",
+    "tanh",
     "layernorm",
     "rmsnorm",
     "bias_add_inplace",
@@ -165,6 +234,7 @@ __all__ = [
     "concat_axis0",
     "repeat_interleave_axis1",
     "transpose_3d_021",
+    "transpose_4d_0213",
     "reshape_copy",
     "cast_f32_to_bf16",
     "cast_f32_to_f16",

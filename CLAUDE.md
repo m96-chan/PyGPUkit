@@ -35,6 +35,19 @@ The core scheduling, memory management, GPU coordination, and performance-critic
 ```
 PyGPUkit/
 ├── src/pygpukit/           # Python API (NumPy-compatible)
+│   ├── core/               # GPUArray, backend abstraction
+│   ├── ops/                # GPU operations (matmul, nn, audio, etc.)
+│   ├── llm/                # LLM inference (Qwen, LLaMA)
+│   │   ├── models/         # Model implementations
+│   │   └── sampling/       # Token sampling strategies
+│   └── asr/                # Speech recognition (Whisper)
+│       ├── preprocessing.py    # Audio preprocessing (mel, normalize)
+│       └── whisper/            # Whisper model implementation
+│           ├── config.py       # WhisperConfig
+│           ├── loader.py       # SafeTensors loader
+│           ├── encoder.py      # Whisper encoder
+│           ├── decoder.py      # Whisper decoder
+│           └── model.py        # WhisperModel high-level API
 ├── native/
 │   ├── core/               # C++ (CUDA Runtime/Driver API)
 │   ├── jit/                # C++ (NVRTC)
@@ -48,8 +61,19 @@ PyGPUkit/
 │   │       └── device.rs   # DeviceCapabilities, KernelType
 │   └── pygpukit-python/    # PyO3 bindings
 ├── examples/
+├── benchmarks/             # Performance benchmarks
 └── tests/
 ```
+
+### Module Separation Policy
+
+| Module | Purpose | Input | Output |
+|--------|---------|-------|--------|
+| `llm/` | Text generation | Text tokens | Text tokens |
+| `asr/` | Speech recognition | Audio waveform | Text |
+| `ops/` | Low-level GPU ops | GPUArray | GPUArray |
+
+**Rationale**: Modules are separated by **modality** (audio vs text), not by architecture (transformer). This follows industry conventions (HuggingFace, OpenAI API) and enables clean future expansion (TTS, vision, etc.).
 
 ### Language Responsibilities
 
@@ -530,7 +554,7 @@ Edit → Build → Validate → Benchmark → Commit
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
 ./build.sh 120      # SM 120のみ (RTX 5090)
-./build.sh          # デフォルト: SM 86
+./build.sh          # デフォルト: SM 120a
 ```
 
 **Windows cmd.exeからビルド（代替）：**
@@ -939,10 +963,17 @@ accepted_tokens = model.jacobi_decode_step(draft_tokens, position)
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
 ./build.sh 120      # SM 120のみ (RTX 5090)
-./build.sh          # デフォルト: SM 86
+./build.sh          # デフォルト: SM 120a
 ```
 
 **サポートSM:** 80, 86, 89, 90, 100, 120
+
+### Local Development Hardware
+
+| Machine | GPU | SM | CUDA Toolkit | Notes |
+|---------|-----|-----|--------------|-------|
+| Primary | RTX 5090 | 120 | 13.1 | Blackwell GeForce, FP8 testing |
+| Secondary | RTX 3090 Ti | 86 | 12.x | Ampere, TF32 benchmarks |
 
 ### Tokenizer
 

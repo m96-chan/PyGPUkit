@@ -33,11 +33,24 @@ include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # CUTLASS (header-only library)
 # Can be disabled via environment variable PYGPUKIT_DISABLE_CUTLASS=1
-set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass")
+# Try multiple paths for CUTLASS (scikit-build-core may change working directory)
+set(CUTLASS_DIR_CANDIDATES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cutlass"
+    "${CMAKE_CURRENT_LIST_DIR}/../third_party/cutlass"
+    "${CMAKE_SOURCE_DIR}/../third_party/cutlass"
+)
+set(CUTLASS_FOUND FALSE)
+foreach(CUTLASS_CANDIDATE ${CUTLASS_DIR_CANDIDATES})
+    if(EXISTS "${CUTLASS_CANDIDATE}/include" AND NOT CUTLASS_FOUND)
+        set(CUTLASS_DIR "${CUTLASS_CANDIDATE}")
+        set(CUTLASS_FOUND TRUE)
+    endif()
+endforeach()
+
 if(DEFINED ENV{PYGPUKIT_DISABLE_CUTLASS})
     message(STATUS "CUTLASS disabled via PYGPUKIT_DISABLE_CUTLASS environment variable")
     add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
-elseif(EXISTS "${CUTLASS_DIR}/include")
+elseif(CUTLASS_FOUND)
     message(STATUS "CUTLASS found at: ${CUTLASS_DIR}")
     include_directories(${CUTLASS_DIR}/include)
     include_directories(${CUTLASS_DIR}/tools/util/include)
@@ -46,7 +59,8 @@ elseif(EXISTS "${CUTLASS_DIR}/include")
     # Disabled for now - will be enabled when SM90+ testing is available
     # add_definitions(-DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1)
 else()
-    message(STATUS "CUTLASS not found, using fallback kernels")
+    message(STATUS "CUTLASS not found at any of: ${CUTLASS_DIR_CANDIDATES}")
+    message(STATUS "Using fallback kernels")
     add_definitions(-DPYGPUKIT_HAS_CUTLASS=0)
 endif()
 
@@ -68,6 +82,39 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 message(STATUS "Building for CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+
+# Enable CUTLASS SM support based on target architectures
+# _SUPPORTED macros enable host-side type definitions
+# _ENABLED macros are auto-defined by CUTLASS based on __CUDA_ARCH__ during device compilation
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "90" SM90_POS)
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "100" SM100_POS)
+string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120" SM120_POS)
+
+# SM90 (Hopper) - FP8 GEMM with per-tensor scaling
+# Also enable for SM100+ since they are forward compatible
+if(NOT SM90_POS EQUAL -1 OR NOT SM100_POS EQUAL -1 OR NOT SM120_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM90 (Hopper) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM90_SUPPORTED=1)
+endif()
+
+# SM100 (Blackwell datacenter)
+# Also enable for SM120 since they are both Blackwell architecture
+if(NOT SM100_POS EQUAL -1 OR NOT SM120_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM100 (Blackwell datacenter) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM100_SUPPORTED=1)
+endif()
+
+# SM120 (Blackwell GeForce) - FP8 GEMM with blockwise scaling
+# Note: Use 120a for full accelerated features (tensor cores, block-scaled MMA)
+if(NOT SM120_POS EQUAL -1)
+    message(STATUS "Enabling CUTLASS SM120 (Blackwell GeForce) support")
+    add_definitions(-DCUTLASS_ARCH_MMA_SM120_SUPPORTED=1)
+    # For SM120a (full accelerated features), also enable feature macros
+    string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120a" SM120A_POS)
+    if(NOT SM120A_POS EQUAL -1)
+        message(STATUS "  SM120a: Full accelerated features enabled")
+    endif()
+endif()
 
 # Ampere-optimized compiler flags
 # Add -v for verbose ptxas output to check register usage
@@ -106,6 +153,13 @@ pybind11_add_module(${MODULE_NAME}
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
+    ops/matmul/matmul_fp8_sm90.cu
+    ops/matmul/matmul_fp8_sm100.cu
+    ops/matmul/matmul_fp8_fp32_sm120.cu
+    ops/matmul/matmul_fp8_fp8_sm120.cu
+    ops/matmul/matmul_nvf4_bf16_sm120.cu
+    ops/matmul/matmul_nvf4_nvf4_sm120.cu
+    ops/gemv/gemv_nvf4.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu

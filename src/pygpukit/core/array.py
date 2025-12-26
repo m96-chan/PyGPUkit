@@ -67,9 +67,11 @@ class GPUArray:
             float16,
             float32,
             float64,
+            int8,
             int16,
             int32,
             int64,
+            uint8,
         )
 
         native = get_native_module()
@@ -90,6 +92,10 @@ class GPUArray:
             dtype = int32
         elif native_dtype == native.DataType.Int16:
             dtype = int16
+        elif native_dtype == native.DataType.Int8:
+            dtype = int8
+        elif native_dtype == native.DataType.UInt8:
+            dtype = uint8
         else:
             raise ValueError(f"Unknown native dtype: {native_dtype}")
 
@@ -247,29 +253,93 @@ class GPUArray:
     # Arithmetic operators
     # ========================================================================
 
-    def __add__(self, other: GPUArray) -> GPUArray:
-        """Element-wise addition."""
+    def __add__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise addition.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        Broadcasting is supported for compatible shapes.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a + b)
+
+        # Check if broadcasting is needed
+        if self.shape != other.shape:
+            # Use numpy broadcasting
+            from pygpukit.core.factory import from_numpy
+
+            a_np = self.to_numpy()
+            b_np = other.to_numpy()
+            result = a_np + b_np
+            return from_numpy(result.astype(a_np.dtype))
+
         from pygpukit.ops.basic import add
 
         return add(self, other)
 
-    def __sub__(self, other: GPUArray) -> GPUArray:
-        """Element-wise subtraction."""
+    def __radd__(self, other: int | float) -> GPUArray:
+        """Right-hand addition for scalar + GPUArray."""
+        return self._scalar_op(other, lambda a, b: b + a)
+
+    def __sub__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise subtraction.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a - b)
         from pygpukit.ops.basic import sub
 
         return sub(self, other)
 
-    def __mul__(self, other: GPUArray) -> GPUArray:
-        """Element-wise multiplication."""
+    def __rsub__(self, other: int | float) -> GPUArray:
+        """Right-hand subtraction for scalar - GPUArray."""
+        return self._scalar_op(other, lambda a, b: b - a)
+
+    def __mul__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise multiplication.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a * b)
         from pygpukit.ops.basic import mul
 
         return mul(self, other)
 
-    def __truediv__(self, other: GPUArray) -> GPUArray:
-        """Element-wise division."""
+    def __rmul__(self, other: int | float) -> GPUArray:
+        """Right-hand multiplication for scalar * GPUArray."""
+        return self._scalar_op(other, lambda a, b: b * a)
+
+    def __truediv__(self, other: GPUArray | int | float) -> GPUArray:
+        """Element-wise division.
+
+        Supports both GPUArray and scalar (int/float) operands.
+        """
+        if isinstance(other, (int, float)):
+            return self._scalar_op(other, lambda a, b: a / b)
         from pygpukit.ops.basic import div
 
         return div(self, other)
+
+    def __rtruediv__(self, other: int | float) -> GPUArray:
+        """Right-hand division for scalar / GPUArray."""
+        return self._scalar_op(other, lambda a, b: b / a)
+
+    def _scalar_op(self, scalar: int | float, op) -> GPUArray:
+        """Apply a scalar operation using NumPy.
+
+        Args:
+            scalar: The scalar operand.
+            op: A callable that takes (array, scalar) and returns the result.
+
+        Returns:
+            A new GPUArray with the result.
+        """
+        from pygpukit.core.factory import from_numpy
+
+        np_data = self.to_numpy()
+        result = op(np_data, scalar)
+        return from_numpy(result.astype(np_data.dtype))
 
     def __matmul__(self, other: GPUArray) -> GPUArray:
         """Matrix multiplication."""
@@ -377,8 +447,10 @@ class GPUArray:
         # Call native narrow
         view_native = native.GPUArray.narrow(src_native, offset_elements, new_shape)
 
-        # Wrap the view
-        return GPUArray._wrap_native(view_native)
+        # Wrap the view and keep reference to source to prevent memory from being freed
+        view_arr = GPUArray._wrap_native(view_native)
+        view_arr._source_ref = self
+        return view_arr
 
     def view(self, new_shape: tuple[int, ...]) -> GPUArray:
         """Create a zero-copy view with a different shape (same total elements).
@@ -423,8 +495,10 @@ class GPUArray:
         # Use narrow with offset=0 to create view with new shape
         view_native = native.GPUArray.narrow(src_native, 0, list(new_shape))
 
-        # Wrap the view
-        return GPUArray._wrap_native(view_native)
+        # Wrap the view and keep reference to source to prevent memory from being freed
+        view_arr = GPUArray._wrap_native(view_native)
+        view_arr._source_ref = self  # Keep source alive while view exists
+        return view_arr
 
     def slice_rows(self, num_rows: int) -> GPUArray:
         """Create a zero-copy view of the first N rows (batch dimension).
@@ -468,4 +542,200 @@ class GPUArray:
         # Use narrow with offset=0 to get first num_rows rows
         view_native = native.GPUArray.narrow(src_native, 0, new_shape)
 
-        return GPUArray._wrap_native(view_native)
+        # Keep reference to source to prevent memory from being freed
+        view_arr = GPUArray._wrap_native(view_native)
+        view_arr._source_ref = self
+        return view_arr
+
+    def transpose(self, *axes: int) -> GPUArray:
+        """Transpose the array by permuting its axes.
+
+        Uses native GPU kernels when available for common patterns:
+        - 2D (1,0): Native matmul.transpose()
+        - 3D (1,0,2): Native tensor.transpose_3d_021()
+        - 3D (0,2,1): Native tensor.transpose_3d_012()
+        - 4D (0,2,1,3): Native tensor.transpose_4d_0213()
+        - 4D (0,1,3,2): Native tensor.transpose_4d_0132()
+        - Other patterns: CPU fallback
+
+        Args:
+            *axes: The new order of axes. If not provided, reverses all axes.
+                   For a 3D array, transpose(0, 2, 1) swaps the last two axes.
+
+        Returns:
+            A new GPUArray with transposed data.
+
+        Example:
+            # Transpose 2D matrix
+            a = from_numpy(np.array([[1, 2], [3, 4]]))
+            b = a.transpose()  # or a.T
+
+            # Permute 3D tensor axes
+            x = from_numpy(np.zeros((2, 3, 4)))
+            y = x.transpose(0, 2, 1)  # shape (2, 4, 3)
+        """
+        from pygpukit.core.backend import NativeBackend, get_backend
+        from pygpukit.core.factory import from_numpy
+
+        # Normalize axes
+        if len(axes) == 0:
+            # Reverse all axes
+            axes = tuple(range(self.ndim - 1, -1, -1))
+
+        # Check if we can use native implementations
+        backend = get_backend()
+        dtype_str = str(self.dtype)
+        use_native = (
+            isinstance(backend, NativeBackend)
+            and backend.is_available()
+            and dtype_str in ("float32", "float16", "bfloat16")
+        )
+
+        if use_native:
+            # 2D transpose: (1, 0)
+            if self.ndim == 2 and axes == (1, 0):
+                from pygpukit.ops.matmul import transpose as matmul_transpose
+
+                return matmul_transpose(self)
+
+            # 3D transpose (1, 0, 2): [d0, d1, d2] -> [d1, d0, d2]
+            if self.ndim == 3 and axes == (1, 0, 2):
+                from pygpukit.ops.tensor import transpose_3d_021
+
+                result = transpose_3d_021(self)
+                return result if result is not None else self
+
+            # 3D transpose (0, 2, 1): [d0, d1, d2] -> [d0, d2, d1]
+            if self.ndim == 3 and axes == (0, 2, 1):
+                from pygpukit.ops.tensor import transpose_3d_012
+
+                result = transpose_3d_012(self)
+                return result if result is not None else self
+
+            # 4D transpose (0, 2, 1, 3): [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+            if self.ndim == 4 and axes == (0, 2, 1, 3):
+                from pygpukit.ops.tensor import transpose_4d_0213
+
+                result = transpose_4d_0213(self)
+                return result if result is not None else self
+
+            # 4D transpose (0, 1, 3, 2): [d0, d1, d2, d3] -> [d0, d1, d3, d2]
+            if self.ndim == 4 and axes == (0, 1, 3, 2):
+                from pygpukit.ops.tensor import transpose_4d_0132
+
+                result = transpose_4d_0132(self)
+                return result if result is not None else self
+
+        # CPU fallback for unsupported patterns
+        np_data = self.to_numpy()
+        result = np_data.transpose(*axes)
+        return from_numpy(result.copy())
+
+    @property
+    def T(self) -> GPUArray:
+        """Return transposed array (reverses all axes)."""
+        return self.transpose()
+
+    def reshape(self, *shape: int) -> GPUArray:
+        """Reshape the array to a new shape.
+
+        Args:
+            *shape: The new shape. Can be passed as separate args or as a tuple.
+                    One dimension can be -1 to infer from the total size.
+
+        Returns:
+            A new GPUArray with the specified shape.
+
+        Example:
+            x = from_numpy(np.zeros((2, 3, 4)))
+            y = x.reshape(6, 4)  # or x.reshape((6, 4))
+            z = x.reshape(-1, 4)  # infer first dimension
+        """
+        from pygpukit.core.backend import NativeBackend, get_backend
+
+        # Handle both reshape(2, 3) and reshape((2, 3))
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+
+        # Handle -1 dimension inference
+        shape = list(shape)
+        total_size = 1
+        for dim in self.shape:
+            total_size *= dim
+
+        neg_idx = -1
+        known_size = 1
+        for i, dim in enumerate(shape):
+            if dim == -1:
+                if neg_idx >= 0:
+                    raise ValueError("reshape: only one dimension can be -1")
+                neg_idx = i
+            else:
+                known_size *= dim
+
+        if neg_idx >= 0:
+            if total_size % known_size != 0:
+                raise ValueError(
+                    f"reshape: cannot infer dimension, total size {total_size} "
+                    f"not divisible by {known_size}"
+                )
+            shape[neg_idx] = total_size // known_size
+
+        shape = tuple(shape)
+
+        # Verify total size
+        output_size = 1
+        for dim in shape:
+            output_size *= dim
+        if output_size != total_size:
+            raise ValueError(
+                f"reshape: cannot reshape array of size {total_size} into shape {shape}"
+            )
+
+        # Use native reshape_copy if available (keeps data on GPU)
+        backend = get_backend()
+        if isinstance(backend, NativeBackend) and backend.is_available():
+            dtype_str = str(self.dtype)
+            if dtype_str in ("float32", "float16", "bfloat16"):
+                from pygpukit.core.backend import get_native_module
+
+                native = get_native_module()
+                input_native = self._get_native()
+                c_native = native.reshape_copy(input_native, list(shape))
+                return GPUArray._wrap_native(c_native)
+
+        # CPU fallback
+        from pygpukit.core.factory import from_numpy
+
+        np_data = self.to_numpy()
+        result = np_data.reshape(shape)
+        return from_numpy(result.copy())
+
+    def __getitem__(self, key) -> GPUArray:
+        """Index or slice the array.
+
+        Supports NumPy-style indexing including:
+        - Integer indexing: arr[0]
+        - Slicing: arr[:10], arr[1:5], arr[::2]
+        - Multi-dimensional: arr[0, :, 1:3]
+
+        Args:
+            key: Index, slice, or tuple of indices/slices.
+
+        Returns:
+            A new GPUArray containing the selected elements.
+
+        Example:
+            x = from_numpy(np.arange(100).reshape(10, 10))
+            row = x[0]        # First row
+            col = x[:, 0]     # First column
+            sub = x[:5, :5]   # 5x5 subarray
+        """
+        from pygpukit.core.factory import from_numpy
+
+        np_data = self.to_numpy()
+        result = np_data[key]
+        # Handle scalar result
+        if not isinstance(result, np.ndarray):
+            result = np.array(result)
+        return from_numpy(result.copy())

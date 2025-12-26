@@ -34,6 +34,14 @@ GPUArray sub(const GPUArray& a, const GPUArray& b);
 void div(const GPUArray& a, const GPUArray& b, GPUArray& c);
 GPUArray div(const GPUArray& a, const GPUArray& b);
 
+// Clamp: c = clamp(a, min_val, max_val)
+void clamp(const GPUArray& a, GPUArray& c, float min_val, float max_val);
+GPUArray clamp(const GPUArray& a, float min_val, float max_val);
+
+// Where: c = cond ? a : b (conditional select)
+void where(const GPUArray& cond, const GPUArray& a, const GPUArray& b, GPUArray& c);
+GPUArray where(const GPUArray& cond, const GPUArray& a, const GPUArray& b);
+
 // ============================================================================
 // Unary Operations
 // ============================================================================
@@ -50,6 +58,30 @@ GPUArray log(const GPUArray& a);
 void relu(const GPUArray& a, GPUArray& c);
 GPUArray relu(const GPUArray& a);
 
+// Sin: c = sin(a)
+void sin(const GPUArray& a, GPUArray& c);
+GPUArray sin(const GPUArray& a);
+
+// Cos: c = cos(a)
+void cos(const GPUArray& a, GPUArray& c);
+GPUArray cos(const GPUArray& a);
+
+// Sqrt: c = sqrt(a)
+void sqrt(const GPUArray& a, GPUArray& c);
+GPUArray sqrt(const GPUArray& a);
+
+// Rsqrt: c = 1/sqrt(a)
+void rsqrt(const GPUArray& a, GPUArray& c);
+GPUArray rsqrt(const GPUArray& a);
+
+// Abs: c = |a|
+void abs(const GPUArray& a, GPUArray& c);
+GPUArray abs(const GPUArray& a);
+
+// Neg: c = -a
+void neg(const GPUArray& a, GPUArray& c);
+GPUArray neg(const GPUArray& a);
+
 // ============================================================================
 // Reduction Operations
 // ============================================================================
@@ -62,6 +94,16 @@ GPUArray mean(const GPUArray& a);
 
 // Max: scalar max of all elements
 GPUArray max(const GPUArray& a);
+
+// Min: scalar min of all elements
+GPUArray min(const GPUArray& a);
+
+// Argmax: index of maximum element
+GPUArray argmax(const GPUArray& a);
+
+// Sum with axis: sum along specified axis (0 or 1)
+// input: [M, N], axis=0 -> output: [N], axis=1 -> output: [M]
+GPUArray sum_axis(const GPUArray& a, int axis);
 
 // ============================================================================
 // Matrix Multiplication
@@ -115,6 +157,14 @@ GPUArray silu(const GPUArray& input);
 
 // SiLU with output buffer (for CUDA Graph capture)
 void silu(const GPUArray& input, GPUArray& out);
+
+// Sigmoid activation: y = 1 / (1 + exp(-x))
+GPUArray sigmoid(const GPUArray& input);
+void sigmoid(const GPUArray& input, GPUArray& out);
+
+// Tanh activation
+GPUArray tanh(const GPUArray& input);
+void tanh(const GPUArray& input, GPUArray& out);
 
 // RoPE (Rotary Position Embedding) - In-place
 // q: [seq_len, n_heads_q, head_dim]
@@ -177,6 +227,13 @@ void sdpa_causal_fixed_cache_ptr(const GPUArray& Q, const GPUArray& K, const GPU
 // output: [batch, out_features]
 GPUArray linear_bias_gelu(const GPUArray& input, const GPUArray& weight, const GPUArray& bias);
 
+// Strided Batched GEMM: C[b] = A[b] @ B[b] for b in [0, batch_count)
+// A: [batch, M, K], B: [batch, K, N], C: [batch, M, N] (row-major)
+// Uses CUTLASS TensorCore for high performance
+void batched_matmul_fp32(const GPUArray& A, const GPUArray& B, GPUArray& C,
+                         int M, int N, int K, int batch_count,
+                         int64_t strideA, int64_t strideB, int64_t strideC);
+
 // ============================================================================
 // Tensor Manipulation Operations
 // ============================================================================
@@ -193,6 +250,24 @@ GPUArray repeat_interleave_axis1(const GPUArray& input, size_t repeats);
 GPUArray transpose_3d_021(const GPUArray& input);
 // Transpose 3D tensor with output buffer (for CUDA Graph capture)
 void transpose_3d_021(const GPUArray& input, GPUArray& out);
+
+// Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d2, d1, d3]
+// Swaps axes 1 and 2 (common in attention: batch, seq, heads, dim -> batch, heads, seq, dim)
+GPUArray transpose_4d_0213(const GPUArray& input);
+// Transpose 4D tensor with output buffer (for CUDA Graph capture)
+void transpose_4d_0213(const GPUArray& input, GPUArray& out);
+
+// Transpose 3D tensor: [d0, d1, d2] -> [d0, d2, d1]
+// Swaps last two axes (common in attention operations)
+GPUArray transpose_3d_012(const GPUArray& input);
+// Transpose 3D tensor with output buffer (for CUDA Graph capture)
+void transpose_3d_012(const GPUArray& input, GPUArray& out);
+
+// Transpose 4D tensor: [d0, d1, d2, d3] -> [d0, d1, d3, d2]
+// Swaps last two axes (for K^T in attention)
+GPUArray transpose_4d_0132(const GPUArray& input);
+// Transpose 4D tensor with output buffer (for CUDA Graph capture)
+void transpose_4d_0132(const GPUArray& input, GPUArray& out);
 
 // Reshape with copy (creates contiguous tensor with new shape)
 GPUArray reshape_copy(const GPUArray& input, const std::vector<size_t>& new_shape);

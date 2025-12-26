@@ -16,6 +16,8 @@ from pygpukit.ops.basic import (
     # Elementwise
     add,
     add_inplace,
+    # Matmul
+    batched_matmul,
     # Neural Network
     bias_add_inplace,
     # Tensor
@@ -32,7 +34,17 @@ from pygpukit.ops.basic import (
     embedding_lookup_ptr,
     # Unary
     exp,
+    fp8_available,
+    fp8_fp8_get_scale_sizes,
+    fp8_fp8_sm120_available,
+    fp8_sm90_available,
+    fp8_sm100_available,
+    fp8_sm120_available,
     gelu,
+    # GEMV
+    gemv_bf16,
+    gemv_nvf4_available,
+    gemv_nvf4_bf16,
     kv_cache_prefill,
     kv_cache_prefill_gqa,
     kv_cache_update,
@@ -43,11 +55,21 @@ from pygpukit.ops.basic import (
     linear_bias_gelu,
     log,
     matmul,
+    matmul_fp8,
+    matmul_fp8_fp8_blockwise_sm120,
+    matmul_fp8_fp8_sm120,
+    matmul_fp8_sm90,
+    matmul_fp8_sm100,
+    matmul_fp8_sm120,
+    matmul_nvf4_bf16_sm120,
     # Reduction
     max,
     mean,
     mul,
     mul_inplace,
+    nvf4_bf16_sm120_available,
+    nvf4_get_sizes,
+    quantize_bf16_to_nvf4,
     relu,
     repeat_interleave_axis1,
     reshape_copy,
@@ -73,6 +95,7 @@ from pygpukit.ops.basic import (
     sum,
     transpose,
     transpose_3d_021,
+    transpose_4d_0213,
 )
 
 __all__ = [
@@ -95,8 +118,29 @@ __all__ = [
     "softmax",
     # Matmul
     "matmul",
+    "batched_matmul",
     "transpose",
     "linear_bias_gelu",
+    "matmul_fp8",
+    "matmul_fp8_fp8_blockwise_sm120",
+    "matmul_fp8_fp8_sm120",
+    "matmul_fp8_sm90",
+    "matmul_fp8_sm100",
+    "matmul_fp8_sm120",
+    "matmul_nvf4_bf16_sm120",
+    "fp8_available",
+    "fp8_fp8_get_scale_sizes",
+    "fp8_fp8_sm120_available",
+    "fp8_sm90_available",
+    "fp8_sm100_available",
+    "fp8_sm120_available",
+    "nvf4_bf16_sm120_available",
+    # GEMV
+    "gemv_bf16",
+    "gemv_nvf4_bf16",
+    "gemv_nvf4_available",
+    "nvf4_get_sizes",
+    "quantize_bf16_to_nvf4",
     # Neural Network
     "gelu",
     "silu",
@@ -131,6 +175,7 @@ __all__ = [
     "concat_axis0",
     "repeat_interleave_axis1",
     "transpose_3d_021",
+    "transpose_4d_0213",
     "reshape_copy",
     "cast_f32_to_bf16",
     "cast_f32_to_f16",

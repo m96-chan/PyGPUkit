@@ -119,6 +119,109 @@ __global__ void silu_bf16_kernel(const __nv_bfloat16* __restrict__ input,
     }
 }
 
+// ============================================================================
+// ReLU Activation: max(0, x)
+// ============================================================================
+
+__global__ void relu_f32_kernel(const float* __restrict__ input,
+                                 float* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = fmaxf(0.0f, input[idx]);
+    }
+}
+
+__global__ void relu_f16_kernel(const __half* __restrict__ input,
+                                 __half* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(fmaxf(0.0f, x));
+    }
+}
+
+__global__ void relu_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                  __nv_bfloat16* __restrict__ output,
+                                  size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __bfloat162float(input[idx]);
+        output[idx] = __float2bfloat16(fmaxf(0.0f, x));
+    }
+}
+
+// ============================================================================
+// Sigmoid Activation: 1 / (1 + exp(-x))
+// ============================================================================
+
+__device__ __forceinline__ float sigmoid_f32(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
+__global__ void sigmoid_f32_kernel(const float* __restrict__ input,
+                                    float* __restrict__ output,
+                                    size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = sigmoid_f32(input[idx]);
+    }
+}
+
+__global__ void sigmoid_f16_kernel(const __half* __restrict__ input,
+                                    __half* __restrict__ output,
+                                    size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(sigmoid_f32(x));
+    }
+}
+
+__global__ void sigmoid_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                     __nv_bfloat16* __restrict__ output,
+                                     size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __bfloat162float(input[idx]);
+        output[idx] = __float2bfloat16(sigmoid_f32(x));
+    }
+}
+
+// ============================================================================
+// Tanh Activation
+// ============================================================================
+
+__global__ void tanh_f32_kernel(const float* __restrict__ input,
+                                 float* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        output[idx] = tanhf(input[idx]);
+    }
+}
+
+__global__ void tanh_f16_kernel(const __half* __restrict__ input,
+                                 __half* __restrict__ output,
+                                 size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(tanhf(x));
+    }
+}
+
+__global__ void tanh_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                  __nv_bfloat16* __restrict__ output,
+                                  size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __bfloat162float(input[idx]);
+        output[idx] = __float2bfloat16(tanhf(x));
+    }
+}
+
 }  // namespace nn
 }  // namespace ops
 }  // namespace pygpukit

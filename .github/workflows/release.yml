@@ -127,7 +127,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DPYBIND11_FINDPYTHON=ON \
             -Dpybind11_DIR=$(python -c "import pybind11; print(pybind11.get_cmake_dir())") \
-            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" \
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120a" \
             -DMODULE_SUFFIX="_cu131"
           cmake --build . --config Release -j$(nproc)
 
@@ -216,7 +216,7 @@ jobs:
         env:
           # Skip native build since we have prebuilt modules
           PYGPUKIT_SKIP_NATIVE_BUILD: "1"
-          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
+          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120a"
 
       - name: Inject prebuilt native modules into wheel
         run: |
@@ -419,7 +419,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release ^
             -DPYBIND11_FINDPYTHON=ON ^
             -Dpybind11_DIR="%PYBIND11_DIR%" ^
-            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120" ^
+            -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100;120a" ^
             -DMODULE_SUFFIX="_cu131"
           cmake --build . --config Release
 
@@ -537,7 +537,7 @@ jobs:
           set "PYGPUKIT_SKIP_NATIVE_BUILD=1"
           python -m build --wheel
         env:
-          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120"
+          CMAKE_CUDA_ARCHITECTURES: "80;86;89;90;100;120a"
 
       - name: Inject prebuilt native modules into wheel
         shell: pwsh

@@ -71,6 +71,19 @@ enum cublasLtMatmulPreferenceAttributes_t {
     CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 1
 };
 
+// Matrix layout attributes for batched GEMM
+enum cublasLtMatrixLayoutAttribute_t {
+    CUBLASLT_MATRIX_LAYOUT_ORDER = 1,
+    CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT = 5,
+    CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET = 6
+};
+
+// Matrix order
+enum cublasLtOrder_t {
+    CUBLASLT_ORDER_COL = 0,
+    CUBLASLT_ORDER_ROW = 1
+};
+
 // Algorithm structure (64 bytes as per cuBLAS documentation)
 struct cublasLtMatmulAlgo_t {
     uint64_t data[8];
@@ -130,6 +143,13 @@ cublasStatus_t matrix_layout_create(
 
 cublasStatus_t matrix_layout_destroy(cublasLtMatrixLayout_t matLayout);
 
+cublasStatus_t matrix_layout_set_attribute(
+    cublasLtMatrixLayout_t matLayout,
+    cublasLtMatrixLayoutAttribute_t attr,
+    const void* buf,
+    size_t sizeInBytes
+);
+
 cublasStatus_t matmul(
     cublasLtHandle_t lightHandle,
     cublasLtMatmulDesc_t computeDesc,
@@ -174,6 +194,15 @@ cudaError_t gemm_fp32(
 cudaError_t gemm_bf16(
     const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* C,
     int M, int N, int K,
+    cudaStream_t stream = nullptr
+);
+
+// Strided Batched FP32 GEMM: C[b] = A[b] @ B[b] for b in [0, batch_count)
+// A: [batch_count, M, K], B: [batch_count, K, N], C: [batch_count, M, N]
+cudaError_t gemm_strided_batched_fp32(
+    const float* A, const float* B, float* C,
+    int M, int N, int K, int batch_count,
+    int64_t strideA, int64_t strideB, int64_t strideC,
     cudaStream_t stream = nullptr
 );
 

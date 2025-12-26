@@ -130,3 +130,129 @@ def _relu_native(a: GPUArray) -> GPUArray:
     a_native = a._get_native()
     c_native = native.relu(a_native)
     return GPUArray._wrap_native(c_native)
+
+
+def sin(a: GPUArray) -> GPUArray:
+    """Element-wise sine.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A new GPUArray containing sin(a).
+    """
+    _validate_float_dtype(a, "sin")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.sin(a._get_native()))
+    else:
+        return from_numpy(np.sin(a.to_numpy()))
+
+
+def cos(a: GPUArray) -> GPUArray:
+    """Element-wise cosine.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A new GPUArray containing cos(a).
+    """
+    _validate_float_dtype(a, "cos")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.cos(a._get_native()))
+    else:
+        return from_numpy(np.cos(a.to_numpy()))
+
+
+def sqrt(a: GPUArray) -> GPUArray:
+    """Element-wise square root.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A new GPUArray containing sqrt(a).
+    """
+    _validate_float_dtype(a, "sqrt")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.sqrt(a._get_native()))
+    else:
+        return from_numpy(np.sqrt(a.to_numpy()))
+
+
+def rsqrt(a: GPUArray) -> GPUArray:
+    """Element-wise reciprocal square root: 1/sqrt(x).
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A new GPUArray containing 1/sqrt(a).
+    """
+    _validate_float_dtype(a, "rsqrt")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.rsqrt(a._get_native()))
+    else:
+        return from_numpy(1.0 / np.sqrt(a.to_numpy()))
+
+
+def abs(a: GPUArray) -> GPUArray:
+    """Element-wise absolute value.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A new GPUArray containing |a|.
+    """
+    _validate_float_dtype(a, "abs")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.abs(a._get_native()))
+    else:
+        return from_numpy(np.abs(a.to_numpy()))
+
+
+def neg(a: GPUArray) -> GPUArray:
+    """Element-wise negation: -x.
+
+    Args:
+        a: Input array (float types).
+
+    Returns:
+        A new GPUArray containing -a.
+    """
+    _validate_float_dtype(a, "neg")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        return GPUArray._wrap_native(native.neg(a._get_native()))
+    else:
+        return from_numpy(-a.to_numpy())

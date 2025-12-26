@@ -197,6 +197,66 @@ __global__ void div_bf16_kernel(const __nv_bfloat16* a, const __nv_bfloat16* b, 
     }
 }
 
+// ============================================================================
+// Clamp/Clip kernels - clamp values to [min, max] range
+// ============================================================================
+
+__global__ void clamp_f32_kernel(const float* a, float* c, float min_val, float max_val, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = fminf(fmaxf(a[idx], min_val), max_val);
+    }
+}
+
+__global__ void clamp_f16_kernel(const __half* a, __half* c, float min_val, float max_val, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float v = __half2float(a[idx]);
+        c[idx] = __float2half(fminf(fmaxf(v, min_val), max_val));
+    }
+}
+
+__global__ void clamp_bf16_kernel(const __nv_bfloat16* a, __nv_bfloat16* c, float min_val, float max_val, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float v = bf16_to_float(a[idx]);
+        c[idx] = float_to_bf16(fminf(fmaxf(v, min_val), max_val));
+    }
+}
+
+// ============================================================================
+// Where/Select kernels - conditional selection: out = cond ? a : b
+// ============================================================================
+
+__global__ void where_f32_kernel(const uint8_t* cond, const float* a, const float* b, float* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = cond[idx] ? a[idx] : b[idx];
+    }
+}
+
+__global__ void where_f16_kernel(const uint8_t* cond, const __half* a, const __half* b, __half* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = cond[idx] ? a[idx] : b[idx];
+    }
+}
+
+__global__ void where_bf16_kernel(const uint8_t* cond, const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = cond[idx] ? a[idx] : b[idx];
+    }
+}
+
+// Scalar variants for where (useful for masking with constant)
+__global__ void where_scalar_f32_kernel(const uint8_t* cond, const float* a, float b, float* c, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        c[idx] = cond[idx] ? a[idx] : b;
+    }
+}
+
 } // namespace elementwise
 } // namespace ops
 } // namespace pygpukit

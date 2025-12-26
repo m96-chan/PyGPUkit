@@ -269,6 +269,23 @@ def main():
         action="store_true",
         help="Enable CUDA Graph for faster decode (reduces kernel launch overhead)",
     )
+    parser.add_argument(
+        "--speculative",
+        action="store_true",
+        help="[EXPERIMENTAL] Enable self-speculative decoding (uses argmax, may cause repetition)",
+    )
+    parser.add_argument(
+        "--draft-tokens",
+        type=int,
+        default=4,
+        help="Number of draft tokens per speculation round (default: 4)",
+    )
+    parser.add_argument(
+        "--draft-layers",
+        type=int,
+        default=8,
+        help="Number of early layers to use as draft model (default: 8)",
+    )
     args = parser.parse_args()
 
     # Lazy imports for faster --help
@@ -280,6 +297,7 @@ def main():
         ChatMessage,
         DecodeM1,
         DecodeM1Graph,
+        DecodeSpeculative,
         detect_model_spec,
         format_chat_messages,
         load_model_from_safetensors,
@@ -332,9 +350,23 @@ def main():
 
     # Initialize decode strategy
     use_cuda_graph = args.cuda_graph
+    use_speculative = args.speculative
     m1_graph = None
+    speculative_strategy = None
 
-    if use_cuda_graph:
+    if use_speculative:
+        # Use DecodeSpeculative for self-speculative decoding
+        print("\nInitializing Self-Speculative Decode...")
+        print(f"  draft_tokens={args.draft_tokens}, draft_layers={args.draft_layers}")
+        print("  WARNING: Uses argmax (greedy) decoding - may produce repetitive output")
+        print("  For production use, prefer --cuda-graph instead")
+        speculative_strategy = DecodeSpeculative(
+            max_draft_tokens=args.draft_tokens,
+            draft_layers=args.draft_layers,
+        )
+        speculative_strategy.bind(model)
+        m1 = None  # Not used in speculative mode
+    elif use_cuda_graph:
         # Use DecodeM1Graph for CUDA Graph mode
         print("\nInitializing CUDA Graph...")
         m1_graph = DecodeM1Graph()
@@ -729,9 +761,143 @@ def main():
             batch_chunks,
         )
 
+    def generate_speculative(
+        messages: list[ChatMessage],
+    ) -> tuple[str, float, float, int, int, float]:
+        """Generate using self-speculative decoding.
+
+        Uses early layers as draft model, verifies with full model in batch.
+        Uses KV snapshot/restore for correctness.
+
+        Returns: (text, prefill_time, decode_time, total_tokens, total_drafts, accept_rate)
+        """
+        prompt = format_chat_messages(messages, model_type=model_type)
+        input_ids = tokenizer.encode(prompt).ids
+
+        if len(input_ids) >= args.max_seq_len - 10:
+            return "[Error: Conversation too long. Use /clear to reset.]", 0, 0, 0, 0, 0.0
+
+        # Prefill
+        t_prefill_start = time.perf_counter()
+        hidden, past_key_values = model(input_ids, use_cache=True)
+        for i, block in enumerate(model.blocks):
+            past_k, past_v = past_key_values[i]
+            kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
+            kv_cache_prefill_gqa(past_v, block.attn._v_cache, block.attn.num_heads, start_pos=0)
+        default_stream().synchronize()
+        prefill_time = time.perf_counter() - t_prefill_start
+
+        # Self-speculative decode
+        t_decode_start = time.perf_counter()
+        generated_ids: list[int] = []
+        stream_decoder = StreamingDecoder(tokenizer)
+        position = len(input_ids)
+        context_len = position + 1
+        at_start = True
+        skip_count = 0
+
+        # Stats
+        total_drafts = 0
+        total_accepted = 0
+
+        # Get first token from prefill
+        logits = model.get_logits(hidden)
+        logits_np = logits_to_f32(logits)[-1]
+        next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
+
+        # Skip special tokens at start (e.g., <|im_start|>assistant\n)
+        while should_skip_token(next_token, at_start, skip_count):
+            if context_len >= args.max_seq_len:
+                break
+            # Use fixed cache decode for skipping
+            hidden = model._decode_step_fixed_cache(next_token, position, context_len)
+            logits = model.get_logits(hidden)
+            logits_np = logits_to_f32(logits)[-1]
+            next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
+            position += 1
+            context_len += 1
+            skip_count += 1
+
+        at_start = False
+
+        # Check if first real token is end token
+        if is_end_token(next_token):
+            default_stream().synchronize()
+            decode_time = time.perf_counter() - t_decode_start
+            return "", prefill_time, decode_time, 0, 0, 0.0
+
+        # Output first real token (step_speculative takes this as input and returns NEXT tokens)
+        text_chunk = stream_decoder.add_token(next_token)
+        if text_chunk:
+            print(text_chunk, end="", flush=True)
+        generated_ids.append(next_token)
+
+        # Main speculative decode loop
+        while len(generated_ids) < args.max_new_tokens:
+            if context_len >= args.max_seq_len:
+                break
+
+            if is_end_token(next_token):
+                break
+
+            # Run speculative decode step (uses KV snapshot/restore)
+            accepted_tokens, new_position, stats = speculative_strategy.step_speculative(
+                next_token, position, context_len
+            )
+
+            # Track stats
+            total_drafts += stats["draft_count"]
+            total_accepted += stats["accepted_count"]
+
+            # Stream out accepted tokens
+            for tok in accepted_tokens:
+                if is_end_token(tok):
+                    break
+                generated_ids.append(tok)
+                text_chunk = stream_decoder.add_token(tok)
+                if text_chunk:
+                    print(text_chunk, end="", flush=True)
+
+            # Check if we hit end token
+            if any(is_end_token(tok) for tok in accepted_tokens):
+                break
+
+            # Update position for next iteration
+            position = new_position
+            context_len = position + 1
+
+            # Get next token for next speculation round
+            if accepted_tokens:
+                next_token = accepted_tokens[-1]
+            else:
+                break
+
+        # Flush any remaining buffered text
+        remaining = stream_decoder.flush()
+        if remaining:
+            print(remaining, end="", flush=True)
+
+        default_stream().synchronize()
+        decode_time = time.perf_counter() - t_decode_start
+
+        # Calculate acceptance rate
+        accept_rate = total_accepted / total_drafts if total_drafts > 0 else 0.0
+
+        print()
+        return (
+            tokenizer.decode(generated_ids),
+            prefill_time,
+            decode_time,
+            len(generated_ids),
+            total_drafts,
+            accept_rate,
+        )
+
     def generate_response(messages: list[ChatMessage]):
         """Dispatch to appropriate generation method."""
-        if batch_size > 1:
+        if use_speculative:
+            return generate_speculative(messages)
+        elif batch_size > 1:
             return generate_chunked(messages)
         else:
             return generate_m1(messages)
@@ -741,7 +907,11 @@ def main():
     # =========================================================================
     print("\n" + "=" * 60)
     print(" PyGPUkit Chat")
-    if batch_size > 1:
+    if use_speculative:
+        mode_str = (
+            f"Self-Speculative (draft_tokens={args.draft_tokens}, draft_layers={args.draft_layers})"
+        )
+    elif batch_size > 1:
         mode_str = f"Chunked (chunk_size={batch_size})"
     elif use_cuda_graph:
         mode_str = "M=1 + CUDA Graph"
@@ -781,14 +951,16 @@ def main():
 
         result = generate_response(messages)
 
-        if batch_size > 1:
+        if use_speculative:
+            response, prefill_time, decode_time, total_tokens, total_drafts, accept_rate = result
+            tokens_generated = total_tokens
+        elif batch_size > 1:
             response, prefill_time, decode_time, total_tokens, accepted_batches = result
             tokens_generated = total_tokens
         else:
             response, prefill_time, decode_time = result
             # Use length of encoded response, but fallback to 0 if empty
             tokens_generated = len(tokenizer.encode(response).ids) if response else 0
-            accepted_batches = 0
 
         # Add assistant response to history
         conversation.append(ChatMessage(role="assistant", content=response))
@@ -799,7 +971,9 @@ def main():
             f"  [prefill: {prefill_time:.1f}s, "
             f"decode: {tokens_generated} tok / {decode_time:.1f}s = {decode_tps:.1f} tok/s"
         )
-        if batch_size > 1:
+        if use_speculative:
+            stats += f", drafts: {total_drafts}, accept: {accept_rate:.1%}"
+        elif batch_size > 1:
             stats += f", chunks: {accepted_batches}"
         stats += "]"
         print(stats)

@@ -1,6 +1,6 @@
 """PyGPUkit - A lightweight GPU runtime for Python."""
 
-__version__ = "0.2.11"
+__version__ = "0.2.15"
 
 # LLM support (safetensors loader)
 from pygpukit import llm, ops
@@ -41,8 +41,12 @@ from pygpukit.jit.compiler import (
     warmup,
 )
 from pygpukit.ops.basic import (
+    abs,
     add,
+    argmax,
     bias_add_inplace,
+    clamp,
+    cos,
     div,
     exp,
     gelu,
@@ -52,12 +56,21 @@ from pygpukit.ops.basic import (
     matmul,
     max,
     mean,
+    min,
     mul,
+    neg,
     relu,
+    rsqrt,
+    sigmoid,
+    sin,
     softmax,
+    sqrt,
     sub,
     sum,
+    sum_axis,
+    tanh,
     transpose,
+    where,
 )
 
 # Try to import Rust types, fallback to Python implementations
@@ -141,25 +154,39 @@ __all__ = [
     "check_driver_compatibility",
     # Operations
     "ops",  # ops module for advanced usage
+    "abs",
     "add",
-    "sub",
-    "mul",
+    "argmax",
+    "clamp",
+    "cos",
     "div",
     "exp",
-    "log",
-    "relu",
     "gelu",
-    "softmax",
     "layernorm",
+    "log",
     "matmul",
+    "mul",
+    "neg",
+    "relu",
+    "rsqrt",
+    "sigmoid",
+    "sin",
+    "softmax",
+    "sqrt",
+    "sub",
+    "tanh",
     "transpose",
+    "where",
     # Fused operations
     "bias_add_inplace",
     "linear_bias_gelu",
     # Reductions
-    "sum",
-    "mean",
+    "argmax",
     "max",
+    "mean",
+    "min",
+    "sum",
+    "sum_axis",
     # LLM support
     "llm",
     # CUDA Graph
