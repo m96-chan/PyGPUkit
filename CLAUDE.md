@@ -52,6 +52,7 @@ PyGPUkit/
 │   ├── core/               # C++ (CUDA Runtime/Driver API)
 │   ├── jit/                # C++ (NVRTC)
 │   ├── ops/                # C++ (CUDA kernels)
+│   │   └── matmul/         # MatMul kernels (see below)
 │   └── bindings/           # pybind11
 ├── rust/
 │   ├── pygpukit-core/      # Pure Rust GPU runtime
@@ -63,6 +64,40 @@ PyGPUkit/
 ├── examples/
 ├── benchmarks/             # Performance benchmarks
 └── tests/
+```
+
+### MatMul Kernel Structure
+
+```
+native/ops/matmul/
+├── common/                          # Shared utilities
+│   └── aligned_copy_sm120.cuh
+├── gemm/                            # GEMM kernels (M > 1)
+│   └── {input_dtype}/{output_dtype}/{arch}/{compute}_{suffix}.{cu,cuh}
+├── gemv/                            # GEMV kernels (M = 1)
+│   └── {input_dtype}/{output_dtype}/{arch}/{compute}_{suffix}.{cu,cuh}
+├── cublaslt.cuh                     # cuBLASLt wrapper
+├── matmul.cu                        # Main dispatcher
+└── matmul_cutlass.cu                # CUTLASS dispatcher
+```
+
+**Path Convention:** `{gemm|gemv}/{input_dtype}/{output_dtype}/{arch}/{compute}_{suffix}.cu`
+
+| Component | Values | Examples |
+|-----------|--------|----------|
+| `input_dtype` | `f32`, `bf16`, `fp8`, `nvf4` | Input tensor dtype |
+| `output_dtype` | `f32`, `bf16`, `fp8` | Output tensor dtype |
+| `arch` | `generic`, `sm80`, `sm90`, `sm100`, `sm120` | Target architecture |
+| `compute` | `naive`, `wmma`, `mma`, `cutlass` | Compute method |
+| `suffix` | `blockwise`, `kernels`, etc. | Variant identifier |
+
+**Examples:**
+```
+gemm/bf16/bf16/sm120/bf16_cutlass.cuh    # BF16->BF16 GEMM, SM120, CUTLASS
+gemm/fp8/f32/sm90/fp8_cutlass.cu         # FP8->F32 GEMM, SM90, CUTLASS
+gemm/nvf4/bf16/sm120/nvf4_cutlass.cu     # NVF4->BF16 GEMM, SM120, CUTLASS
+gemv/bf16/bf16/sm120/nvf4.cu             # NVF4->BF16 GEMV, SM120
+gemm/f32/f32/generic/tf32_mma.cuh        # TF32 GEMM, generic (SM80+)
 ```
 
 ### Module Separation Policy

@@ -66,10 +66,17 @@ Correctness: <PASS/FAIL>
 
 ## File Locations
 
-- `native/ops/matmul/` - MatMul kernels
-- `native/ops/gemv/` - GEMV kernels
-- `native/ops/matmul/gemm/` - GEMM implementations
-- `native/core/` - Core CUDA utilities
+Path: `native/ops/matmul/{gemm|gemv}/{input}/{output}/{arch}/{compute}_{suffix}.cu`
+
+| Path | Description |
+|------|-------------|
+| `gemm/bf16/bf16/sm120/` | BF16 GEMM for SM120 |
+| `gemm/fp8/f32/sm90/` | FP8->F32 GEMM for SM90 |
+| `gemm/nvf4/bf16/sm120/` | NVF4->BF16 GEMM for SM120 |
+| `gemv/bf16/bf16/sm120/` | GEMV kernels for SM120 |
+| `gemm/f32/f32/generic/` | F32/TF32 generic kernels |
+| `common/` | Shared utilities |
+| `native/core/` | Core CUDA utilities |
 
 ## Performance Targets (RTX 3090 Ti)
 
