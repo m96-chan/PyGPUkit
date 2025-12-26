@@ -839,12 +839,12 @@ All functions exported via `pygpukit.*` are part of the stable public API:
 | Category | Functions |
 |----------|-----------|
 | **Factory** | `zeros`, `ones`, `empty`, `from_numpy` |
-| **Elementwise** | `add`, `sub`, `mul`, `div` |
-| **Math** | `exp`, `log`, `relu`, `gelu` |
+| **Elementwise** | `add`, `sub`, `mul`, `div`, `neg`, `abs`, `clamp`, `where` |
+| **Math** | `exp`, `log`, `sqrt`, `rsqrt`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `softmax` |
 | **Matrix** | `matmul`, `transpose` |
-| **Reductions** | `sum`, `mean`, `max` |
-| **Neural** | `layernorm`, `bias_add_inplace`, `linear_bias_gelu` |
-| **Types** | `GPUArray`, `DataType`, `float32`, `float64`, `float16`, `bfloat16` |
+| **Reductions** | `sum`, `sum_axis`, `mean`, `max`, `min`, `argmax` |
+| **Neural** | `layernorm`, `rmsnorm`, `silu`, `sdpa_causal`, `rope_inplace`, `bias_add_inplace`, `linear_bias_gelu` |
+| **Types** | `GPUArray`, `DataType`, `float32`, `float64`, `float16`, `bfloat16`, `int32`, `int64`, `int8`, `uint8` |
 | **LLM** | `llm.SafeTensorsFile`, `llm.CausalTransformerModel`, `llm.load_model_from_safetensors` |
 | **LLM (Experimental)** | `llm.Tokenizer` (use HuggingFace tokenizers for production) |
 
@@ -865,6 +865,11 @@ MIT License
 ---
 
 ## Acknowledgements
-Inspired by: CUDA Runtime, NVRTC, PyCUDA, CuPy, Triton
+
+Inspired by and built upon:
+- [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) - Runtime, Driver API, NVRTC
+- [CUTLASS](https://github.com/NVIDIA/cutlass) - TensorCore GEMM optimization techniques
+- [CuPy](https://github.com/cupy/cupy)
+- [Triton](https://github.com/triton-lang/triton)
 
 PyGPUkit aims to fill the gap for a tiny, embeddable GPU runtime for Python.
