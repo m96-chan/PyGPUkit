@@ -3,14 +3,14 @@
 # Usage: ./build.sh [SM_VERSION] [CUDA_VERSION] [MODULE_SUFFIX]
 #
 # Examples:
-#   ./build.sh 120             # SM 120, CUDA 13.1 (default)
+#   ./build.sh 120a            # SM 120a, CUDA 13.1 (default)
 #   ./build.sh 86              # SM 86, CUDA 13.1
-#   ./build.sh 120 12.9        # SM 120, CUDA 12.9
+#   ./build.sh 120a 13.1       # SM 120a, CUDA 13.1
 #   ./build.sh 86 12.4         # SM 86, CUDA 12.4
-#   ./build.sh 120 13.1 _cu131 # SM 120, CUDA 13.1, module suffix _cu131
+#   ./build.sh 120a 13.1 _cu131 # SM 120a, CUDA 13.1, module suffix _cu131
 #
-# Supported SM versions: 80, 86, 89, 90, 100, 120, 120a
-# Note: Use 120a for full SM120 accelerated features (tensor cores, block-scaled MMA)
+# Supported SM versions: 80, 86, 89, 90, 100, 120a
+# Note: RTX 5090 requires 120a (full accelerated features: tensor cores, block-scaled MMA)
 # Supported CUDA versions: 12.4, 12.9, 13.1
 # Module suffix: _cu129, _cu131, or empty for default name
 

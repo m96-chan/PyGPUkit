@@ -221,9 +221,9 @@ cublasLt64_11.dll  // CUDA 11.x
 
 ### Target Architectures
 
-- **Supported:** Ampere (SM 80-86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100, 120)
+- **Supported:** Ampere (SM 80-86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100, 120a)
 - **Unsupported:** Architectures below SM80
-- **Build default:** SM 80, 86, 89, 90, 100, 120 (CUDA 13.1+)
+- **Build default:** SM 80, 86, 89, 90, 100, 120a (CUDA 13.1+)
 
 ### Design Philosophy
 
@@ -553,22 +553,13 @@ Edit → Build → Validate → Benchmark → Commit
 ```bash
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
-./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh 120a     # SM 120aのみ (RTX 5090)
 ./build.sh          # デフォルト: SM 120a
 ```
 
-**Windows cmd.exeからビルド（代替）：**
-
-```cmd
-cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
-scripts\build_cuda13.bat 120     :: SM 120のみ (RTX 5090)
-scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100, 120)
-```
-
 **注意事項：**
-- RTX 5090 (SM 120) はCUDA 13.1以降が必要
-- サポートSM: 80, 86, 89, 90, 100, 120
+- RTX 5090 (SM 120a) はCUDA 13.1以降が必要
+- サポートSM: 80, 86, 89, 90, 100, 120a
 
 ### Pre-Commit Checks (MANDATORY)
 
@@ -962,17 +953,17 @@ accepted_tokens = model.jacobi_decode_step(draft_tokens, position)
 ```bash
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
-./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh 120a     # SM 120aのみ (RTX 5090)
 ./build.sh          # デフォルト: SM 120a
 ```
 
-**サポートSM:** 80, 86, 89, 90, 100, 120
+**サポートSM:** 80, 86, 89, 90, 100, 120a
 
 ### Local Development Hardware
 
 | Machine | GPU | SM | CUDA Toolkit | Notes |
 |---------|-----|-----|--------------|-------|
-| Primary | RTX 5090 | 120 | 13.1 | Blackwell GeForce, FP8 testing |
+| Primary | RTX 5090 | 120a | 13.1 | Blackwell GeForce, FP8 testing |
 | Secondary | RTX 3090 Ti | 86 | 12.x | Ampere, TF32 benchmarks |
 
 ### Tokenizer
