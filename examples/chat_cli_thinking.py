@@ -12,6 +12,11 @@ Example (Qwen3-4B-Thinking):
         --model F:/LLM/Qwen3-4B-Thinking-2507 \
         --tokenizer F:/LLM/Qwen3-4B-Thinking-2507/tokenizer.json
 
+Example with CUDA Graph (faster decode):
+    python examples/chat_cli_thinking.py \
+        --model F:/LLM/Qwen3-4B-Thinking-2507 \
+        --cuda-graph
+
 Commands:
     /clear  - Clear conversation history
     /think  - Toggle thinking display (default: on)
@@ -339,6 +344,11 @@ def main():
         action="store_true",
         help="Hide thinking process (only show final answer)",
     )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Enable CUDA Graph for faster decode (reduces kernel launch overhead)",
+    )
     args = parser.parse_args()
 
     # Auto-detect tokenizer path
@@ -373,6 +383,7 @@ def main():
 
     from pygpukit.core import default_stream, from_numpy
     from pygpukit.llm import (
+        DecodeM1Graph,
         detect_model_spec,
         load_model_from_safetensors,
         load_safetensors,
@@ -422,8 +433,8 @@ def main():
         config, dtype=args.dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
     )
 
-    # Precompute RoPE frequencies
-    if config.use_rope:
+    # Precompute RoPE frequencies (needed for non-graph path)
+    if config.use_rope and not args.cuda_graph:
         cos_np, sin_np = precompute_freqs_cis(config.head_dim, args.max_seq_len, config.rope_theta)
         if args.dtype == "float16":
             model._rope_cos_gpu = from_numpy(cos_np.astype(np.float16))
@@ -438,6 +449,19 @@ def main():
         else:
             model._rope_cos_gpu = from_numpy(cos_np.astype(np.float32))
             model._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
+
+    # =========================================================================
+    # Initialize CUDA Graph (optional)
+    # =========================================================================
+    use_cuda_graph = args.cuda_graph
+    m1_graph = None
+
+    if use_cuda_graph:
+        print("\nInitializing CUDA Graph...")
+        m1_graph = DecodeM1Graph()
+        m1_graph.bind(model)
+        m1_graph.init_graph(max_seq_len=args.max_seq_len)
+        print(f"  CUDA Graph ready (max_seq_len={args.max_seq_len})")
 
     default_stream().synchronize()
     print("Ready!")
@@ -473,6 +497,22 @@ def main():
             else:
                 logits[token_id] *= penalty
         return logits
+
+    # =========================================================================
+    # Decode Helper (CUDA Graph or Non-Graph)
+    # =========================================================================
+    def decode_one_token(token_id: int, position: int, context_len: int) -> np.ndarray:
+        """Decode one token and return logits as numpy array.
+
+        Uses CUDA Graph if enabled, otherwise falls back to standard decode.
+        """
+        if use_cuda_graph and m1_graph is not None:
+            logits = m1_graph.step_graph(token_id, position, context_len)
+            return logits_to_f32(logits)[-1]
+        else:
+            hidden = model._decode_step_fixed_cache(token_id, position, context_len)
+            logits = model.get_logits(hidden)
+            return logits_to_f32(logits)[-1]
 
     # =========================================================================
     # Generation Function
@@ -514,9 +554,7 @@ def main():
         while skip_count < max_skip:
             if next_token == im_start_id or next_token in assistant_ids:
                 skip_count += 1
-                hidden = model._decode_step_fixed_cache(next_token, position, context_len)
-                logits = model.get_logits(hidden)
-                logits_np = logits_to_f32(logits)[-1]
+                logits_np = decode_one_token(next_token, position, context_len)
                 next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
                 position += 1
                 context_len += 1
@@ -525,9 +563,7 @@ def main():
                 token_str = tokenizer.id_to_token(next_token)
                 if token_str and token_str.strip() == "":
                     skip_count += 1
-                    hidden = model._decode_step_fixed_cache(next_token, position, context_len)
-                    logits = model.get_logits(hidden)
-                    logits_np = logits_to_f32(logits)[-1]
+                    logits_np = decode_one_token(next_token, position, context_len)
                     next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
                     position += 1
                     context_len += 1
@@ -577,11 +613,8 @@ def main():
                     print(response_chunk, end="", flush=True)
 
             # Get next token
-            hidden = model._decode_step_fixed_cache(next_token, position - 1, context_len - 1)
-            logits = model.get_logits(hidden)
-            logits_np = apply_repetition_penalty(
-                logits_to_f32(logits)[-1], generated_ids, args.repetition_penalty
-            )
+            logits_np = decode_one_token(next_token, position - 1, context_len - 1)
+            logits_np = apply_repetition_penalty(logits_np, generated_ids, args.repetition_penalty)
             next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
 
         # Flush remaining
@@ -618,6 +651,7 @@ def main():
     print(" PyGPUkit Thinking Chat")
     print(f" Model: {spec.name if spec else 'unknown'}")
     print(f" Thinking display: {'ON' if show_thinking else 'OFF'}")
+    print(f" CUDA Graph: {'ON' if use_cuda_graph else 'OFF'}")
     print(" Commands: /clear (reset), /think (toggle), /quit (exit)")
     print("=" * 60)
 
