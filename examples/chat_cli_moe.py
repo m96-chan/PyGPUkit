@@ -12,6 +12,10 @@ Example (Mixtral-8x7B):
         --model ~/.cache/huggingface/hub/models--mistralai--Mixtral-8x7B-Instruct-v0.1/snapshots/.../model.safetensors.index.json \
         --tokenizer ~/.cache/huggingface/hub/models--mistralai--Mixtral-8x7B-Instruct-v0.1/snapshots/.../tokenizer.json
 
+Example with CUDA Graph (faster decode):
+    python examples/chat_cli_moe.py \
+        --model /path/to/model --cuda-graph
+
 Commands:
     /clear  - Clear conversation history
     /quit   - Exit chat
@@ -256,6 +260,11 @@ def main():
         choices=["float16", "bfloat16", "float32"],
         help="Model dtype (default: bfloat16)",
     )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Enable CUDA Graph for faster decode (reduces kernel launch overhead)",
+    )
     args = parser.parse_args()
 
     # Lazy imports for faster --help
@@ -265,6 +274,7 @@ def main():
     from pygpukit.core import default_stream, from_numpy
     from pygpukit.llm import (
         MIXTRAL_SPEC,
+        DecodeM1Graph,
         detect_model_spec,
         load_model_from_safetensors,
         load_safetensors,
@@ -343,6 +353,20 @@ def main():
             model._rope_sin_gpu = from_numpy(sin_np.astype(np.float32))
 
     default_stream().synchronize()
+
+    # =========================================================================
+    # Initialize CUDA Graph (optional)
+    # =========================================================================
+    use_cuda_graph = args.cuda_graph
+    m1_graph = None
+
+    if use_cuda_graph:
+        print("\nInitializing CUDA Graph...")
+        m1_graph = DecodeM1Graph()
+        m1_graph.bind(model)
+        m1_graph.init_graph(max_seq_len=args.max_seq_len)
+        print(f"  CUDA Graph ready (max_seq_len={args.max_seq_len})")
+
     print("Ready!")
 
     # =========================================================================
@@ -371,6 +395,22 @@ def main():
             else:
                 logits[token_id] *= penalty
         return logits
+
+    # =========================================================================
+    # Decode Helper (CUDA Graph or Non-Graph)
+    # =========================================================================
+    def decode_one_token(token_id: int, position: int, context_len: int) -> np.ndarray:
+        """Decode one token and return logits as numpy array.
+
+        Uses CUDA Graph if enabled, otherwise falls back to standard decode.
+        """
+        if use_cuda_graph and m1_graph is not None:
+            logits = m1_graph.step_graph(token_id, position, context_len)
+            return logits_to_f32(logits)[-1]
+        else:
+            hidden = model._decode_step_fixed_cache(token_id, position, context_len)
+            logits = model.get_logits(hidden)
+            return logits_to_f32(logits)[-1]
 
     # =========================================================================
     # Generation Function
@@ -422,12 +462,9 @@ def main():
             if context_len >= args.max_seq_len:
                 break
 
-            # Decode one token
-            hidden = model._decode_step_fixed_cache(next_token, position, context_len)
-            logits = model.get_logits(hidden)
-            logits_np = apply_repetition_penalty(
-                logits_to_f32(logits)[-1], generated_ids, args.repetition_penalty
-            )
+            # Decode one token (CUDA Graph or standard)
+            logits_np = decode_one_token(next_token, position, context_len)
+            logits_np = apply_repetition_penalty(logits_np, generated_ids, args.repetition_penalty)
             next_token = sample_token(logits_np, args.temperature, args.top_k, args.top_p)
 
             if is_end_token(next_token):
@@ -463,6 +500,7 @@ def main():
         )
     else:
         print(f" Model: {spec.name}")
+    print(f" CUDA Graph: {'ON' if use_cuda_graph else 'OFF'}")
     print(" Commands: /clear (reset), /quit (exit)")
     print("=" * 60)
 
