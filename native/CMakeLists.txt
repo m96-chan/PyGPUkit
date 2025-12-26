@@ -166,6 +166,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/batch/continuous_batching.cu
     ops/sampling/sampling.cu
     ops/audio/audio.cu
+    ops/moe/moe.cu
     # Bindings
     bindings/module.cpp
     bindings/core_bindings.cpp

@@ -19,7 +19,7 @@ import numpy as np
 from pygpukit.core.array import GPUArray
 from pygpukit.core.dtypes import bfloat16 as dt_bfloat16
 from pygpukit.core.dtypes import float16 as dt_float16
-from pygpukit.core.factory import from_numpy
+from pygpukit.core.factory import from_numpy, zeros
 from pygpukit.ops.basic import (
     add,
     bias_add_inplace,
@@ -775,6 +775,152 @@ class MLP:
 
 
 # =============================================================================
+# Mixture of Experts Layer
+# =============================================================================
+
+
+class MoELayer:
+    """Mixture of Experts layer for Mixtral-style models.
+
+    Architecture:
+        1. Router: hidden -> [num_experts] logits
+        2. Top-K selection with softmax
+        3. Expert FFN (SwiGLU) for each selected expert
+        4. Weighted combination of expert outputs
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        gate_weight: GPUArray,  # [num_experts, hidden_size] - router
+        expert_weights: list[tuple[GPUArray, GPUArray, GPUArray]],  # [(gate, up, down), ...]
+    ):
+        self.config = config
+        self.num_experts = config.num_experts or len(expert_weights)
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.moe_intermediate_size or config.intermediate_size
+
+        # Router (gate) projection
+        self.gate = Linear(gate_weight)
+
+        # Expert FFNs
+        self.experts: list[MLP] = []
+        for gate_proj, up_proj, down_proj in expert_weights:
+            expert = MLP(
+                config,
+                gate_proj=gate_proj,
+                up_proj=up_proj,
+                down_proj=down_proj,
+            )
+            self.experts.append(expert)
+
+    def __call__(self, x: GPUArray) -> GPUArray:
+        """Forward pass through MoE layer.
+
+        Args:
+            x: Input tensor [batch, seq, hidden_size] or [seq, hidden_size]
+
+        Returns:
+            Output tensor with same shape as input
+        """
+        from pygpukit.core.backend import get_native_module
+        from pygpukit.ops.basic import copy_to
+
+        native = get_native_module()
+
+        original_shape = x.shape
+        # Flatten to [num_tokens, hidden_size]
+        if len(original_shape) == 3:
+            batch, seq, hidden = original_shape
+            num_tokens = batch * seq
+            x = x.reshape(num_tokens, hidden)
+        else:
+            num_tokens, hidden = original_shape
+
+        k = self.num_experts_per_tok
+
+        # Step 1: Compute router logits
+        router_logits = self.gate(x)  # [num_tokens, num_experts]
+
+        # Step 2: Top-K selection
+        router_weights = zeros((num_tokens, k), dtype=x.dtype)
+        expert_indices = zeros((num_tokens, k), dtype="int32")
+        native.moe_topk_with_indices(
+            router_logits._get_native(),
+            router_weights._get_native(),
+            expert_indices._get_native(),
+            k,
+        )
+
+        # Step 3: Softmax over selected experts
+        native.moe_softmax_topk(router_weights._get_native(), k)
+
+        # Step 4: Compute permutation for efficient expert dispatch
+        expert_counts = zeros((self.num_experts,), dtype="int32")
+        expert_offsets = zeros((self.num_experts + 1,), dtype="int32")
+        permute_indices = zeros((num_tokens * k,), dtype="int32")
+        reverse_perm = zeros((num_tokens * k,), dtype="int32")
+        native.moe_compute_permutation(
+            expert_indices._get_native(),
+            expert_counts._get_native(),
+            expert_offsets._get_native(),
+            permute_indices._get_native(),
+            reverse_perm._get_native(),
+            self.num_experts,
+            k,
+        )
+
+        # Step 5: Gather hidden states for experts
+        gathered = zeros((num_tokens * k, hidden), dtype=x.dtype)
+        native.moe_gather(
+            x._get_native(),
+            permute_indices._get_native(),
+            gathered._get_native(),
+            k,
+        )
+
+        # Step 6: Run experts (loop for now, grouped_gemm for future)
+        # Get expert counts on CPU for loop
+        expert_counts_cpu = expert_counts.to_numpy()
+        expert_offsets_cpu = expert_offsets.to_numpy()
+
+        expert_outputs = zeros((num_tokens * k, hidden), dtype=x.dtype)
+        for e in range(self.num_experts):
+            start = int(expert_offsets_cpu[e])
+            count = int(expert_counts_cpu[e])
+            if count == 0:
+                continue
+
+            # Slice input for this expert using indexing
+            end = start + count
+            expert_input = gathered[start:end]  # [count, hidden]
+
+            # Run expert FFN
+            expert_out = self.experts[e](expert_input)
+
+            # Write to output via copy_to
+            output_slice = expert_outputs[start:end]
+            copy_to(expert_out, output_slice)
+
+        # Step 7: Scatter and combine outputs
+        output = zeros((num_tokens, hidden), dtype=x.dtype)
+        native.moe_scatter(
+            expert_outputs._get_native(),
+            router_weights._get_native(),
+            reverse_perm._get_native(),
+            output._get_native(),
+            k,
+        )
+
+        # Reshape back
+        if len(original_shape) == 3:
+            output = output.reshape(*original_shape)
+
+        return output
+
+
+# =============================================================================
 # Unified TransformerBlock
 # =============================================================================
 
@@ -784,7 +930,7 @@ class TransformerBlock:
 
     Structure:
         Norm -> Attention -> Residual
-        Norm -> MLP -> Residual
+        Norm -> MLP/MoE -> Residual
     """
 
     def __init__(
@@ -792,12 +938,12 @@ class TransformerBlock:
         attn_norm: Norm,
         attn: Attention,
         mlp_norm: Norm,
-        mlp: MLP,
+        mlp: MLP | MoELayer,
     ):
         self.attn_norm = attn_norm
         self.attn = attn
         self.mlp_norm = mlp_norm
-        self.mlp = mlp
+        self.mlp = mlp  # Can be MLP or MoELayer
 
     def __call__(
         self,

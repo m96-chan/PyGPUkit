@@ -63,14 +63,21 @@ class ModelSpec:
     up_proj: str | None
     down_proj: str | None
 
+    # MoE weights (format strings with {layer} and {expert} placeholders)
+    moe_gate: str | None = None  # Router: [hidden, num_experts]
+    expert_gate_proj: str | None = None  # Expert gate/w1
+    expert_up_proj: str | None = None  # Expert up/w3
+    expert_down_proj: str | None = None  # Expert down/w2
+
     # Architecture flags
-    norm_type: Literal["rmsnorm", "layernorm"]
-    activation: Literal["gelu", "silu"]
-    use_rope: bool
-    use_qk_norm: bool
-    use_position_embed: bool  # GPT-2 style absolute position embeddings
-    qkv_combined: bool  # GPT-2 uses combined QKV projection
-    weight_transpose: bool  # GPT-2 weights need transpose
+    norm_type: Literal["rmsnorm", "layernorm"] = "rmsnorm"
+    activation: Literal["gelu", "silu"] = "silu"
+    use_rope: bool = True
+    use_qk_norm: bool = False
+    use_position_embed: bool = False  # GPT-2 style absolute position embeddings
+    qkv_combined: bool = False  # GPT-2 uses combined QKV projection
+    weight_transpose: bool = False  # GPT-2 weights need transpose
+    is_moe: bool = False  # MoE model flag
 
     # Default hyperparameters
     default_norm_eps: float = 1e-5
@@ -266,12 +273,66 @@ QWEN2_SPEC = ModelSpec(
 )
 
 
+# Mixtral MoE spec - like LLaMA attention + MoE FFN
+MIXTRAL_SPEC = ModelSpec(
+    name="mixtral",
+    # Embeddings
+    embed_tokens="model.embed_tokens.weight",
+    position_embed=None,
+    lm_head="lm_head.weight",
+    final_norm="model.norm.weight",
+    final_norm_bias=None,
+    # Attention (same as LLaMA)
+    attn_norm="model.layers.{layer}.input_layernorm.weight",
+    attn_norm_bias=None,
+    q_proj="model.layers.{layer}.self_attn.q_proj.weight",
+    k_proj="model.layers.{layer}.self_attn.k_proj.weight",
+    v_proj="model.layers.{layer}.self_attn.v_proj.weight",
+    o_proj="model.layers.{layer}.self_attn.o_proj.weight",
+    q_bias=None,
+    k_bias=None,
+    v_bias=None,
+    o_bias=None,
+    q_norm=None,
+    k_norm=None,
+    # MLP norm (used before MoE)
+    mlp_norm="model.layers.{layer}.post_attention_layernorm.weight",
+    mlp_norm_bias=None,
+    # Standard MLP weights (not used for MoE)
+    fc1=None,
+    fc1_bias=None,
+    fc2=None,
+    fc2_bias=None,
+    gate_proj=None,
+    up_proj=None,
+    down_proj=None,
+    # MoE weights
+    moe_gate="model.layers.{layer}.block_sparse_moe.gate.weight",
+    expert_gate_proj="model.layers.{layer}.block_sparse_moe.experts.{expert}.w1.weight",
+    expert_up_proj="model.layers.{layer}.block_sparse_moe.experts.{expert}.w3.weight",
+    expert_down_proj="model.layers.{layer}.block_sparse_moe.experts.{expert}.w2.weight",
+    # Architecture
+    norm_type="rmsnorm",
+    activation="silu",
+    use_rope=True,
+    use_qk_norm=False,
+    use_position_embed=False,
+    qkv_combined=False,
+    weight_transpose=False,
+    is_moe=True,
+    default_norm_eps=1e-5,
+    default_rope_theta=1000000.0,
+    hf_model_type="mixtral",
+)
+
+
 # Registry for model detection
 MODEL_SPECS: dict[str, ModelSpec] = {
     "gpt2": GPT2_SPEC,
     "llama": LLAMA_SPEC,
     "qwen3": QWEN3_SPEC,
     "qwen2": QWEN2_SPEC,
+    "mixtral": MIXTRAL_SPEC,
 }
 
 
@@ -287,6 +348,9 @@ def detect_model_spec(tensor_names: list[str]) -> ModelSpec:
     Raises:
         ValueError: If model type cannot be detected
     """
+    # Check for Mixtral MoE (has block_sparse_moe)
+    if any("block_sparse_moe" in name for name in tensor_names):
+        return MIXTRAL_SPEC
     # Check for Qwen3-specific QK norm
     if any("q_norm" in name for name in tensor_names):
         return QWEN3_SPEC
@@ -324,6 +388,9 @@ class TransformerConfig:
 
     LLaMA style:
         norm_type="rmsnorm", activation="silu", use_rope=True
+
+    MoE style (Mixtral):
+        num_experts=8, num_experts_per_tok=2
     """
 
     # Core dimensions
@@ -334,6 +401,11 @@ class TransformerConfig:
     num_kv_heads: int | None = None  # None = MHA, int = GQA/MQA
     intermediate_size: int | None = None  # None = 4 * hidden_size
     _head_dim: int | None = None  # None = hidden_size // num_heads (default)
+
+    # MoE configuration
+    num_experts: int | None = None  # None = standard MLP, int = MoE
+    num_experts_per_tok: int = 2  # Top-K experts per token
+    moe_intermediate_size: int | None = None  # Expert FFN size (default: intermediate_size)
 
     # Architecture choices
     norm_type: Literal["rmsnorm", "layernorm"] = "rmsnorm"
@@ -354,6 +426,13 @@ class TransformerConfig:
             self.num_kv_heads = self.num_heads
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
+        if self.moe_intermediate_size is None:
+            self.moe_intermediate_size = self.intermediate_size
+
+    @property
+    def is_moe(self) -> bool:
+        """Check if this is an MoE model."""
+        return self.num_experts is not None and self.num_experts > 1
 
     @property
     def head_dim(self) -> int:

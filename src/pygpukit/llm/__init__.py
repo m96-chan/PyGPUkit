@@ -538,6 +538,7 @@ from pygpukit.llm.chat import (  # noqa: E402
 from pygpukit.llm.config import (  # noqa: E402
     GPT2_SPEC,
     LLAMA_SPEC,
+    MIXTRAL_SPEC,
     MODEL_SPECS,
     QWEN2_SPEC,
     QWEN3_SPEC,
@@ -564,6 +565,7 @@ from pygpukit.llm.layers import (  # noqa: E402
     MLP,
     Attention,
     Linear,
+    MoELayer,
     Norm,
     TransformerBlock,
     apply_rotary_pos_emb_numpy,
@@ -577,6 +579,7 @@ from pygpukit.llm.layers import (  # noqa: E402
 from pygpukit.llm.loader import (  # noqa: E402
     load_gpt2_from_safetensors,
     load_llama_from_safetensors,
+    load_mixtral_from_safetensors,
     load_model_from_safetensors,
     load_qwen3_from_safetensors,
     repack_model_weights,
@@ -613,6 +616,7 @@ __all__ = [
     "TransformerConfig",
     "Attention",
     "MLP",
+    "MoELayer",
     "Norm",
     "TransformerBlock",
     "Linear",
@@ -620,6 +624,7 @@ __all__ = [
     "ModelSpec",
     "GPT2_SPEC",
     "LLAMA_SPEC",
+    "MIXTRAL_SPEC",
     "QWEN2_SPEC",
     "QWEN3_SPEC",
     "MODEL_SPECS",
@@ -628,6 +633,7 @@ __all__ = [
     "load_model_from_safetensors",
     "load_gpt2_from_safetensors",
     "load_llama_from_safetensors",
+    "load_mixtral_from_safetensors",
     "load_qwen3_from_safetensors",
     # Legacy config classes
     "GPT2Config",

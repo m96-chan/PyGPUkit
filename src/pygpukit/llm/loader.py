@@ -22,12 +22,13 @@ from pygpukit.core.factory import empty, from_numpy
 from pygpukit.llm.config import (
     GPT2_SPEC,
     LLAMA_SPEC,
+    MIXTRAL_SPEC,
     QWEN3_SPEC,
     ModelSpec,
     TransformerConfig,
     detect_model_spec,
 )
-from pygpukit.llm.layers import MLP, Attention, Norm, TransformerBlock
+from pygpukit.llm.layers import MLP, Attention, MoELayer, Norm, TransformerBlock
 
 if TYPE_CHECKING:
     from pygpukit.llm.model import CausalTransformerModel
@@ -86,6 +87,22 @@ def load_qwen3_from_safetensors(
     return load_model_from_safetensors(model_path, dtype=dtype, spec=QWEN3_SPEC)
 
 
+def load_mixtral_from_safetensors(
+    model_path: str,
+    dtype: str = "bfloat16",
+) -> CausalTransformerModel:
+    """Load Mixtral MoE model from safetensors file.
+
+    Args:
+        model_path: Path to model.safetensors or model.safetensors.index.json
+        dtype: Weight dtype ("float32", "float16", or "bfloat16")
+
+    Returns:
+        CausalTransformerModel instance with MoELayer blocks
+    """
+    return load_model_from_safetensors(model_path, dtype=dtype, spec=MIXTRAL_SPEC)
+
+
 # =============================================================================
 # Model Weight Repacking
 # =============================================================================
@@ -104,8 +121,16 @@ def repack_model_weights(model: CausalTransformerModel) -> None:
 
     Args:
         model: CausalTransformerModel to repack in-place
+
+    Note:
+        MoE models are currently skipped (not repacked) due to different
+        weight structure. This will be addressed in a future update.
     """
     import gc
+
+    # Skip repacking for MoE models (different weight structure)
+    if model.blocks and isinstance(model.blocks[0].mlp, MoELayer):
+        return
 
     # Phase 1: Collect all weights as numpy arrays
     numpy_cache: dict[int, dict] = {}
@@ -531,9 +556,12 @@ def load_model_from_safetensors(
     if head_dim != hidden_size // num_heads:
         explicit_head_dim = head_dim
 
-    # Try to read rope_theta and norm_eps from config.json
+    # Try to read rope_theta, norm_eps, and MoE params from config.json
     rope_theta = spec.default_rope_theta
     norm_eps = spec.default_norm_eps
+    num_experts: int | None = None
+    num_experts_per_tok = 2
+    moe_intermediate_size: int | None = None
     try:
         import json
         from pathlib import Path
@@ -551,6 +579,13 @@ def load_model_from_safetensors(
                 rope_theta = float(hf_config["rope_theta"])
             if "rms_norm_eps" in hf_config:
                 norm_eps = float(hf_config["rms_norm_eps"])
+            # MoE parameters
+            if "num_local_experts" in hf_config:
+                num_experts = int(hf_config["num_local_experts"])
+            if "num_experts_per_tok" in hf_config:
+                num_experts_per_tok = int(hf_config["num_experts_per_tok"])
+            if "moe_intermediate_size" in hf_config:
+                moe_intermediate_size = int(hf_config["moe_intermediate_size"])
     except Exception:
         pass  # Use defaults
 
@@ -568,6 +603,9 @@ def load_model_from_safetensors(
         causal=True,
         norm_eps=norm_eps,
         rope_theta=rope_theta,
+        num_experts=num_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        moe_intermediate_size=moe_intermediate_size,
     )
 
     # Load embeddings
@@ -669,8 +707,32 @@ def load_model_from_safetensors(
         mlp_norm_bias = try_load(layer_name(spec.mlp_norm_bias, layer_idx))
         mlp_norm = Norm(mlp_norm_weight, mlp_norm_bias, spec.norm_type, spec.default_norm_eps)
 
-        # MLP
-        if spec.activation == "gelu" and spec.fc1 is not None and spec.fc2 is not None:
+        # MLP or MoE
+        mlp: MLP | MoELayer
+        if spec.is_moe and num_experts is not None:
+            # MoE: Load router gate and all experts
+            def expert_name(pattern: str, layer: int, expert: int) -> str:
+                return pattern.format(layer=layer, expert=expert)
+
+            # Router gate: [hidden_size, num_experts]
+            gate_weight = load_tensor(required_name(spec.moe_gate, layer_idx))
+
+            # Load all expert weights
+            expert_weights: list[tuple[GPUArray, GPUArray, GPUArray]] = []
+            for expert_idx in range(num_experts):
+                exp_gate = load_tensor(
+                    expert_name(spec.expert_gate_proj, layer_idx, expert_idx)
+                )
+                exp_up = load_tensor(
+                    expert_name(spec.expert_up_proj, layer_idx, expert_idx)
+                )
+                exp_down = load_tensor(
+                    expert_name(spec.expert_down_proj, layer_idx, expert_idx)
+                )
+                expert_weights.append((exp_gate, exp_up, exp_down))
+
+            mlp = MoELayer(transformer_config, gate_weight, expert_weights)
+        elif spec.activation == "gelu" and spec.fc1 is not None and spec.fc2 is not None:
             fc1_weight = load_tensor(
                 required_name(spec.fc1, layer_idx), do_transpose=spec.weight_transpose
             )
