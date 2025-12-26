@@ -571,7 +571,9 @@ from pygpukit.llm.decode import (  # noqa: E402
 from pygpukit.llm.layers import (  # noqa: E402
     MLP,
     Attention,
-    Linear,
+    Linear,  # Backward compatibility alias
+    LinearBF16,
+    LinearFP8,
     MoELayer,
     Norm,
     TransformerBlock,
@@ -626,7 +628,9 @@ __all__ = [
     "MoELayer",
     "Norm",
     "TransformerBlock",
-    "Linear",
+    "Linear",  # Backward compatibility alias
+    "LinearBF16",
+    "LinearFP8",
     # ModelSpec (v0.2.9)
     "ModelSpec",
     "GPT2_SPEC",

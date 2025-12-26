@@ -1,7 +1,8 @@
 """Neural network layer implementations for PyGPUkit LLM.
 
 Provides:
-- Linear: Dense layer with optional bias
+- LinearBF16: Dense layer with BF16 weights
+- LinearFP8: Dense layer with FP8 weights (online dequantization)
 - Norm: RMSNorm and LayerNorm
 - Attention: Multi-head attention with RoPE, GQA, QK-Norm, KV cache
 - MLP: Feed-forward network (GELU/SwiGLU)
@@ -56,8 +57,8 @@ if TYPE_CHECKING:
 # =============================================================================
 
 
-class Linear:
-    """Linear layer: y = xW^T + b
+class LinearBF16:
+    """BF16 Linear layer: y = xW^T + b
 
     Weights are stored as [out_features, in_features] (PyTorch convention).
 
@@ -96,7 +97,7 @@ class Linear:
         # Use GEMV for M=1 with BF16 (1.3-2.4x faster than matmul)
         # Skip GEMV when out is provided (CUDA Graph mode) - GEMV allocates internally
         use_gemv = (
-            Linear._use_gemv
+            LinearBF16._use_gemv
             and x.shape[0] == 1
             and x.dtype == dt_bfloat16
             and out is None  # GEMV allocates, not compatible with CUDA Graph
@@ -121,6 +122,10 @@ class Linear:
             bias_add_inplace(y, self.bias)
 
         return y
+
+
+# Backward compatibility alias
+Linear = LinearBF16
 
 
 class LinearFP8:
@@ -334,11 +339,11 @@ def repack_weight(weight: GPUArray) -> GPUArray:
     return from_numpy(weight_np)
 
 
-def repack_linear(linear: Linear) -> None:
-    """Repack a Linear layer's weight in-place.
+def repack_linear(linear: LinearBF16) -> None:
+    """Repack a LinearBF16 layer's weight in-place.
 
     Args:
-        linear: Linear layer to repack
+        linear: LinearBF16 layer to repack
     """
     linear.weight = repack_weight(linear.weight)
     # Clear transpose cache - will be regenerated on first use
@@ -414,10 +419,10 @@ class Attention:
 
     def __init__(
         self,
-        q_proj: GPUArray | Linear | LinearFP8,
-        k_proj: GPUArray | Linear | LinearFP8,
-        v_proj: GPUArray | Linear | LinearFP8,
-        o_proj: GPUArray | Linear | LinearFP8,
+        q_proj: GPUArray | LinearBF16 | LinearFP8,
+        k_proj: GPUArray | LinearBF16 | LinearFP8,
+        v_proj: GPUArray | LinearBF16 | LinearFP8,
+        o_proj: GPUArray | LinearBF16 | LinearFP8,
         config: TransformerConfig,
         q_bias: GPUArray | None = None,
         k_bias: GPUArray | None = None,
@@ -426,13 +431,13 @@ class Attention:
         q_norm: Norm | None = None,
         k_norm: Norm | None = None,
     ):
-        # Accept either GPUArray (wrapped in Linear) or pre-built Linear/LinearFP8
+        # Accept either GPUArray (wrapped in LinearBF16) or pre-built LinearBF16/LinearFP8
         def wrap_linear(
-            proj: GPUArray | Linear | LinearFP8, bias: GPUArray | None
-        ) -> Linear | LinearFP8:
-            if isinstance(proj, (Linear, LinearFP8)):
+            proj: GPUArray | LinearBF16 | LinearFP8, bias: GPUArray | None
+        ) -> LinearBF16 | LinearFP8:
+            if isinstance(proj, (LinearBF16, LinearFP8)):
                 return proj
-            return Linear(proj, bias)
+            return LinearBF16(proj, bias)
 
         self.q_proj = wrap_linear(q_proj, q_bias)
         self.k_proj = wrap_linear(k_proj, k_bias)
@@ -457,14 +462,14 @@ class Attention:
 
         # Create fused QKV projection (reduces 3 matmuls to 1)
         # Skip fusion for FP8 (LinearFP8 can't be concatenated)
-        self.qkv_proj: Linear | None = None
+        self.qkv_proj: LinearBF16 | None = None
         if not isinstance(self.q_proj, LinearFP8):
-            # Extract weights from Linear for concatenation
-            q_weight = self.q_proj.weight if isinstance(self.q_proj, Linear) else q_proj
-            k_weight = self.k_proj.weight if isinstance(self.k_proj, Linear) else k_proj
-            v_weight = self.v_proj.weight if isinstance(self.v_proj, Linear) else v_proj
+            # Extract weights from LinearBF16 for concatenation
+            q_weight = self.q_proj.weight if isinstance(self.q_proj, LinearBF16) else q_proj
+            k_weight = self.k_proj.weight if isinstance(self.k_proj, LinearBF16) else k_proj
+            v_weight = self.v_proj.weight if isinstance(self.v_proj, LinearBF16) else v_proj
             qkv_weight = concat_axis0(concat_axis0(q_weight, k_weight), v_weight)
-            self.qkv_proj = Linear(qkv_weight, None)
+            self.qkv_proj = LinearBF16(qkv_weight, None)
 
         # Precompute RoPE if enabled
         self._cos: np.ndarray | None
@@ -936,28 +941,28 @@ class MLP:
     def __init__(
         self,
         config: TransformerConfig,
-        # GELU path weights (GPUArray or Linear/LinearFP8)
-        fc1_weight: GPUArray | Linear | LinearFP8 | None = None,
+        # GELU path weights (GPUArray or LinearBF16/LinearFP8)
+        fc1_weight: GPUArray | LinearBF16 | LinearFP8 | None = None,
         fc1_bias: GPUArray | None = None,
-        fc2_weight: GPUArray | Linear | LinearFP8 | None = None,
+        fc2_weight: GPUArray | LinearBF16 | LinearFP8 | None = None,
         fc2_bias: GPUArray | None = None,
-        # SwiGLU path weights (GPUArray or Linear/LinearFP8)
-        gate_proj: GPUArray | Linear | LinearFP8 | None = None,
-        up_proj: GPUArray | Linear | LinearFP8 | None = None,
-        down_proj: GPUArray | Linear | LinearFP8 | None = None,
+        # SwiGLU path weights (GPUArray or LinearBF16/LinearFP8)
+        gate_proj: GPUArray | LinearBF16 | LinearFP8 | None = None,
+        up_proj: GPUArray | LinearBF16 | LinearFP8 | None = None,
+        down_proj: GPUArray | LinearBF16 | LinearFP8 | None = None,
     ):
         self.config = config
         self.activation = config.activation
 
-        # Helper to wrap GPUArray in Linear, or use pre-built Linear/LinearFP8
+        # Helper to wrap GPUArray in LinearBF16, or use pre-built LinearBF16/LinearFP8
         def wrap_linear(
-            proj: GPUArray | Linear | LinearFP8 | None, bias: GPUArray | None = None
-        ) -> Linear | LinearFP8 | None:
+            proj: GPUArray | LinearBF16 | LinearFP8 | None, bias: GPUArray | None = None
+        ) -> LinearBF16 | LinearFP8 | None:
             if proj is None:
                 return None
-            if isinstance(proj, (Linear, LinearFP8)):
+            if isinstance(proj, (LinearBF16, LinearFP8)):
                 return proj
-            return Linear(proj, bias)
+            return LinearBF16(proj, bias)
 
         if config.activation == "gelu":
             if fc1_weight is None or fc2_weight is None:
@@ -973,7 +978,7 @@ class MLP:
             self.down_proj = wrap_linear(down_proj)
 
             # Get intermediate size from the projection
-            if isinstance(gate_proj, (Linear, LinearFP8)):
+            if isinstance(gate_proj, (LinearBF16, LinearFP8)):
                 self.intermediate_size = gate_proj.out_features
             else:
                 self.intermediate_size = gate_proj.shape[0]
@@ -982,7 +987,7 @@ class MLP:
             # FP8 weights can't be concatenated trivially
             if isinstance(gate_proj, GPUArray) and isinstance(up_proj, GPUArray):
                 gate_up_weight = concat_axis0(gate_proj, up_proj)
-                self.gate_up_proj: Linear | None = Linear(gate_up_weight, None)
+                self.gate_up_proj: LinearBF16 | None = LinearBF16(gate_up_weight, None)
             else:
                 self.gate_up_proj = None
 
@@ -1018,7 +1023,7 @@ class MoELayer:
         self,
         config: TransformerConfig,
         gate_weight: GPUArray,  # [num_experts, hidden_size] - router
-        expert_weights: list,  # [(gate, up, down), ...] - GPUArray or Linear/LinearFP8
+        expert_weights: list,  # [(gate, up, down), ...] - GPUArray or LinearBF16/LinearFP8
     ):
         self.config = config
         self.num_experts = config.num_experts or len(expert_weights)
@@ -1027,7 +1032,7 @@ class MoELayer:
         self.intermediate_size = config.moe_intermediate_size or config.intermediate_size
 
         # Router (gate) projection
-        self.gate = Linear(gate_weight)
+        self.gate = LinearBF16(gate_weight)
 
         # Expert FFNs
         self.experts: list[MLP] = []

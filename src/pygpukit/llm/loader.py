@@ -33,7 +33,7 @@ from pygpukit.llm.config import (
 from pygpukit.llm.layers import (
     MLP,
     Attention,
-    Linear,
+    LinearBF16,
     LinearFP8,
     MoELayer,
     Norm,
@@ -645,12 +645,12 @@ def load_model_from_safetensors(
         scale_inv_name = name + "_scale_inv"
         return fp8_config is not None and scale_inv_name in st.tensor_names
 
-    # Helper to load Linear layer (returns Linear or LinearFP8)
+    # Helper to load linear layer (returns LinearBF16 or LinearFP8)
     def load_linear(
         weight_name: str,
         bias_name: str | None = None,
         do_transpose: bool = False,
-    ) -> Linear | LinearFP8:
+    ) -> LinearBF16 | LinearFP8:
         """Load a linear layer, using LinearFP8 for FP8 weights."""
         if is_fp8_weight(weight_name):
             # FP8 path: load as LinearFP8 without dequantization
@@ -665,12 +665,12 @@ def load_model_from_safetensors(
                 bias = load_tensor(bias_name)
             return LinearFP8(weight_fp8, scale_inv, bias, fp8_config.weight_block_size)  # type: ignore
         else:
-            # Standard path: load as Linear
+            # Standard path: load as LinearBF16
             weight = load_tensor(weight_name, do_transpose)
             bias = None
             if bias_name and bias_name in st.tensor_names:
                 bias = load_tensor(bias_name)
-            return Linear(weight, bias)
+            return LinearBF16(weight, bias)
 
     # Helper to load tensor with dtype conversion (no FP8 dequant - use load_linear for weights)
     def load_tensor(name: str, do_transpose: bool = False) -> GPUArray:
@@ -906,7 +906,7 @@ def load_model_from_safetensors(
             )
         else:
             # Separate Q, K, V projections (LLaMA/Qwen3 style)
-            # Use load_linear to get Linear or LinearFP8 depending on quantization
+            # Use load_linear to get LinearBF16 or LinearFP8 depending on quantization
             q_proj = load_linear(
                 required_name(spec.q_proj, layer_idx),
                 layer_name(spec.q_bias, layer_idx),
