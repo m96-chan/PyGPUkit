@@ -18,6 +18,10 @@
     "git": {
       "command": "uvx",
       "args": ["mcp-server-git", "--repository", "D:/Projects/m96-chan/PyGPUkit"]
+    },
+    "serena": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "claude-code", "--project", "D:/Projects/m96-chan/PyGPUkit"]
     }
   }
 }
