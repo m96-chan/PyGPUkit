@@ -14,6 +14,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cstdio>
+#include <cstdint>
 #include <cmath>
 #include <algorithm>
 #include <vector>

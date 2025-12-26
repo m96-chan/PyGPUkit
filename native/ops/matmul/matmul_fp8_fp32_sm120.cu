@@ -25,6 +25,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cstdio>
+#include <cstdint>
 
 // Enable FP8 SM120 with alignment patch
 #define PYGPUKIT_ENABLE_FP8_SM120
