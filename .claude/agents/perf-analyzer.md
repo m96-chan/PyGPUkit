@@ -11,19 +11,20 @@ You are a GPU performance analysis expert for PyGPUkit.
 
 ### 1. Theoretical Peak Comparison
 
-RTX 3090 Ti reference:
-| Dtype | Theoretical | Good | Current Target |
-|-------|-------------|------|----------------|
-| FP32 | 40 TFLOPS | 18+ | 18 |
-| TF32 | 80 TFLOPS | 35+ | 27 |
-| FP16 TC | 160 TFLOPS | 80+ | TBD |
-| BF16 TC | 160 TFLOPS | 80+ | TBD |
-
-RTX 5090 reference:
+RTX 5090 (Primary):
 | Dtype | Theoretical | Notes |
 |-------|-------------|-------|
-| FP8 | TBD | Blackwell features |
-| NVF4 | TBD | Block-scaled MMA |
+| BF16 TC | ~200 TFLOPS | TBD |
+| FP8 | ~400 TFLOPS | Blackwell features |
+| NVF4 | ~450 TFLOPS | Block-scaled MMA |
+
+RTX 3090 Ti (Secondary):
+| Dtype | Theoretical | Good | Achieved |
+|-------|-------------|------|----------|
+| FP32 | 40 TFLOPS | 18+ | 18 |
+| TF32 | 80 TFLOPS | 35+ | 27 |
+| FP16 TC | 160 TFLOPS | 80+ | 63 |
+| BF16 TC | 160 TFLOPS | 80+ | 63 |
 
 ### 2. Bottleneck Identification
 

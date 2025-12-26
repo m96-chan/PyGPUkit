@@ -15,9 +15,9 @@ When kernel performance changes:
 ```markdown
 ### Benchmark Targets
 
-| GPU | FP32 | TF32 TensorCore |
-|-----|------|-----------------|
-| RTX 3090 Ti | XX TFLOPS | XX TFLOPS |
+| GPU | BF16 | FP8 | NVF4 |
+|-----|------|-----|------|
+| RTX 5090 | XX TFLOPS | XX TFLOPS | XX TFLOPS |
 ```
 
 When new features are added:

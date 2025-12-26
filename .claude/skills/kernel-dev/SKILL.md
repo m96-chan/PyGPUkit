@@ -47,7 +47,7 @@ git add -A && git commit -m 'wip(kernel): description'
 ```
 wip(tf32): <summary of changes>
 
-Benchmark results (RTX 3090 Ti):
+Benchmark results (RTX 5090):
 - 2048x2048: XX.XX TFLOPS
 - 4096x4096: XX.XX TFLOPS
 - 8192x8192: XX.XX TFLOPS
@@ -78,7 +78,7 @@ Path: `native/ops/matmul/{gemm|gemv}/{input}/{output}/{arch}/{compute}_{suffix}.
 | `common/` | Shared utilities |
 | `native/core/` | Core CUDA utilities |
 
-## Performance Targets (RTX 3090 Ti)
+## Performance Targets (RTX 5090)
 
 | Kernel | Target TFLOPS |
 |--------|---------------|

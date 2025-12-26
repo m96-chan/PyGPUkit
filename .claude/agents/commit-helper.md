@@ -24,7 +24,7 @@ Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
 ```
 wip(tf32): summary of changes
 
-Benchmark results (RTX 3090 Ti):
+Benchmark results (RTX 5090):
 - 2048x2048: XX.XX TFLOPS
 - 4096x4096: XX.XX TFLOPS
 - 8192x8192: XX.XX TFLOPS

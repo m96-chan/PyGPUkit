@@ -644,7 +644,7 @@ python benchmark.py --quick
 ```
 wip(tf32): <summary of changes>
 
-Benchmark results (RTX 3090 Ti):
+Benchmark results (RTX 5090):
 - 2048x2048: XX.XX TFLOPS
 - 4096x4096: XX.XX TFLOPS
 - 8192x8192: XX.XX TFLOPS
@@ -1060,7 +1060,7 @@ Specialized agents for specific tasks:
 
 Skills and agents are automatically invoked based on task context. Examples:
 
-- "Build for RTX 3090 Ti" -> `build` skill
+- "Build for RTX 5090" -> `build` skill
 - "Review the kernel changes" -> `kernel-reviewer` agent
 - "Analyze benchmark results" -> `perf-analyzer` agent
 - "Commit these changes" -> `commit-helper` agent

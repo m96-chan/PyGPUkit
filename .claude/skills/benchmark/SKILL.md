@@ -39,7 +39,7 @@ python scripts/benchmark.py --tf32-version v2
    - Correctness verification (PASS/FAIL)
    - Comparison with theoretical peak
 
-## Expected Results (RTX 3090 Ti)
+## Expected Results (RTX 5090)
 
 | Dtype | Target TFLOPS |
 |-------|---------------|
