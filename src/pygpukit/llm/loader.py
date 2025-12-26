@@ -156,6 +156,45 @@ def is_fp8_weight(tensor_name: str, tensor_names: list[str]) -> bool:
     return scale_name in tensor_names
 
 
+def load_fp8_weight_direct(
+    st: SafeTensorsFile,
+    weight_name: str,
+    block_size: tuple[int, int] = (128, 128),
+) -> tuple[GPUArray, GPUArray]:
+    """Load FP8 weight directly without dequantization.
+
+    Returns:
+        (weight_fp8, scale_inv) tuple:
+        - weight_fp8: [out_features, in_features] as uint8
+        - scale_inv: [out/block_h, in/block_w] as bf16
+    """
+    from pygpukit.core.factory import from_numpy
+
+    # Load FP8 weight as uint8
+    info = st.tensor_info(weight_name)
+    data = st.tensor_bytes(weight_name)
+    fp8_bytes = np.frombuffer(data, dtype=np.uint8).reshape(info.shape).copy()
+    weight_fp8 = from_numpy(fp8_bytes)
+
+    # Load scale_inv tensor
+    scale_name = weight_name + "_scale_inv"
+    scale_info = st.tensor_info(scale_name)
+    scale_data = st.tensor_bytes(scale_name)
+
+    # scale_inv is typically bfloat16
+    if scale_info.dtype == Dtype.BFloat16:
+        scale_inv = np.frombuffer(scale_data, dtype=np.uint16).reshape(scale_info.shape).copy()
+    else:
+        # Convert float32 to bfloat16
+        scale_f32 = np.frombuffer(scale_data, dtype=np.float32).reshape(scale_info.shape)
+        uint32_view = scale_f32.view(np.uint32)
+        scale_inv = ((uint32_view + 0x7FFF + ((uint32_view >> 16) & 1)) >> 16).astype(np.uint16)
+
+    scale_inv_gpu = from_numpy(scale_inv)
+
+    return weight_fp8, scale_inv_gpu
+
+
 # =============================================================================
 # Legacy Loaders (convenience wrappers)
 # =============================================================================

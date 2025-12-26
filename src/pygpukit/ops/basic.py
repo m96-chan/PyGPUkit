@@ -52,11 +52,14 @@ from pygpukit.ops.matmul import (
     fp8_available,
     fp8_fp8_get_scale_sizes,
     fp8_fp8_sm120_available,
+    fp8_get_sizes,
+    fp8_init_lut,
     fp8_sm90_available,
     fp8_sm100_available,
     fp8_sm120_available,
     # GEMV operations
     gemv_bf16,
+    gemv_fp8_bf16,
     gemv_nvf4_available,
     gemv_nvf4_bf16,
     linear_bias_gelu,
@@ -194,8 +197,11 @@ __all__ = [
     "nvf4_bf16_sm120_available",
     # GEMV
     "gemv_bf16",
+    "gemv_fp8_bf16",
     "gemv_nvf4_bf16",
     "gemv_nvf4_available",
+    "fp8_init_lut",
+    "fp8_get_sizes",
     "nvf4_get_sizes",
     "quantize_bf16_to_nvf4",
     # Neural Network

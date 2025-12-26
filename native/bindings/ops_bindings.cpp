@@ -92,6 +92,18 @@ extern "C" {
         int K, int N, float alpha, float beta, cudaStream_t stream
     );
     void pygpukit_nvf4_get_sizes(int K, int N, size_t* data_size, size_t* scale_size);
+
+    // FP8 GEMV (W8A16: FP8 weights, BF16 activation)
+    void pygpukit_fp8_init_lut();
+    cudaError_t pygpukit_gemv_fp8_bf16(
+        const void* A, const void* B_fp8, const void* B_scale, void* C,
+        int K, int N, int scale_stride_n, cudaStream_t stream
+    );
+    cudaError_t pygpukit_gemv_fp8_bf16_batched(
+        const void* A, const void* B_fp8, const void* B_scale, void* C,
+        int K, int N, int batch_count, int scale_stride_n, cudaStream_t stream
+    );
+    void pygpukit_fp8_get_sizes(int K, int N, size_t* scale_size);
 }
 
 // MoE (Mixture of Experts) functions - defined in ops/moe/moe.cu
@@ -1726,6 +1738,63 @@ void init_ops_bindings(py::module_& m) {
         return py::make_tuple(data_size, scale_size);
     }, py::arg("K"), py::arg("N"),
        "Get buffer sizes for NVF4 quantization: returns (data_size, scale_size)");
+
+    // ========================================================================
+    // FP8 GEMV for W8A16 inference (FP8 weights, BF16 activation)
+    // ========================================================================
+
+    m.def("fp8_init_lut", []() {
+        pygpukit_fp8_init_lut();
+    }, "Initialize FP8 E4M3 lookup table (call once at startup)");
+
+    m.def("gemv_fp8_bf16", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
+        // A: [K] BF16 activation
+        // B_fp8: [K, N] uint8 FP8 weights
+        // B_scale: [K/128, N/128] BF16 scale factors
+        // C: [N] BF16 output
+        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16: A and C must be bfloat16");
+        }
+        if (B_fp8.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_bf16: B_fp8 must be uint8 (FP8 E4M3)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16: B_scale must be bfloat16");
+        }
+        if (A.ndim() != 1 || B_fp8.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_fp8_bf16: A[K], B_fp8[K,N], C[N] dimensions required");
+        }
+
+        int K = A.shape()[0];
+        int N = B_fp8.shape()[1];
+        int scale_stride_n = (N + 127) / 128;  // 128x128 block quantization
+
+        if (B_fp8.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_bf16: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_bf16: N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_fp8_bf16(
+            A.data(), B_fp8.data(), B_scale.data(), C.data(),
+            K, N, scale_stride_n, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_bf16 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
+       "FP8 GEMV: C[N] = A[K] @ B_fp8[K,N] (online dequantization with block-wise scale)");
+
+    m.def("fp8_get_sizes", [](int K, int N) {
+        size_t scale_size;
+        pygpukit_fp8_get_sizes(K, N, &scale_size);
+        int scale_k = (K + 127) / 128;
+        int scale_n = (N + 127) / 128;
+        return py::make_tuple(scale_k, scale_n, scale_size);
+    }, py::arg("K"), py::arg("N"),
+       "Get scale tensor dimensions for FP8: returns (scale_K, scale_N, scale_size_bytes)");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

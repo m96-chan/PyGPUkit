@@ -27,6 +27,7 @@ from pygpukit.ops.basic import (
     copy_to,
     gelu,
     gemv_bf16,
+    gemv_fp8_bf16,
     kv_cache_prefill_gqa,
     kv_cache_update_gqa,
     layernorm,
@@ -115,6 +116,169 @@ class Linear:
         else:
             # Standard matmul path
             y = matmul(x, self._weight_t, out=out)
+
+        if self.bias is not None:
+            bias_add_inplace(y, self.bias)
+
+        return y
+
+
+class LinearFP8:
+    """FP8 Linear layer with online dequantization: y = x @ dequant(W)^T + b
+
+    Stores weights in FP8 E4M3 format with block-wise scaling factors.
+    Dequantizes on-the-fly during forward pass using CUDA kernel.
+
+    Memory savings: 50% vs BF16 (1 byte vs 2 bytes per weight + small scale overhead)
+
+    For M=1 (single token decode), uses FP8 GEMV kernel with online dequantization.
+    For larger batches, falls back to CPU dequantization + GPU matmul.
+    """
+
+    # Class-level flag to enable/disable GEMV optimization
+    _use_gemv: bool = True
+
+    # FP8 E4M3 to float32 lookup table (for CPU fallback)
+    _FP8_TABLE: np.ndarray | None = None
+
+    @classmethod
+    def _get_fp8_table(cls) -> np.ndarray:
+        """Build FP8 E4M3 to float32 conversion lookup table."""
+        if cls._FP8_TABLE is not None:
+            return cls._FP8_TABLE
+
+        table = np.zeros(256, dtype=np.float32)
+        for i in range(256):
+            sign = (i >> 7) & 1
+            exp = (i >> 3) & 0xF
+            mant = i & 0x7
+
+            if exp == 0xF and mant == 0x7:
+                table[i] = np.nan
+            elif exp == 0:
+                value = (mant / 8.0) * (2.0**-6)
+                table[i] = -value if sign else value
+            else:
+                value = (1.0 + mant / 8.0) * (2.0 ** (exp - 7))
+                table[i] = -value if sign else value
+
+        cls._FP8_TABLE = table
+        return table
+
+    def __init__(
+        self,
+        weight_fp8: GPUArray,  # [out_features, in_features] as uint8
+        scale_inv: GPUArray,  # [out_features // block_h, in_features // block_w] as bf16
+        bias: GPUArray | None = None,
+        block_size: tuple[int, int] = (128, 128),
+    ):
+        if weight_fp8.ndim != 2:
+            raise ValueError(f"weight must be 2D, got {weight_fp8.ndim}D")
+        self.weight_fp8 = weight_fp8
+        self.scale_inv = scale_inv
+        self.bias = bias
+        self.block_size = block_size
+        self.out_features = weight_fp8.shape[0]
+        self.in_features = weight_fp8.shape[1]
+
+        # Transposed weight for GEMV: [in_features, out_features]
+        # FP8 GEMV expects B[K,N] where K=in_features, N=out_features
+        self._weight_fp8_t: GPUArray | None = None
+        self._scale_inv_t: GPUArray | None = None
+
+        # Cached dequantized weight for fallback (lazy initialization)
+        self._weight_dequant: GPUArray | None = None
+        self._weight_dequant_t: GPUArray | None = None
+
+    def _ensure_transposed_fp8(self) -> None:
+        """Ensure transposed FP8 weight is available for GEMV."""
+        if self._weight_fp8_t is None:
+            # Transpose weight: [out, in] -> [in, out]
+            self._weight_fp8_t = transpose(self.weight_fp8)
+            # Transpose scale: [out/128, in/128] -> [in/128, out/128]
+            self._scale_inv_t = transpose(self.scale_inv)
+
+    def _dequantize_cpu(self) -> np.ndarray:
+        """Dequantize FP8 weight to float32 on CPU."""
+        table = self._get_fp8_table()
+
+        # Get FP8 bytes
+        fp8_np = self.weight_fp8.to_numpy()
+        if fp8_np.dtype != np.uint8:
+            fp8_np = fp8_np.view(np.uint8)
+
+        # Convert to float32
+        f32 = table[fp8_np.ravel()].reshape(fp8_np.shape)
+
+        # Get scale_inv (bf16 as uint16)
+        scale_np = self.scale_inv.to_numpy()
+        if scale_np.dtype == np.uint16:
+            scale_f32 = np.empty(scale_np.shape, dtype=np.float32)
+            scale_f32.view(np.uint32)[:] = scale_np.astype(np.uint32) << 16
+        else:
+            scale_f32 = scale_np.astype(np.float32)
+
+        # Apply block-wise scaling
+        H, W = f32.shape
+        block_h, block_w = self.block_size
+        num_blocks_h = H // block_h
+        num_blocks_w = W // block_w
+
+        f32_reshaped = f32.reshape(num_blocks_h, block_h, num_blocks_w, block_w)
+        scale_expanded = scale_f32[:, np.newaxis, :, np.newaxis]
+        f32_scaled = f32_reshaped * scale_expanded
+
+        return f32_scaled.reshape(H, W)
+
+    def _ensure_dequantized(self) -> None:
+        """Ensure dequantized weight is available (lazy init, for fallback)."""
+        if self._weight_dequant is None:
+            # Dequantize on CPU and upload to GPU
+            weight_f32 = self._dequantize_cpu()
+
+            # Convert to BF16
+            uint32_view = weight_f32.view(np.uint32)
+            weight_bf16 = ((uint32_view + 0x7FFF + ((uint32_view >> 16) & 1)) >> 16).astype(
+                np.uint16
+            )
+
+            self._weight_dequant = from_numpy(weight_bf16)
+            self._weight_dequant_t = transpose(self._weight_dequant)
+
+    def __call__(self, x: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
+        """Forward pass with online dequantization.
+
+        For M=1 (single token), uses FP8 GEMV kernel with online dequantization.
+        For larger batches, falls back to CPU dequantization + GPU matmul.
+        """
+        if x.ndim != 2:
+            raise ValueError(f"input must be 2D [batch, in_features], got {x.ndim}D")
+        if x.shape[1] != self.in_features:
+            raise ValueError(f"input features {x.shape[1]} != weight {self.in_features}")
+
+        M = x.shape[0]
+
+        # M=1 path: Use FP8 GEMV kernel with online dequantization
+        if M == 1 and self._use_gemv:
+            # Ensure transposed FP8 weight is ready
+            self._ensure_transposed_fp8()
+
+            # GEMV path: x[1,K] @ W^T[K,N] = y[1,N]
+            # View x as 1D for GEMV
+            x_1d = x.view((self.in_features,))
+
+            # Call FP8 GEMV kernel
+            y_1d = gemv_fp8_bf16(x_1d, self._weight_fp8_t, self._scale_inv_t)
+
+            if out is not None:
+                copy_to(y_1d.view((1, self.out_features)), out)
+                y = out
+            else:
+                y = y_1d.view((1, self.out_features))
+        else:
+            # Fallback: dequantize to BF16 and use matmul
+            self._ensure_dequantized()
+            y = matmul(x, self._weight_dequant_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)

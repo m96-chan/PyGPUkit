@@ -11,9 +11,10 @@
 #include <cuda_bf16.h>
 #include <cstdio>
 
-// Include both BF16 and NVF4 GEMV kernels
+// Include BF16, NVF4, and FP8 GEMV kernels
 #include "gemv_cutlass.cuh"
 #include "gemv_nvf4_sm120.cuh"
+#include "gemv_fp8.cuh"
 
 namespace pygpukit {
 namespace ops {
@@ -213,6 +214,79 @@ void pygpukit_nvf4_get_sizes(
 ) {
     *data_size = (K / 2) * N;
     *scale_size = ((K + 31) / 32) * N;
+}
+
+/**
+ * Initialize FP8 E4M3 lookup table (call once at startup)
+ */
+void pygpukit_fp8_init_lut() {
+    pygpukit::ops::gemv::init_fp8_e4m3_lut();
+}
+
+/**
+ * FP8 GEMV: C[1,N] = A[1,K] @ B_fp8[K,N] (FP8 E4M3 quantized)
+ *
+ * @param A         [K] BF16 input vector
+ * @param B_fp8     [K, N] FP8 E4M3 weights (uint8)
+ * @param B_scale   [K/128, N/128] BF16 scale factors (inverse scale)
+ * @param C         [N] BF16 output vector
+ * @param K         Inner dimension
+ * @param N         Output dimension
+ * @param scale_stride_n  N/128 (number of scale blocks per row)
+ */
+cudaError_t pygpukit_gemv_fp8_bf16(
+    const void* A,
+    const void* B_fp8,
+    const void* B_scale,
+    void* C,
+    int K,
+    int N,
+    int scale_stride_n,
+    cudaStream_t stream
+) {
+    return pygpukit::ops::gemv::launch_gemv_fp8(
+        static_cast<const __nv_bfloat16*>(A),
+        static_cast<const uint8_t*>(B_fp8),
+        static_cast<const __nv_bfloat16*>(B_scale),
+        static_cast<__nv_bfloat16*>(C),
+        K, N, stream
+    );
+}
+
+/**
+ * Batched FP8 GEMV: C[batch,N] = A[batch,K] @ B_fp8[K,N]
+ */
+cudaError_t pygpukit_gemv_fp8_bf16_batched(
+    const void* A,
+    const void* B_fp8,
+    const void* B_scale,
+    void* C,
+    int K,
+    int N,
+    int batch_count,
+    int scale_stride_n,
+    cudaStream_t stream
+) {
+    return pygpukit::ops::gemv::launch_gemv_fp8_batched(
+        static_cast<const __nv_bfloat16*>(A),
+        static_cast<const uint8_t*>(B_fp8),
+        static_cast<const __nv_bfloat16*>(B_scale),
+        static_cast<__nv_bfloat16*>(C),
+        K, N, batch_count, stream
+    );
+}
+
+/**
+ * Get memory sizes for FP8 quantization (128x128 block)
+ */
+void pygpukit_fp8_get_sizes(
+    int K,
+    int N,
+    size_t* scale_size
+) {
+    int scale_k = (K + 127) / 128;
+    int scale_n = (N + 127) / 128;
+    *scale_size = scale_k * scale_n * sizeof(__nv_bfloat16);
 }
 
 }  // extern "C"
