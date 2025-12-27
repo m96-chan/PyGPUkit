@@ -23,6 +23,8 @@ Built for people who care about **correctness**, **reproducibility**, and **real
 - FP8 / NVF4 / w8a16 done explicitly
 - Rust-powered scheduler for real GPU concurrency
 
+This is not a framework.
+This is a GPU runtime.
 ---
 
 ## Why PyGPUkit Exists
@@ -51,6 +53,7 @@ PyGPUkit chooses:
 - ❌ Not a training framework
 - ❌ Not a convenience-first library
 - ❌ Not safe if you ignore GPU semantics
+- ❌ Not designed for "just works" expectations
 
 PyGPUkit is for people who want to *see* and *control*
 what their GPU is actually doing.
@@ -79,6 +82,8 @@ All of these are **reproducible**.
 All of them are **documented**.  
 All of them are **why PyGPUkit exists**.
 
+These are not theoretical.
+They were all observed in production or real benchmarks.
 ---
 
 ## Documentation
@@ -950,7 +955,8 @@ PyGPUkit aims to fill the gap for a tiny, embeddable GPU runtime for Python.
 
 ---
 
-If this project saved you from a silent GPU bug,  
+If this project saved you from a silent GPU bug,
+or helped you trust your results again,
 consider giving it a ⭐.
 
 Correctness deserves visibility.
