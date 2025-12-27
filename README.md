@@ -3,7 +3,13 @@
 *A minimal, modular GPU runtime with Rust-powered scheduler, NVRTC JIT compilation, and a clean NumPy-like API.*
 
 [![PyPI version](https://badge.fury.io/py/PyGPUkit.svg)](https://badge.fury.io/py/PyGPUkit)
+[![Python](https://img.shields.io/pypi/pyversions/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CUDA](https://img.shields.io/badge/CUDA-13.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![SM](https://img.shields.io/badge/SM-80%20%7C%2086%20%7C%2089%20%7C%2090%20%7C%20100%20%7C%20120a-blue.svg)](#supported-gpus)
+[![GitHub stars](https://img.shields.io/github/stars/m96-chan/PyGPUkit?style=social)](https://github.com/m96-chan/PyGPUkit)
+[![Downloads](https://img.shields.io/pypi/dm/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 ---
 
@@ -789,6 +795,9 @@ PyGPUkit/
   rust/            # Rust backend (memory pool, scheduler)
     pygpukit-core/   # Pure Rust core logic
     pygpukit-python/ # PyO3 bindings
+  .claude/         # Claude Code configuration
+    skills/          # Development workflow skills
+    agents/          # Specialized subagents
   docs/            # Documentation guides
   examples/        # Demo scripts
   scripts/         # Build scripts, benchmarks
@@ -854,8 +863,18 @@ APIs to be removed will emit `DeprecationWarning` for at least one minor version
 ---
 
 ## Contributing
-Contributions and discussions are welcome!
-Please open Issues for feature requests, bugs, or design proposals.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+**Quick Start:**
+1. Fork and clone
+2. Create feature branch
+3. Build: `./build.sh 86` (Git Bash)
+4. Run checks: `ruff check`, `mypy`, `pytest`
+5. Submit PR
+
+**We Accept:** Performance improvements, bug fixes, new GPU ops, documentation
+**We Reject:** cuda-python dependencies, training features, SM < 80 support
 
 ---
 
@@ -869,6 +888,7 @@ MIT License
 Inspired by and built upon:
 - [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) - Runtime, Driver API, NVRTC
 - [CUTLASS](https://github.com/NVIDIA/cutlass) - TensorCore GEMM optimization techniques
+- [Codon](https://github.com/exaloop/codon) - High-performance Python compiler with GPU support
 - [CuPy](https://github.com/cupy/cupy)
 - [Triton](https://github.com/triton-lang/triton)
 
