@@ -752,6 +752,29 @@ Why is W4A16 faster than NVF4/NVF4 despite both using 4-bit weights?
 
 For single-token decode (M=1), **W4A16 or FP8 is recommended**.
 
+### Comprehensive GEMV Benchmark (RTX 5090, SM120a)
+
+All GEMV kernels compared on Qwen2.5-7B gate_proj (K=3584, N=18944):
+
+| Kernel | A dtype | B dtype | Weight Size | Time (us) | vs BF16 |
+|--------|---------|---------|-------------|-----------|---------|
+| BF16 | BF16 | BF16 | 129.5 MB | 119 | 1.00x |
+| FP8/BF16 (W8A16) | BF16 | FP8 | 64.8 MB | 272 | 0.44x |
+| **FP8/FP8 (W8A8)** | FP8 | FP8 | 64.8 MB | **19** | **6.2x** |
+| NVF4/BF16 (W4A16) | BF16 | NVF4 | 32.4 MB | 106 | 1.12x |
+| NVF4/NVF4 (W4A4) | NVF4 | NVF4 | 32.4 MB | 217 | 0.55x |
+
+**Performance by Layer Type:**
+
+| Layer | K | N | Best Kernel | Speedup |
+|-------|---|---|-------------|---------|
+| gate_proj | 3584 | 18944 | FP8/FP8 | 6.2x |
+| down_proj | 18944 | 3584 | FP8/FP8 | 22.7x |
+| o_proj | 3584 | 3584 | FP8/FP8 | 6.8x |
+| qkv_proj | 3584 | 512 | FP8/FP8 | 9.1x |
+
+> **Recommendation:** FP8/FP8 is optimal for SM120 (Blackwell). NVF4/BF16 (W4A16) provides the best balance when FP8 compute is unavailable.
+
 ### NVF4-BF16 GEMM Performance (RTX 5090, SM120a)
 
 4-bit NVF4 GEMM with BF16 I/O using CUTLASS block-scaled tensor operations:
