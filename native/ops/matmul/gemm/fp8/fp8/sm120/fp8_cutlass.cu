@@ -377,6 +377,174 @@ bool is_available() {
     return (props.major * 10 + props.minor) >= 120;
 }
 
+// ============================================================================
+// BF16 -> FP8 Quantization Kernel
+// ============================================================================
+
+__global__ void quantize_bf16_to_fp8_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    cutlass::float_e4m3_t* __restrict__ output,
+    size_t num_elements
+) {
+    size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= num_elements) return;
+
+    float val = __bfloat162float(input[idx]);
+
+    // Clamp to FP8 E4M3 range
+    constexpr float FP8_MAX = 448.0f;
+    val = fminf(fmaxf(val, -FP8_MAX), FP8_MAX);
+
+    output[idx] = cutlass::float_e4m3_t(val);
+}
+
+// ============================================================================
+// FP8 -> BF16 Conversion Kernel
+// ============================================================================
+
+__global__ void convert_fp8_to_bf16_kernel(
+    const cutlass::float_e4m3_t* __restrict__ input,
+    __nv_bfloat16* __restrict__ output,
+    size_t num_elements
+) {
+    size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= num_elements) return;
+
+    float val = static_cast<float>(input[idx]);
+    output[idx] = __float2bfloat16(val);
+}
+
+// ============================================================================
+// Optimized W8A16 GEMM: BF16 activations x FP8 weights -> BF16 output
+// Uses fast FP8xFP8 GEMM internally + type conversions
+// ============================================================================
+
+// Thread-local cached scale buffers to avoid repeated allocations
+static thread_local cutlass::device_memory::allocation<float> s_cached_SFA;
+static thread_local cutlass::device_memory::allocation<float> s_cached_SFB;
+static thread_local size_t s_cached_sfa_size = 0;
+static thread_local size_t s_cached_sfb_size = 0;
+
+cudaError_t gemm_w8a16_optimized(
+    const __nv_bfloat16* A_bf16,      // [M, K] BF16 activation
+    const cutlass::float_e4m3_t* B,   // [K, N] FP8 weight (ColumnMajor)
+    __nv_bfloat16* D_bf16,            // [M, N] BF16 output
+    const float* scale_A,             // Scale factors for A (can be nullptr for unity)
+    const float* scale_B,             // Scale factors for B (can be nullptr for unity)
+    int M, int N, int K,
+    float alpha,
+    float beta,
+    cudaStream_t stream
+) {
+    int64_t size_A = static_cast<int64_t>(M) * K;
+    int64_t size_D = static_cast<int64_t>(M) * N;
+
+    // Allocate temporary buffers - combined A_fp8 + D_fp8 in single allocation
+    // buf_C_fp8 removed - use D_fp8 as C (beta=0 anyway)
+    cutlass::device_memory::allocation<cutlass::float_e4m3_t> buf_combined(size_A + size_D);
+    auto* A_fp8 = buf_combined.get();
+    auto* D_fp8 = buf_combined.get() + size_A;
+
+    // Calculate scale layouts
+    auto problem_shape = cute::make_shape(M, N, K, 1);
+    LayoutSFA layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(problem_shape);
+    LayoutSFB layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(problem_shape);
+
+    size_t sfa_size = size(filter_zeros(layout_SFA));
+    size_t sfb_size = size(filter_zeros(layout_SFB));
+    size_t sfa_padded = std::max(sfa_size, size_t(32));
+    size_t sfb_padded = std::max(sfb_size, size_t(32));
+
+    // Use cached scale buffers if nullptr (avoid repeated allocations)
+    const float* d_SFA = scale_A;
+    const float* d_SFB = scale_B;
+
+    int threads = 256;
+
+    if (scale_A == nullptr) {
+        // Reuse or resize cached buffer
+        if (s_cached_sfa_size < sfa_padded) {
+            s_cached_SFA.reset(sfa_padded);
+            s_cached_sfa_size = sfa_padded;
+            // Fill with 1.0f once
+            int blocks_sfa = (sfa_padded + threads - 1) / threads;
+            fill_scale_factors_unity_kernel<<<blocks_sfa, threads, 0, stream>>>(
+                s_cached_SFA.get(), sfa_padded);
+        }
+        d_SFA = s_cached_SFA.get();
+    }
+
+    if (scale_B == nullptr) {
+        if (s_cached_sfb_size < sfb_padded) {
+            s_cached_SFB.reset(sfb_padded);
+            s_cached_sfb_size = sfb_padded;
+            int blocks_sfb = (sfb_padded + threads - 1) / threads;
+            fill_scale_factors_unity_kernel<<<blocks_sfb, threads, 0, stream>>>(
+                s_cached_SFB.get(), sfb_padded);
+        }
+        d_SFB = s_cached_SFB.get();
+    }
+
+    // 1. Quantize A: BF16 -> FP8
+    int blocks_A = (size_A + threads - 1) / threads;
+    quantize_bf16_to_fp8_kernel<<<blocks_A, threads, 0, stream>>>(
+        A_bf16, A_fp8, size_A
+    );
+
+    // 2. Run fast FP8xFP8 GEMM
+    StrideA stride_a = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, 1));
+    StrideB stride_b = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, 1));
+    StrideC stride_c = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, 1));
+    StrideD stride_d = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, 1));
+
+    typename Gemm::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {M, N, K, 1},
+        {
+            A_fp8, stride_a,
+            B, stride_b,
+            d_SFA, layout_SFA,
+            d_SFB, layout_SFB
+        },
+        {
+            {},
+            D_fp8, stride_c,  // Use D_fp8 as C (beta=0)
+            D_fp8, stride_d
+        }
+    };
+
+    arguments.epilogue.thread.alpha = alpha;
+    arguments.epilogue.thread.beta = 0.0f;  // Force beta=0 since C=D
+
+    Gemm gemm_op;
+
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    size_t workspace_size = Gemm::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    status = gemm_op.initialize(arguments, workspace.get());
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    status = gemm_op.run(stream);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorLaunchFailure;
+    }
+
+    // 3. Convert D: FP8 -> BF16
+    int blocks_D = (size_D + threads - 1) / threads;
+    convert_fp8_to_bf16_kernel<<<blocks_D, threads, 0, stream>>>(
+        D_fp8, D_bf16, size_D
+    );
+
+    return cudaSuccess;
+}
+
 }  // namespace fp8_fp8_gemm_sm120
 }  // namespace ops
 }  // namespace pygpukit
@@ -417,6 +585,27 @@ extern "C" {
         size_t* sfa_size, size_t* sfb_size
     ) {
         pygpukit::ops::fp8_fp8_gemm_sm120::get_scale_sizes(M, N, K, sfa_size, sfb_size);
+    }
+
+    // Optimized W8A16: BF16 activations x FP8 weights -> BF16 output
+    // Uses fast FP8xFP8 GEMM internally
+    cudaError_t pygpukit_gemm_w8a16_optimized_sm120(
+        const void* A_bf16,      // [M, K] BF16 activation
+        const uint8_t* B_fp8,    // [K, N] FP8 weight (ColumnMajor)
+        void* D_bf16,            // [M, N] BF16 output
+        const float* scale_A,    // Scale factors for A
+        const float* scale_B,    // Scale factors for B
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    ) {
+        return pygpukit::ops::fp8_fp8_gemm_sm120::gemm_w8a16_optimized(
+            reinterpret_cast<const __nv_bfloat16*>(A_bf16),
+            reinterpret_cast<const cutlass::float_e4m3_t*>(B_fp8),
+            reinterpret_cast<__nv_bfloat16*>(D_bf16),
+            scale_A, scale_B,
+            M, N, K, alpha, beta, stream
+        );
     }
 }
 
@@ -473,6 +662,16 @@ extern "C" {
     ) {
         *sfa_size = 0;
         *sfb_size = 0;
+    }
+
+    cudaError_t pygpukit_gemm_w8a16_optimized_sm120(
+        const void* A_bf16, const uint8_t* B_fp8, void* D_bf16,
+        const float* scale_A, const float* scale_B,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    ) {
+        return cudaErrorNotSupported;
     }
 }
 

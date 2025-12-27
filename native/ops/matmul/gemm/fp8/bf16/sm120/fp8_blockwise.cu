@@ -237,24 +237,14 @@ cudaError_t gemm_fp8(
     float beta,
     cudaStream_t stream
 ) {
-    fprintf(stderr, "[FP8 GEMM SM120] BUILD_VER=2024-12-24-A\n");
-    fprintf(stderr, "[FP8 GEMM SM120] Starting M=%d, N=%d, K=%d\n", M, N, K);
-
-    // Check input/output alignment
-    fprintf(stderr, "[FP8 GEMM SM120] Alignment check:\n");
-    fprintf(stderr, "  A ptr alignment mod 128 = %llu\n", (unsigned long long)((uintptr_t)A % 128));
-    fprintf(stderr, "  B ptr alignment mod 128 = %llu\n", (unsigned long long)((uintptr_t)B % 128));
-    fprintf(stderr, "  D ptr alignment mod 128 = %llu\n", (unsigned long long)((uintptr_t)D % 128));
-
-    // Sizes
     int64_t size_A = static_cast<int64_t>(M) * K;
     int64_t size_B = static_cast<int64_t>(K) * N;
     int64_t size_D = static_cast<int64_t>(M) * N;
 
-    // Allocate FP8 data buffers
+    // Allocate aligned FP8 data buffers
     cutlass::device_memory::allocation<cutlass::float_e4m3_t> buf_A_fp8(size_A);
     cutlass::device_memory::allocation<cutlass::float_e4m3_t> buf_B_fp8(size_B);
-    cutlass::device_memory::allocation<cutlass::bfloat16_t> buf_C_bf16(size_D);  // For epilogue C input
+    cutlass::device_memory::allocation<cutlass::bfloat16_t> buf_C_bf16(size_D);
     cutlass::device_memory::allocation<cutlass::bfloat16_t> buf_D_bf16(size_D);
 
     auto* d_A_fp8 = buf_A_fp8.get();
@@ -262,43 +252,21 @@ cudaError_t gemm_fp8(
     auto* d_C_bf16 = buf_C_bf16.get();
     auto* d_D_bf16 = buf_D_bf16.get();
 
-    fprintf(stderr, "[FP8 GEMM SM120] FP8 buffers allocated: A=%p, B=%p, D_bf16=%p\n",
-            (void*)d_A_fp8, (void*)d_B_fp8, (void*)d_D_bf16);
-    fprintf(stderr, "[FP8 GEMM SM120] Internal alignment check:\n");
-    fprintf(stderr, "  A_fp8 mod 128 = %llu\n", (unsigned long long)((uintptr_t)d_A_fp8 % 128));
-    fprintf(stderr, "  B_fp8 mod 128 = %llu\n", (unsigned long long)((uintptr_t)d_B_fp8 % 128));
-    fprintf(stderr, "  D_bf16 mod 128 = %llu\n", (unsigned long long)((uintptr_t)d_D_bf16 % 128));
-
-    // Calculate scale factor sizes using ScaleConfig (from example 87a)
+    // Calculate scale factor layouts
     auto problem_shape = cute::make_shape(M, N, K, 1);
     LayoutSFA layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(problem_shape);
     LayoutSFB layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(problem_shape);
 
     size_t sfa_size = size(filter_zeros(layout_SFA));
     size_t sfb_size = size(filter_zeros(layout_SFB));
-
-    fprintf(stderr, "[FP8 GEMM SM120] Scale factor sizes: SFA=%zu, SFB=%zu\n", sfa_size, sfb_size);
-    fprintf(stderr, "[FP8 GEMM SM120] Scale factor layouts:\n");
-    cute::print("  layout_SFA: "); cute::print(layout_SFA); cute::print("\n");
-    cute::print("  layout_SFB: "); cute::print(layout_SFB); cute::print("\n");
-
-    // Allocate scale factor buffers (float, not E8M0)
-    // TMA requires 128-byte alignment for each scale factor access
-    // Pad to at least 32 floats (128 bytes) to ensure TMA alignment
     size_t sfa_padded = std::max(sfa_size, size_t(32));
     size_t sfb_padded = std::max(sfb_size, size_t(32));
-    fprintf(stderr, "[FP8 GEMM SM120] Scale factor padded sizes: SFA=%zu->%zu, SFB=%zu->%zu\n",
-            sfa_size, sfa_padded, sfb_size, sfb_padded);
 
     cutlass::device_memory::allocation<float> buf_SFA(sfa_padded);
     cutlass::device_memory::allocation<float> buf_SFB(sfb_padded);
 
     auto* d_SFA = buf_SFA.get();
     auto* d_SFB = buf_SFB.get();
-
-    fprintf(stderr, "[FP8 GEMM SM120] Scale factor alignment:\n");
-    fprintf(stderr, "  SFA mod 128 = %llu\n", (unsigned long long)((uintptr_t)d_SFA % 128));
-    fprintf(stderr, "  SFB mod 128 = %llu\n", (unsigned long long)((uintptr_t)d_SFB % 128));
 
     // Quantize A and B
     int threads = 256;
@@ -310,125 +278,68 @@ cudaError_t gemm_fp8(
     );
 
     // Convert B: FP32 RowMajor -> FP8 ColumnMajor (transpose during quantization)
-    // B input is [K, N] RowMajor, output needs to be [K, N] ColumnMajor
     dim3 block_B(16, 16);
     dim3 grid_B((N + 15) / 16, (K + 15) / 16);
     transpose_quantize_fp32_to_fp8_kernel<<<grid_B, block_B, 0, stream>>>(
         B, d_B_fp8, K, N
     );
-    fprintf(stderr, "[FP8 GEMM SM120] B transposed from RowMajor to ColumnMajor\n");
 
-    // Fill scale factors with 1.0 (fill entire padded buffer)
+    // Fill scale factors with 1.0
     int blocks_SFA_fill = (sfa_padded + threads - 1) / threads;
     int blocks_SFB_fill = (sfb_padded + threads - 1) / threads;
     fill_scale_factors_unity_kernel<<<blocks_SFA_fill, threads, 0, stream>>>(d_SFA, sfa_padded);
     fill_scale_factors_unity_kernel<<<blocks_SFB_fill, threads, 0, stream>>>(d_SFB, sfb_padded);
 
-    // Sync and check for errors
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] Quantization sync failed: %s\n", cudaGetErrorString(err));
-        return err;
-    }
-    fprintf(stderr, "[FP8 GEMM SM120] Quantization OK\n");
-
-    // Build strides (from example 87a)
-    // For CUTLASS 3.x with cute layouts:
-    // - StrideA for RowMajor A[M,K]: packed stride from shape (M, K, L)
-    // - StrideB for ColumnMajor B[K,N]: packed stride from shape (N, K, L)
-    // Note: The shape passed to make_cute_packed_stride is the logical GEMM shape,
-    // not the memory layout shape. CUTLASS handles the layout internally.
+    // Build strides
     StrideA stride_a = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, 1));
     StrideB stride_b = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, 1));
     StrideC stride_c = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, 1));
     StrideD stride_d = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, 1));
 
-    // Debug: Print stride values
-    fprintf(stderr, "[FP8 GEMM SM120] Stride debug:\n");
-    fprintf(stderr, "  stride_a: (%lld, %lld, %lld)\n",
-            (long long)cute::get<0>(stride_a), (long long)cute::get<1>(stride_a), (long long)cute::get<2>(stride_a));
-    fprintf(stderr, "  stride_b: (%lld, %lld, %lld)\n",
-            (long long)cute::get<0>(stride_b), (long long)cute::get<1>(stride_b), (long long)cute::get<2>(stride_b));
-    fprintf(stderr, "  stride_c: (%lld, %lld, %lld)\n",
-            (long long)cute::get<0>(stride_c), (long long)cute::get<1>(stride_c), (long long)cute::get<2>(stride_c));
-    fprintf(stderr, "  stride_d: (%lld, %lld, %lld)\n",
-            (long long)cute::get<0>(stride_d), (long long)cute::get<1>(stride_d), (long long)cute::get<2>(stride_d));
-
-    // Build CUTLASS arguments (following example 87a structure)
-    // Note: Even with beta=0, we must pass a valid C pointer (CUTLASS may dereference it)
+    // Build CUTLASS arguments
     typename Gemm::Arguments arguments{
         cutlass::gemm::GemmUniversalMode::kGemm,
         {M, N, K, 1},
-        {  // Mainloop arguments
+        {
             d_A_fp8, stride_a,
             d_B_fp8, stride_b,
             d_SFA, layout_SFA,
             d_SFB, layout_SFB
         },
-        {  // Epilogue arguments
-            {},  // epilogue.thread (will be filled below)
-            d_C_bf16, stride_c,  // C pointer (valid even with beta=0)
-            d_D_bf16, stride_d   // D pointer
+        {
+            {},
+            d_C_bf16, stride_c,
+            d_D_bf16, stride_d
         }
     };
 
-    // Set alpha/beta
     arguments.epilogue.thread.alpha = alpha;
     arguments.epilogue.thread.beta = beta;
 
-    fprintf(stderr, "[FP8 GEMM SM120] Arguments built, alpha=%f, beta=%f\n", alpha, beta);
-
-    // Instantiate and run GEMM
+    // Run GEMM
     Gemm gemm_op;
 
     cutlass::Status status = gemm_op.can_implement(arguments);
     if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] can_implement failed: %d\n", static_cast<int>(status));
         return cudaErrorInvalidValue;
     }
-    fprintf(stderr, "[FP8 GEMM SM120] can_implement OK\n");
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
-    fprintf(stderr, "[FP8 GEMM SM120] Workspace size: %zu bytes\n", workspace_size);
 
     status = gemm_op.initialize(arguments, workspace.get());
     if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] initialize failed: %d\n", static_cast<int>(status));
         return cudaErrorInvalidValue;
     }
-    fprintf(stderr, "[FP8 GEMM SM120] initialize OK\n");
 
     status = gemm_op.run();
     if (status != cutlass::Status::kSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] run failed: %d\n", static_cast<int>(status));
         return cudaErrorLaunchFailure;
     }
-
-    // Sync and check for kernel errors
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] GEMM sync failed: %s\n", cudaGetErrorString(err));
-        return err;
-    }
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] GEMM kernel error: %s\n", cudaGetErrorString(err));
-        return err;
-    }
-    fprintf(stderr, "[FP8 GEMM SM120] GEMM completed OK\n");
 
     // Convert BF16 output to FP32
     int blocks_D = (size_D + threads - 1) / threads;
     bf16_to_fp32_kernel<<<blocks_D, threads, 0, stream>>>(d_D_bf16, D, size_D);
-
-    // Sync before RAII cleanup
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[FP8 GEMM SM120] BF16->FP32 sync failed: %s\n", cudaGetErrorString(err));
-        return err;
-    }
-    fprintf(stderr, "[FP8 GEMM SM120] Complete\n");
 
     return cudaSuccess;
 }
@@ -439,6 +350,133 @@ bool is_available() {
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, device_id);
     return (props.major * 10 + props.minor) >= 120;
+}
+
+// ============================================================================
+// W8A16 GEMM: BF16 activations (quantized to FP8) x FP8 weights -> BF16 output
+// Uses the same GEMM kernel as gemm_fp8, just with different input prep
+// ============================================================================
+
+// BF16 -> FP8 quantization kernel
+__global__ void quantize_bf16_to_fp8_kernel(
+    const cutlass::bfloat16_t* __restrict__ input,
+    cutlass::float_e4m3_t* __restrict__ output,
+    int64_t num_elements
+) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= num_elements) return;
+
+    float val = static_cast<float>(input[idx]);
+    uint8_t fp8 = float_to_fp8_e4m3_scaled(val, 1.0f);
+    output[idx] = cutlass::float_e4m3_t::bitcast(fp8);
+}
+
+cudaError_t gemm_w8a16(
+    const cutlass::bfloat16_t* A_bf16,  // [M, K] BF16 activation
+    const cutlass::float_e4m3_t* B_fp8, // [N, K] FP8 weight (transposed for ColumnMajor)
+    cutlass::bfloat16_t* D_bf16,        // [M, N] BF16 output
+    int M, int N, int K,
+    float alpha,
+    float beta,
+    cudaStream_t stream
+) {
+    int64_t size_A = static_cast<int64_t>(M) * K;
+    int64_t size_B = static_cast<int64_t>(N) * K;  // [N, K] transposed storage
+    int64_t size_D = static_cast<int64_t>(M) * N;
+
+    // Allocate aligned buffers
+    cutlass::device_memory::allocation<cutlass::float_e4m3_t> buf_A_fp8(size_A);
+    cutlass::device_memory::allocation<cutlass::float_e4m3_t> buf_B_fp8(size_B);
+    cutlass::device_memory::allocation<cutlass::bfloat16_t> buf_C_bf16(size_D);
+    cutlass::device_memory::allocation<cutlass::bfloat16_t> buf_D_bf16(size_D);
+
+    auto* d_A_fp8 = buf_A_fp8.get();
+    auto* d_B_fp8 = buf_B_fp8.get();
+    auto* d_C_bf16 = buf_C_bf16.get();
+    auto* d_D_bf16 = buf_D_bf16.get();
+
+    // Quantize A: BF16 -> FP8 (on-the-fly)
+    int threads = 256;
+    int blocks_A = (size_A + threads - 1) / threads;
+    quantize_bf16_to_fp8_kernel<<<blocks_A, threads, 0, stream>>>(
+        A_bf16, d_A_fp8, size_A
+    );
+
+    // Copy B to aligned buffer (B is already FP8 [N, K])
+    cudaMemcpyAsync(d_B_fp8, B_fp8, size_B * sizeof(cutlass::float_e4m3_t),
+                    cudaMemcpyDeviceToDevice, stream);
+
+    // Calculate scale factor layouts
+    auto problem_shape = cute::make_shape(M, N, K, 1);
+    LayoutSFA layout_SFA = ScaleConfig::tile_atom_to_shape_SFA(problem_shape);
+    LayoutSFB layout_SFB = ScaleConfig::tile_atom_to_shape_SFB(problem_shape);
+
+    size_t sfa_size = size(filter_zeros(layout_SFA));
+    size_t sfb_size = size(filter_zeros(layout_SFB));
+    size_t sfa_padded = std::max(sfa_size, size_t(32));
+    size_t sfb_padded = std::max(sfb_size, size_t(32));
+
+    cutlass::device_memory::allocation<float> buf_SFA(sfa_padded);
+    cutlass::device_memory::allocation<float> buf_SFB(sfb_padded);
+
+    // Fill scale factors with 1.0
+    int blocks_SFA_fill = (sfa_padded + threads - 1) / threads;
+    int blocks_SFB_fill = (sfb_padded + threads - 1) / threads;
+    fill_scale_factors_unity_kernel<<<blocks_SFA_fill, threads, 0, stream>>>(buf_SFA.get(), sfa_padded);
+    fill_scale_factors_unity_kernel<<<blocks_SFB_fill, threads, 0, stream>>>(buf_SFB.get(), sfb_padded);
+
+    // Build strides
+    StrideA stride_a = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, 1));
+    StrideB stride_b = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, 1));
+    StrideC stride_c = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, 1));
+    StrideD stride_d = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, 1));
+
+    // Build CUTLASS arguments
+    typename Gemm::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {M, N, K, 1},
+        {
+            d_A_fp8, stride_a,
+            d_B_fp8, stride_b,
+            buf_SFA.get(), layout_SFA,
+            buf_SFB.get(), layout_SFB
+        },
+        {
+            {},
+            d_C_bf16, stride_c,
+            d_D_bf16, stride_d
+        }
+    };
+
+    arguments.epilogue.thread.alpha = alpha;
+    arguments.epilogue.thread.beta = beta;
+
+    // Run GEMM
+    Gemm gemm_op;
+
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    size_t workspace_size = Gemm::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    status = gemm_op.initialize(arguments, workspace.get());
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorInvalidValue;
+    }
+
+    status = gemm_op.run();
+    if (status != cutlass::Status::kSuccess) {
+        return cudaErrorLaunchFailure;
+    }
+
+    // Copy output to user buffer (async)
+    cudaMemcpyAsync(D_bf16, d_D_bf16, size_D * sizeof(cutlass::bfloat16_t),
+                    cudaMemcpyDeviceToDevice, stream);
+
+    return cudaSuccess;
 }
 
 }  // namespace fp8_gemm_sm120
@@ -458,6 +496,21 @@ extern "C" {
 
     bool pygpukit_fp8_sm120_available() {
         return pygpukit::ops::fp8_gemm_sm120::is_available();
+    }
+
+    // W8A16 GEMM entry point in same compilation unit
+    cudaError_t pygpukit_w8a16_blockwise_sm120(
+        const void* A, const void* B, void* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    ) {
+        return pygpukit::ops::fp8_gemm_sm120::gemm_w8a16(
+            reinterpret_cast<const cutlass::bfloat16_t*>(A),
+            reinterpret_cast<const cutlass::float_e4m3_t*>(B),
+            reinterpret_cast<cutlass::bfloat16_t*>(D),
+            M, N, K, alpha, beta, stream
+        );
     }
 }
 
@@ -496,6 +549,15 @@ extern "C" {
 
     bool pygpukit_fp8_sm120_available() {
         return false;
+    }
+
+    cudaError_t pygpukit_w8a16_blockwise_sm120(
+        const void* A, const void* B, void* D,
+        int M, int N, int K,
+        float alpha, float beta,
+        cudaStream_t stream
+    ) {
+        return cudaErrorNotSupported;
     }
 }
 
