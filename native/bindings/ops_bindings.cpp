@@ -113,16 +113,26 @@ extern "C" {
     cudaError_t pygpukit_grouped_gemm_init_lut();
     cudaError_t pygpukit_grouped_gemm_fp8_bf16(
         const void* A, const void* B_stacked, const void* B_scale,
-        void* C, const int* expert_offsets,
-        int M_total, int N, int K, int num_experts, cudaStream_t stream
-    );
-    // v2 API: row_expert_ids instead of expert_offsets (correct for mixed-expert tiles)
-    cudaError_t pygpukit_grouped_gemm_fp8_bf16_v2(
-        const void* A, const void* B_stacked, const void* B_scale,
         void* C, const int* row_expert_ids,
         int M, int N, int K, cudaStream_t stream
     );
 }
+
+// Optimized FP8 GEMV (warp-level reduction, smem, vectorized)
+namespace pygpukit {
+namespace ops {
+namespace gemv {
+    cudaError_t launch_gemv_fp8_opt(
+        const __nv_bfloat16* A, const uint8_t* B_nk, const __nv_bfloat16* B_scale,
+        __nv_bfloat16* C, int K, int N, cudaStream_t stream
+    );
+    cudaError_t launch_gemv_fp8_opt_batched(
+        const __nv_bfloat16* A, const uint8_t* B_nk, const __nv_bfloat16* B_scale,
+        __nv_bfloat16* C, int K, int N, int batch_count, cudaStream_t stream
+    );
+}  // namespace gemv
+}  // namespace ops
+}  // namespace pygpukit
 
 // MoE (Mixture of Experts) functions - defined in ops/moe/moe.cu
 namespace pygpukit {
@@ -1846,6 +1856,96 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
        "Batched FP8 GEMV: C[M,N] = A[M,K] @ B_fp8[K,N] (online dequantization with block-wise scale)");
 
+    // ========================================================================
+    // Optimized FP8 GEMV (warp-level reduction, smem, vectorized)
+    // NOTE: Uses [N, K] weight layout (NOT transposed like the old kernel)
+    // ========================================================================
+
+    m.def("gemv_fp8_bf16_opt", [](const GPUArray& A, const GPUArray& B_nk, const GPUArray& B_scale, GPUArray& C) {
+        // A: [K] BF16 activation
+        // B_nk: [N, K] uint8 FP8 weights (row = output, NOT transposed)
+        // B_scale: [N/128, K/128] BF16 scale factors
+        // C: [N] BF16 output
+        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16_opt: A and C must be bfloat16");
+        }
+        if (B_nk.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_bf16_opt: B_nk must be uint8 (FP8 E4M3)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16_opt: B_scale must be bfloat16");
+        }
+        if (A.ndim() != 1 || B_nk.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_fp8_bf16_opt: A[K], B_nk[N,K], C[N] dimensions required");
+        }
+
+        int K = A.shape()[0];
+        int N = B_nk.shape()[0];  // Note: N is first dim in [N, K] layout
+
+        if (B_nk.shape()[1] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_bf16_opt: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_bf16_opt: N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit::ops::gemv::launch_gemv_fp8_opt(
+            reinterpret_cast<const __nv_bfloat16*>(A.data()),
+            reinterpret_cast<const uint8_t*>(B_nk.data()),
+            reinterpret_cast<const __nv_bfloat16*>(B_scale.data()),
+            reinterpret_cast<__nv_bfloat16*>(C.data()),
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_bf16_opt failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_nk"), py::arg("B_scale"), py::arg("C"),
+       "Optimized FP8 GEMV: C[N] = A[K] @ B_nk[N,K]^T (warp-reduce, smem, vec4)");
+
+    m.def("gemv_fp8_bf16_opt_batched", [](const GPUArray& A, const GPUArray& B_nk, const GPUArray& B_scale, GPUArray& C) {
+        // A: [M, K] BF16 activation
+        // B_nk: [N, K] uint8 FP8 weights (row = output)
+        // B_scale: [N/128, K/128] BF16 scale factors
+        // C: [M, N] BF16 output
+        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched: A and C must be bfloat16");
+        }
+        if (B_nk.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched: B_nk must be uint8 (FP8 E4M3)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched: B_scale must be bfloat16");
+        }
+        if (A.ndim() != 2 || B_nk.ndim() != 2 || C.ndim() != 2) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched: A[M,K], B_nk[N,K], C[M,N] dimensions required");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B_nk.shape()[0];  // Note: N is first dim in [N, K] layout
+
+        if (B_nk.shape()[1] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(M) || C.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched: output shape mismatch");
+        }
+
+        cudaError_t err = pygpukit::ops::gemv::launch_gemv_fp8_opt_batched(
+            reinterpret_cast<const __nv_bfloat16*>(A.data()),
+            reinterpret_cast<const uint8_t*>(B_nk.data()),
+            reinterpret_cast<const __nv_bfloat16*>(B_scale.data()),
+            reinterpret_cast<__nv_bfloat16*>(C.data()),
+            K, N, M, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_bf16_opt_batched failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_nk"), py::arg("B_scale"), py::arg("C"),
+       "Optimized batched FP8 GEMV: C[M,N] = A[M,K] @ B_nk[N,K]^T (warp-reduce, smem, vec4)");
+
     m.def("fp8_get_sizes", [](int K, int N) {
         size_t scale_size;
         pygpukit_fp8_get_sizes(K, N, &scale_size);
@@ -1912,11 +2012,11 @@ void init_ops_bindings(py::module_& m) {
     }, "Initialize FP8->BF16 LUT for grouped GEMM");
 
     m.def("grouped_gemm_fp8_bf16", [](
-        const GPUArray& A,           // [M_total, K] BF16
-        const GPUArray& B_stacked,   // [num_experts, N, K] FP8
-        const GPUArray& B_scale,     // [num_experts, N/128, K/128] BF16
-        GPUArray& C,                 // [M_total, N] BF16
-        const GPUArray& expert_offsets  // [num_experts + 1] int32
+        const GPUArray& A,              // [M, K] BF16
+        const GPUArray& B_stacked,      // [num_experts, N, K] FP8
+        const GPUArray& B_scale,        // [num_experts, N/128, K/128] BF16
+        GPUArray& C,                    // [M, N] BF16
+        const GPUArray& row_expert_ids  // [M] int32 - expert ID per row
     ) {
         // Validate dtypes
         if (A.dtype() != DataType::BFloat16) {
@@ -1931,8 +2031,8 @@ void init_ops_bindings(py::module_& m) {
         if (C.dtype() != DataType::BFloat16) {
             throw std::runtime_error("grouped_gemm_fp8_bf16: C must be bfloat16");
         }
-        if (expert_offsets.dtype() != DataType::Int32) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16: expert_offsets must be int32");
+        if (row_expert_ids.dtype() != DataType::Int32) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: row_expert_ids must be int32");
         }
 
         // Validate dimensions
@@ -1940,87 +2040,31 @@ void init_ops_bindings(py::module_& m) {
             throw std::runtime_error("grouped_gemm_fp8_bf16: invalid dimensions");
         }
 
-        int M_total = A.shape()[0];
-        int K = A.shape()[1];
-        int num_experts = B_stacked.shape()[0];
-        int N = B_stacked.shape()[1];
-
-        if (B_stacked.shape()[2] != static_cast<size_t>(K)) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16: K dimension mismatch");
-        }
-        if (C.shape()[0] != static_cast<size_t>(M_total) || C.shape()[1] != static_cast<size_t>(N)) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16: output shape mismatch");
-        }
-        if (expert_offsets.shape()[0] != static_cast<size_t>(num_experts + 1)) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16: expert_offsets size mismatch");
-        }
-
-        cudaError_t err = pygpukit_grouped_gemm_fp8_bf16(
-            A.data(), B_stacked.data(), B_scale.data(), C.data(),
-            reinterpret_cast<const int*>(expert_offsets.data()),
-            M_total, N, K, num_experts, nullptr
-        );
-
-        if (err != cudaSuccess) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16 failed: " + std::string(cudaGetErrorString(err)));
-        }
-    }, py::arg("A"), py::arg("B_stacked"), py::arg("B_scale"), py::arg("C"), py::arg("expert_offsets"),
-       "Grouped GEMM for MoE: C[M_total,N] = A[M_total,K] @ B_stacked[experts,N,K] with expert_offsets routing");
-
-    m.def("grouped_gemm_fp8_bf16_v2", [](
-        const GPUArray& A,              // [M, K] BF16
-        const GPUArray& B_stacked,      // [num_experts, N, K] FP8
-        const GPUArray& B_scale,        // [num_experts, N/128, K/128] BF16
-        GPUArray& C,                    // [M, N] BF16
-        const GPUArray& row_expert_ids  // [M] int32 - expert ID per row
-    ) {
-        // Validate dtypes
-        if (A.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: A must be bfloat16");
-        }
-        if (B_stacked.dtype() != DataType::UInt8) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: B_stacked must be uint8 (FP8)");
-        }
-        if (B_scale.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: B_scale must be bfloat16");
-        }
-        if (C.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: C must be bfloat16");
-        }
-        if (row_expert_ids.dtype() != DataType::Int32) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: row_expert_ids must be int32");
-        }
-
-        // Validate dimensions
-        if (A.ndim() != 2 || B_stacked.ndim() != 3 || C.ndim() != 2) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: invalid dimensions");
-        }
-
         int M = A.shape()[0];
         int K = A.shape()[1];
         int N = B_stacked.shape()[1];
 
         if (B_stacked.shape()[2] != static_cast<size_t>(K)) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: K dimension mismatch");
+            throw std::runtime_error("grouped_gemm_fp8_bf16: K dimension mismatch");
         }
         if (C.shape()[0] != static_cast<size_t>(M) || C.shape()[1] != static_cast<size_t>(N)) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: output shape mismatch");
+            throw std::runtime_error("grouped_gemm_fp8_bf16: output shape mismatch");
         }
         if (row_expert_ids.ndim() != 1 || row_expert_ids.shape()[0] != static_cast<size_t>(M)) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: row_expert_ids size mismatch");
+            throw std::runtime_error("grouped_gemm_fp8_bf16: row_expert_ids size mismatch");
         }
 
-        cudaError_t err = pygpukit_grouped_gemm_fp8_bf16_v2(
+        cudaError_t err = pygpukit_grouped_gemm_fp8_bf16(
             A.data(), B_stacked.data(), B_scale.data(), C.data(),
             reinterpret_cast<const int*>(row_expert_ids.data()),
             M, N, K, nullptr
         );
 
         if (err != cudaSuccess) {
-            throw std::runtime_error("grouped_gemm_fp8_bf16_v2 failed: " + std::string(cudaGetErrorString(err)));
+            throw std::runtime_error("grouped_gemm_fp8_bf16 failed: " + std::string(cudaGetErrorString(err)));
         }
     }, py::arg("A"), py::arg("B_stacked"), py::arg("B_scale"), py::arg("C"), py::arg("row_expert_ids"),
-       "Grouped GEMM for MoE v2: C[M,N] = A[M,K] @ B_stacked[experts,N,K] with per-row expert IDs");
+       "Grouped GEMM for MoE: C[M,N] = A[M,K] @ B_stacked[experts,N,K] with per-row expert IDs");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

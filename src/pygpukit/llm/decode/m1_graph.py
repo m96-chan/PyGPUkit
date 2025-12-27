@@ -131,21 +131,41 @@ class DecodeM1Graph(DecodeStrategy):
         # Save hidden to residual for later add
         copy_to(buffers.hidden, buffers.residual)
 
-        # Fused QKV projection
-        attn.qkv_proj(buffers.norm_out, out=buffers.qkv_proj_out)
+        # QKV projection (fused or separate)
+        if attn.qkv_proj is not None:
+            # Fused QKV projection
+            attn.qkv_proj(buffers.norm_out, out=buffers.qkv_proj_out)
 
-        # Apply biases if present
-        if attn.q_proj.bias is not None:
-            bias_add_inplace(buffers.q_view, attn.q_proj.bias)
-        if attn.k_proj.bias is not None:
-            bias_add_inplace(buffers.k_view, attn.k_proj.bias)
-        if attn.v_proj.bias is not None:
-            bias_add_inplace(buffers.v_view, attn.v_proj.bias)
+            # Apply biases if present
+            if attn.q_proj.bias is not None:
+                bias_add_inplace(buffers.q_view, attn.q_proj.bias)
+            if attn.k_proj.bias is not None:
+                bias_add_inplace(buffers.k_view, attn.k_proj.bias)
+            if attn.v_proj.bias is not None:
+                bias_add_inplace(buffers.v_view, attn.v_proj.bias)
 
-        # Reshape to 3D: [1, num_heads, head_dim]
-        reshape_copy(buffers.q_view, (1, attn.num_heads, attn.head_dim), out=buffers.q)
-        reshape_copy(buffers.k_view, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
-        reshape_copy(buffers.v_view, (1, attn.num_kv_heads, attn.head_dim), out=buffers.v)
+            # Reshape to 3D: [1, num_heads, head_dim]
+            reshape_copy(buffers.q_view, (1, attn.num_heads, attn.head_dim), out=buffers.q)
+            reshape_copy(buffers.k_view, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
+            reshape_copy(buffers.v_view, (1, attn.num_kv_heads, attn.head_dim), out=buffers.v)
+        else:
+            # Separate Q, K, V projections
+            attn.q_proj(buffers.norm_out, out=buffers.q_proj_out)
+            attn.k_proj(buffers.norm_out, out=buffers.k_proj_out)
+            attn.v_proj(buffers.norm_out, out=buffers.v_proj_out)
+
+            # Apply biases if present
+            if attn.q_proj.bias is not None:
+                bias_add_inplace(buffers.q_proj_out, attn.q_proj.bias)
+            if attn.k_proj.bias is not None:
+                bias_add_inplace(buffers.k_proj_out, attn.k_proj.bias)
+            if attn.v_proj.bias is not None:
+                bias_add_inplace(buffers.v_proj_out, attn.v_proj.bias)
+
+            # Reshape to 3D: [1, num_heads, head_dim]
+            reshape_copy(buffers.q_proj_out, (1, attn.num_heads, attn.head_dim), out=buffers.q)
+            reshape_copy(buffers.k_proj_out, (1, attn.num_kv_heads, attn.head_dim), out=buffers.k)
+            reshape_copy(buffers.v_proj_out, (1, attn.num_kv_heads, attn.head_dim), out=buffers.v)
 
         # QK Norm (Qwen3) if present
         if attn.q_norm is not None and buffers.q_2d is not None:
@@ -175,6 +195,8 @@ class DecodeM1Graph(DecodeStrategy):
         Input: attn_out in buffers (from SDPA)
         Output: Updated hidden in buffers
         """
+        from pygpukit.llm.layers import MoELayer
+
         attn = block.attn
         mlp = block.mlp
 
@@ -202,22 +224,24 @@ class DecodeM1Graph(DecodeStrategy):
         )
 
         # MLP forward (SwiGLU)
+        # Note: MoE models are not supported in CUDA Graph mode (checked in init_graph)
         if hasattr(mlp, "gate_up_proj") and mlp.gate_up_proj is not None:
-            # Fused gate+up projection
+            # Fused gate+up projection (non-MoE)
             mlp.gate_up_proj(buffers.norm_out, out=buffers.gate_up_out)
             silu(buffers.gate_view, out=buffers.gate_view)
             mul_inplace(buffers.gate_view, buffers.up_view)
             mlp.down_proj(buffers.gate_view, out=buffers.mlp_down)
+            # MLP output to hidden
+            copy_to(buffers.mlp_down, buffers.hidden)
         else:
-            # Separate projections
+            # Separate projections (non-MoE)
             mlp.gate_proj(buffers.norm_out, out=buffers.mlp_gate)
             silu(buffers.mlp_gate, out=buffers.mlp_gate)
             mlp.up_proj(buffers.norm_out, out=buffers.mlp_up)
             mul_inplace(buffers.mlp_gate, buffers.mlp_up)
             mlp.down_proj(buffers.mlp_gate, out=buffers.mlp_down)
-
-        # MLP output to hidden
-        copy_to(buffers.mlp_down, buffers.hidden)
+            # MLP output to hidden
+            copy_to(buffers.mlp_down, buffers.hidden)
 
         # Add MLP residual
         add_inplace(buffers.hidden, buffers.residual)
@@ -244,7 +268,7 @@ class DecodeM1Graph(DecodeStrategy):
 
         CudaGraph = getattr(get_native_module(), "CudaGraph")  # noqa: B009
         from pygpukit.llm.buffers import DecodeBuffers
-        from pygpukit.llm.layers import precompute_freqs_cis
+        from pygpukit.llm.layers import MoELayer, precompute_freqs_cis
 
         model = self.model
         dtype = str(model.embed_tokens.dtype)
@@ -252,16 +276,30 @@ class DecodeM1Graph(DecodeStrategy):
         lm_head = model._lm_head if model._lm_head is not None else model.embed_tokens
         vocab_size = lm_head.shape[0]
 
-        # Allocate decode buffers
+        # Detect MoE model - CUDA Graph not yet supported for MoE
+        for block in model.blocks:
+            if isinstance(block.mlp, MoELayer):
+                raise NotImplementedError(
+                    "CUDA Graph is not yet supported for MoE models. "
+                    "MoE uses grouped GEMM which cannot be captured in CUDA Graph. "
+                    "Use non-graph decode mode instead (remove --cuda-graph flag)."
+                )
+
+        # MoE config not used for now (CUDA Graph doesn't support MoE)
+        moe_config = None
+
+        # Allocate decode buffers (with MoE buffers if needed)
         self._decode_buffers = DecodeBuffers.allocate(
-            model.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size
+            model.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size,
+            moe_config=moe_config,
         )
         buffers = self._decode_buffers
 
         # Pre-compute RoPE tables on GPU (always f32 for numerical consistency)
         # This matches prefill which uses f32 cos/sin tables.
         # bf16/f16 Q/K tensors are promoted to f32 for RoPE computation.
-        if model.config.use_rope and not hasattr(model, "_rope_cos_gpu"):
+        # Note: We always recreate as f32 because caller may have set different dtype.
+        if model.config.use_rope:
             cos_np, sin_np = precompute_freqs_cis(
                 model.config.head_dim, max_seq_len, model.config.rope_theta
             )

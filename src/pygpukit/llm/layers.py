@@ -264,24 +264,20 @@ class LinearFP8:
 
         M = x.shape[0]
 
-        # Ensure transposed FP8 weight is ready
-        self._ensure_transposed_fp8()
-
         if M == 1 and self._use_gemv:
-            # M=1 path: Use FP8 GEMV kernel
-            # GEMV: x[1,K] @ W^T[K,N] = y[1,N]
+            # M=1 path: Use FP8 GEMV kernel with B[N,K] layout (no transpose needed)
             x_1d = x.view((self.in_features,))
-            y_1d = gemv_fp8_bf16(x_1d, self._weight_fp8_t, self._scale_inv_t)
 
             if out is not None:
-                copy_to(y_1d.view((1, self.out_features)), out)
+                out_1d = out.view((self.out_features,))
+                gemv_fp8_bf16(x_1d, self.weight_fp8, self.scale_inv, out=out_1d)
                 y = out
             else:
+                y_1d = gemv_fp8_bf16(x_1d, self.weight_fp8, self.scale_inv)
                 y = y_1d.view((1, self.out_features))
         else:
-            # M>1 path: Use batched FP8 GEMV kernel
-            # Batched GEMV: x[M,K] @ W^T[K,N] = y[M,N]
-            y = gemv_fp8_bf16_batched(x, self._weight_fp8_t, self._scale_inv_t, out=out)
+            # M>1 path: Use batched FP8 GEMV kernel with B[N,K] layout (no transpose)
+            y = gemv_fp8_bf16_batched(x, self.weight_fp8, self.scale_inv, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)
@@ -1206,8 +1202,8 @@ class MoELayer:
 
         # Step 6: Run experts
         if self._use_grouped_gemm:
-            # Use grouped GEMM v2 for all experts in single kernel launches
-            from pygpukit.ops.matmul import grouped_gemm_fp8_bf16_v2
+            # Use grouped GEMM for all experts in single kernel launches
+            from pygpukit.ops.matmul import grouped_gemm_fp8_bf16
 
             # Create row_expert_ids from expert_offsets
             M_total = num_tokens * k
@@ -1219,7 +1215,7 @@ class MoELayer:
             )
 
             # gate_proj: gathered[M_total, hidden] @ gate_weight[experts, inter, hidden]^T
-            gate_out = grouped_gemm_fp8_bf16_v2(
+            gate_out = grouped_gemm_fp8_bf16(
                 gathered,
                 self._stacked_gate_weight,
                 self._stacked_gate_scale,
@@ -1227,7 +1223,7 @@ class MoELayer:
             )
 
             # up_proj: gathered[M_total, hidden] @ up_weight[experts, inter, hidden]^T
-            up_out = grouped_gemm_fp8_bf16_v2(
+            up_out = grouped_gemm_fp8_bf16(
                 gathered,
                 self._stacked_up_weight,
                 self._stacked_up_scale,
@@ -1238,7 +1234,7 @@ class MoELayer:
             intermediate = mul(silu(gate_out), up_out)
 
             # down_proj: intermediate[M_total, inter] @ down_weight[experts, hidden, inter]^T
-            expert_outputs = grouped_gemm_fp8_bf16_v2(
+            expert_outputs = grouped_gemm_fp8_bf16(
                 intermediate,
                 self._stacked_down_weight,
                 self._stacked_down_scale,
@@ -1295,6 +1291,141 @@ class MoELayer:
         # Reshape back
         if len(original_shape) == 3:
             output = output.reshape(*original_shape)
+
+        return output
+
+    def forward_zero_alloc(
+        self,
+        x: GPUArray,
+        router_logits: GPUArray,
+        router_weights: GPUArray,
+        expert_indices: GPUArray,
+        expert_counts: GPUArray,
+        expert_offsets: GPUArray,
+        permute_indices: GPUArray,
+        reverse_perm: GPUArray,
+        row_expert_ids: GPUArray,
+        gathered: GPUArray,
+        gate_out: GPUArray,
+        up_out: GPUArray,
+        intermediate: GPUArray,
+        expert_outputs: GPUArray,
+        output: GPUArray,
+    ) -> GPUArray:
+        """Zero-allocation forward pass for CUDA Graph support.
+
+        This method uses pre-allocated buffers from DecodeBuffers to avoid
+        any memory allocations during forward pass, enabling CUDA Graph capture.
+
+        Args:
+            x: Input tensor [1, hidden_size]
+            router_logits: Pre-allocated [1, num_experts]
+            router_weights: Pre-allocated [1, k]
+            expert_indices: Pre-allocated [1, k] int32
+            expert_counts: Pre-allocated [num_experts] int32
+            expert_offsets: Pre-allocated [num_experts + 1] int32
+            permute_indices: Pre-allocated [k] int32
+            reverse_perm: Pre-allocated [k] int32
+            row_expert_ids: Pre-allocated [k] int32
+            gathered: Pre-allocated [k, hidden_size]
+            gate_out: Pre-allocated [k, moe_intermediate_size]
+            up_out: Pre-allocated [k, moe_intermediate_size]
+            intermediate: Pre-allocated [k, moe_intermediate_size]
+            expert_outputs: Pre-allocated [k, hidden_size]
+            output: Pre-allocated [1, hidden_size]
+
+        Returns:
+            The output tensor (same as output parameter)
+        """
+        from pygpukit.core.backend import get_native_module
+        from pygpukit.ops.elementwise import mul
+        from pygpukit.ops.matmul import grouped_gemm_fp8_bf16
+        from pygpukit.ops.nn import silu
+
+        native = get_native_module()
+
+        k = self.num_experts_per_tok
+
+        # Step 1: Router forward (gate projection)
+        self.gate(x, out=router_logits)
+
+        # Step 2: Top-K selection (writes to router_weights and expert_indices)
+        native.moe_topk_with_indices(
+            router_logits._get_native(),
+            router_weights._get_native(),
+            expert_indices._get_native(),
+            k,
+        )
+
+        # Step 3: Softmax over selected experts (in-place)
+        native.moe_softmax_topk(router_weights._get_native(), k)
+
+        # Step 4: Compute permutation
+        native.moe_compute_permutation(
+            expert_indices._get_native(),
+            expert_counts._get_native(),
+            expert_offsets._get_native(),
+            permute_indices._get_native(),
+            reverse_perm._get_native(),
+            self.num_experts,
+            k,
+        )
+
+        # Step 5: Gather hidden states
+        native.moe_gather(
+            x._get_native(),
+            permute_indices._get_native(),
+            gathered._get_native(),
+            k,
+        )
+
+        # Step 6: Create row_expert_ids for grouped GEMM
+        native.moe_expand_expert_offsets(
+            expert_offsets._get_native(),
+            row_expert_ids._get_native(),
+            self.num_experts,
+        )
+
+        # Step 7: Expert computation with grouped GEMM
+        # gate_proj: gathered[k, hidden] @ gate_weight[experts, inter, hidden]^T
+        grouped_gemm_fp8_bf16(
+            gathered,
+            self._stacked_gate_weight,
+            self._stacked_gate_scale,
+            row_expert_ids,
+            out=gate_out,
+        )
+
+        # up_proj: gathered[k, hidden] @ up_weight[experts, inter, hidden]^T
+        grouped_gemm_fp8_bf16(
+            gathered,
+            self._stacked_up_weight,
+            self._stacked_up_scale,
+            row_expert_ids,
+            out=up_out,
+        )
+
+        # SiLU(gate) * up -> intermediate
+        silu(gate_out, out=intermediate)
+        mul(intermediate, up_out, out=intermediate)
+
+        # down_proj: intermediate[k, inter] @ down_weight[experts, hidden, inter]^T
+        grouped_gemm_fp8_bf16(
+            intermediate,
+            self._stacked_down_weight,
+            self._stacked_down_scale,
+            row_expert_ids,
+            out=expert_outputs,
+        )
+
+        # Step 8: Scatter and combine outputs
+        native.moe_scatter(
+            expert_outputs._get_native(),
+            router_weights._get_native(),
+            reverse_perm._get_native(),
+            output._get_native(),
+            k,
+        )
 
         return output
 

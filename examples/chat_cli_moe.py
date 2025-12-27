@@ -285,8 +285,8 @@ def main():
         load_model_from_safetensors,
         load_safetensors,
     )
-    from pygpukit.llm.chat import format_chat_messages
     from pygpukit.llm.buffers import DecodeBuffers
+    from pygpukit.llm.chat import format_chat_messages
     from pygpukit.llm.layers import precompute_freqs_cis
     from pygpukit.llm.sampling import sample_token
     from pygpukit.ops.basic import kv_cache_prefill_gqa

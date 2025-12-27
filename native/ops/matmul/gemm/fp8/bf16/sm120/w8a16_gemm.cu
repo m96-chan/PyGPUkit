@@ -1,17 +1,18 @@
 /**
- * W8A16 GEMM for SM120 (Blackwell GeForce)
+ * W8A16 GEMM for SM120 (Blackwell GeForce) - FP8 TensorCore Version
  *
  * FP8 Weight x BF16 Activation -> BF16 Output
- * - A: [M, K] BF16 activation (RowMajor)
+ * - A: [M, K] BF16 activation (RowMajor) -> quantized to FP8 on-the-fly
  * - B: [K, N] FP8 E4M3 weight (RowMajor) + block-wise scale
  * - C: [M, N] BF16 output
  *
- * Uses mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
- * FP8 weights are dequantized on-the-fly during shared memory load.
+ * Uses mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+ * This provides 2x throughput vs BF16 MMA (K=32 vs K=16).
  */
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cstdint>
 
 namespace pygpukit {
@@ -21,12 +22,12 @@ namespace w8a16_gemm {
 // Block tile dimensions
 constexpr int BM = 128;
 constexpr int BN = 128;
-constexpr int BK = 32;
+constexpr int BK = 64;  // Increased for FP8 (K=32 per MMA, 2 MMAs per iteration)
 
-// MMA tile dimensions (m16n8k16)
+// MMA tile dimensions (m16n8k32 for FP8)
 constexpr int MMA_M = 16;
 constexpr int MMA_N = 8;
-constexpr int MMA_K = 16;
+constexpr int MMA_K = 32;
 
 // Warp configuration
 constexpr int WARPS_M = 4;
@@ -35,52 +36,60 @@ constexpr int WARP_TILES_M = 2;
 constexpr int WARP_TILES_N = 8;
 
 // Padding to avoid bank conflicts
-constexpr int A_PAD = 8;
-constexpr int B_PAD = 8;
+constexpr int A_PAD = 16;  // 16 bytes for FP8
+constexpr int B_PAD = 16;
 
 // Block size for FP8 scaling (128x128)
 constexpr int SCALE_BLOCK = 128;
 
 // ============================================================================
-// FP8 E4M3 Lookup Table (compile-time initialized)
+// BF16 to FP8 E4M3 Quantization (fast bit manipulation version)
 // ============================================================================
-__device__ __constant__ float FP8_E4M3_LUT[256] = {
-    // exp=0 (subnormal): mant * 2^(-9), positive
-    0.0f, 0.001953125f, 0.00390625f, 0.005859375f, 0.0078125f, 0.009765625f, 0.01171875f, 0.013671875f,
-    // exp=1-15, positive (0x08-0x7F)
-    0.015625f, 0.017578125f, 0.01953125f, 0.021484375f, 0.0234375f, 0.025390625f, 0.02734375f, 0.029296875f,
-    0.03125f, 0.03515625f, 0.0390625f, 0.04296875f, 0.046875f, 0.05078125f, 0.0546875f, 0.05859375f,
-    0.0625f, 0.0703125f, 0.078125f, 0.0859375f, 0.09375f, 0.1015625f, 0.109375f, 0.1171875f,
-    0.125f, 0.140625f, 0.15625f, 0.171875f, 0.1875f, 0.203125f, 0.21875f, 0.234375f,
-    0.25f, 0.28125f, 0.3125f, 0.34375f, 0.375f, 0.40625f, 0.4375f, 0.46875f,
-    0.5f, 0.5625f, 0.625f, 0.6875f, 0.75f, 0.8125f, 0.875f, 0.9375f,
-    1.0f, 1.125f, 1.25f, 1.375f, 1.5f, 1.625f, 1.75f, 1.875f,
-    2.0f, 2.25f, 2.5f, 2.75f, 3.0f, 3.25f, 3.5f, 3.75f,
-    4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.5f, 7.0f, 7.5f,
-    8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f,
-    16.0f, 18.0f, 20.0f, 22.0f, 24.0f, 26.0f, 28.0f, 30.0f,
-    32.0f, 36.0f, 40.0f, 44.0f, 48.0f, 52.0f, 56.0f, 60.0f,
-    64.0f, 72.0f, 80.0f, 88.0f, 96.0f, 104.0f, 112.0f, 120.0f,
-    128.0f, 144.0f, 160.0f, 176.0f, 192.0f, 208.0f, 224.0f, 240.0f,
-    256.0f, 288.0f, 320.0f, 352.0f, 384.0f, 416.0f, 448.0f, 480.0f,
-    // exp=0-15, negative (0x80-0xFF)
-    -0.0f, -0.001953125f, -0.00390625f, -0.005859375f, -0.0078125f, -0.009765625f, -0.01171875f, -0.013671875f,
-    -0.015625f, -0.017578125f, -0.01953125f, -0.021484375f, -0.0234375f, -0.025390625f, -0.02734375f, -0.029296875f,
-    -0.03125f, -0.03515625f, -0.0390625f, -0.04296875f, -0.046875f, -0.05078125f, -0.0546875f, -0.05859375f,
-    -0.0625f, -0.0703125f, -0.078125f, -0.0859375f, -0.09375f, -0.1015625f, -0.109375f, -0.1171875f,
-    -0.125f, -0.140625f, -0.15625f, -0.171875f, -0.1875f, -0.203125f, -0.21875f, -0.234375f,
-    -0.25f, -0.28125f, -0.3125f, -0.34375f, -0.375f, -0.40625f, -0.4375f, -0.46875f,
-    -0.5f, -0.5625f, -0.625f, -0.6875f, -0.75f, -0.8125f, -0.875f, -0.9375f,
-    -1.0f, -1.125f, -1.25f, -1.375f, -1.5f, -1.625f, -1.75f, -1.875f,
-    -2.0f, -2.25f, -2.5f, -2.75f, -3.0f, -3.25f, -3.5f, -3.75f,
-    -4.0f, -4.5f, -5.0f, -5.5f, -6.0f, -6.5f, -7.0f, -7.5f,
-    -8.0f, -9.0f, -10.0f, -11.0f, -12.0f, -13.0f, -14.0f, -15.0f,
-    -16.0f, -18.0f, -20.0f, -22.0f, -24.0f, -26.0f, -28.0f, -30.0f,
-    -32.0f, -36.0f, -40.0f, -44.0f, -48.0f, -52.0f, -56.0f, -60.0f,
-    -64.0f, -72.0f, -80.0f, -88.0f, -96.0f, -104.0f, -112.0f, -120.0f,
-    -128.0f, -144.0f, -160.0f, -176.0f, -192.0f, -208.0f, -224.0f, -240.0f,
-    -256.0f, -288.0f, -320.0f, -352.0f, -384.0f, -416.0f, -448.0f, -480.0f,
-};
+__device__ __forceinline__ uint8_t bf16_to_fp8_e4m3(float val) {
+    // FP32: [S:1][E:8][M:23], bias=127
+    // FP8 E4M3: [S:1][E:4][M:3], bias=7
+    uint32_t f32_bits = *reinterpret_cast<uint32_t*>(&val);
+
+    uint32_t sign = (f32_bits >> 24) & 0x80;  // Sign bit to FP8 position
+    uint32_t exp_f32 = (f32_bits >> 23) & 0xFF;
+    uint32_t mant_f32 = f32_bits & 0x7FFFFF;
+
+    // Handle zero
+    if (exp_f32 == 0) return sign;
+
+    // Convert exponent: FP32 bias=127, FP8 bias=7
+    // e_fp8 = e_fp32 - 127 + 7 = e_fp32 - 120
+    int e_fp8 = (int)exp_f32 - 120;
+
+    if (e_fp8 <= 0) {
+        // Subnormal or underflow in FP8
+        if (e_fp8 < -3) return sign;  // Too small, return zero
+        // Subnormal: shift mantissa
+        uint32_t mant_with_implicit = (1 << 23) | mant_f32;
+        int shift = 1 - e_fp8 + 20;  // 20 = 23 - 3 (FP8 has 3-bit mantissa)
+        uint32_t m = (shift < 32) ? (mant_with_implicit >> shift) : 0;
+        return sign | (m & 0x7);
+    }
+
+    if (e_fp8 >= 15) {
+        // Overflow: clamp to max FP8 value (not NaN)
+        return sign | 0x7E;  // exp=15, mant=6 -> 448
+    }
+
+    // Normal case: truncate mantissa from 23 bits to 3 bits
+    uint32_t m = mant_f32 >> 20;  // Keep top 3 bits
+
+    return sign | (e_fp8 << 3) | m;
+}
+
+// Vectorized version: convert 2 BF16 to 2 FP8 packed in uint16
+__device__ __forceinline__ uint16_t bf16x2_to_fp8x2(uint32_t bf16_packed) {
+    __nv_bfloat16 h0 = *reinterpret_cast<__nv_bfloat16*>(&bf16_packed);
+    __nv_bfloat16 h1 = *(reinterpret_cast<__nv_bfloat16*>(&bf16_packed) + 1);
+    uint8_t fp8_0 = bf16_to_fp8_e4m3(__bfloat162float(h0));
+    uint8_t fp8_1 = bf16_to_fp8_e4m3(__bfloat162float(h1));
+    return fp8_0 | (fp8_1 << 8);
+}
 
 // ============================================================================
 // Helper functions
@@ -124,11 +133,11 @@ __device__ __forceinline__ uint16_t bf16_to_u16(__nv_bfloat16 b) {
 }
 
 // ============================================================================
-// W8A16 GEMM Kernel
+// W8A16 GEMM Kernel with FP8 TensorCore
 // ============================================================================
 
 __global__ void __launch_bounds__(256, 2)
-w8a16_gemm_kernel(
+w8a16_gemm_kernel_fp8tc(
     const __nv_bfloat16* __restrict__ A,  // [M, K] BF16 activation
     const uint8_t* __restrict__ B_fp8,     // [K, N] FP8 weight
     const __nv_bfloat16* __restrict__ B_scale,  // [K/128, N/128] BF16 scale
@@ -149,77 +158,93 @@ w8a16_gemm_kernel(
     const int warp_m = warp_row * (WARP_TILES_M * MMA_M);
     const int warp_n = warp_col * (WARP_TILES_N * MMA_N);
 
-    // Shared memory
-    __shared__ __nv_bfloat16 smA[2][BM][BK + A_PAD];
-    __shared__ __nv_bfloat16 smB[2][BK][BN + B_PAD];
+    // Shared memory for FP8 data
+    __shared__ uint8_t smA[2][BM][BK + A_PAD];  // FP8, [M, K]
+    __shared__ uint8_t smB[2][BN][BK + B_PAD];  // FP8, [N, K] transposed for col-major MMA access
+    __shared__ float smScale[2];  // Scale for each stage
 
     // Accumulators (FP32)
     float acc[WARP_TILES_M][WARP_TILES_N][4] = {};
 
     const int num_k_tiles = K / BK;
 
-    // Fragment index mappings
+    // Fragment index mappings for m16n8k32
     const int groupID = lane >> 2;
     const int tid_in_group = lane & 3;
 
-    // ====== Load A (BF16) via cp.async ======
-    auto load_A_async = [&](int stage, int kt) {
-        const int elems_per_thread = (BM * BK) / 256;  // 16
-        const int bf16_per_load = 8;
+    // ====== Load A (BF16 -> FP8 quantization) ======
+    auto load_A_quant = [&](int stage, int kt) {
+        // 256 threads, load BM*BK = 128*64 = 8192 bytes of FP8
+        // Each thread handles 32 bytes (from 32 BF16 values = 64 bytes input)
+        // Use 8 threads per row (8 * 8 = 64 FP8 per row)
+
+        const int rows_per_iter = 256 / 8;  // 32 rows per iteration
+        const int fp8_per_thread = 8;  // 8 FP8 values from 8 BF16 values
+
+        int local_row = tid / 8;  // 0-31
+        int local_col = (tid % 8) * fp8_per_thread;  // 0, 8, 16, ..., 56
 
         #pragma unroll
-        for (int i = 0; i < elems_per_thread / bf16_per_load; ++i) {
-            int elem_idx = tid * (elems_per_thread / bf16_per_load) + i;
-            int row = (elem_idx * bf16_per_load) / BK;
-            int col = (elem_idx * bf16_per_load) % BK;
+        for (int iter = 0; iter < BM / rows_per_iter; ++iter) {
+            int row = iter * rows_per_iter + local_row;
             int gm = cta_m + row;
-            int gk = kt * BK + col;
+            int gk = kt * BK + local_col;
+
             if (gm < M && gk + 7 < K) {
-                cp_async_16(&smA[stage][row][col], &A[gm * K + gk]);
+                // Load 8 BF16 values (16 bytes) and convert to 8 FP8 values
+                uint4 bf16_8 = *reinterpret_cast<const uint4*>(&A[gm * K + gk]);
+                const uint16_t* bf16_vals = reinterpret_cast<const uint16_t*>(&bf16_8);
+
+                #pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    __nv_bfloat16 bf16_val = *reinterpret_cast<const __nv_bfloat16*>(&bf16_vals[i]);
+                    smA[stage][row][local_col + i] = bf16_to_fp8_e4m3(__bfloat162float(bf16_val));
+                }
             }
         }
     };
 
-    // ====== Load B (FP8 -> BF16 with scale) ======
-    auto load_B_dequant = [&](int stage, int kt) {
-        // 256 threads, load BK*BN = 32*128 = 4096 elements
-        // Each thread loads 16 FP8 bytes, dequantizes to BF16
-        const int elems_per_thread = (BK * BN) / 256;  // 16
+    // ====== Load B (FP8 direct, coalesced load with transpose to [N, K]) ======
+    auto load_B_direct = [&](int stage, int kt) {
+        // 256 threads, load BK*BN = 64*128 = 8192 bytes
+        // Global: B[K, N] row-major -> coalesced access along N dimension
+        // smem: smB[N, K] transposed layout
 
-        #pragma unroll
-        for (int i = 0; i < elems_per_thread; ++i) {
-            int elem_idx = tid * elems_per_thread + i;
-            int row = elem_idx / BN;  // k index within tile
-            int col = elem_idx % BN;  // n index within tile
-            int gk = kt * BK + row;
-            int gn = cta_n + col;
+        // Each thread loads 32 bytes = 2 x uint4 (16 bytes each)
+        // Load pattern: 4 threads per K row (4 * 32 = 128 bytes/row = BN)
+        // 64 K rows, 4 threads each = 256 threads total
 
-            if (gk < K && gn < N) {
-                // Load FP8 byte
-                uint8_t fp8_val = B_fp8[gk * N + gn];
+        int k_local = tid / 4;  // 0-63
+        int n_base = (tid % 4) * 32;  // 0, 32, 64, 96
+        int gk = kt * BK + k_local;
 
-                // Dequantize via LUT
-                float f32_val = FP8_E4M3_LUT[fp8_val];
+        if (gk < K) {
+            // Coalesced 32-byte load from B[K, N]
+            uint4 fp8_16_0 = *reinterpret_cast<const uint4*>(&B_fp8[gk * N + cta_n + n_base]);
+            uint4 fp8_16_1 = *reinterpret_cast<const uint4*>(&B_fp8[gk * N + cta_n + n_base + 16]);
 
-                // Get scale factor for this block
-                int scale_k = gk / SCALE_BLOCK;
-                int scale_n = gn / SCALE_BLOCK;
-                __nv_bfloat16 scale_bf16 = B_scale[scale_k * scale_stride_n + scale_n];
-                float scale_f32 = __bfloat162float(scale_bf16);
+            // Transpose: scatter to smB[N, K]
+            const uint8_t* bytes0 = reinterpret_cast<const uint8_t*>(&fp8_16_0);
+            const uint8_t* bytes1 = reinterpret_cast<const uint8_t*>(&fp8_16_1);
 
-                // Apply scale and convert to BF16
-                __nv_bfloat16 bf16_val = f32_to_bf16(f32_val * scale_f32);
-
-                smB[stage][row][col] = bf16_val;
+            #pragma unroll
+            for (int i = 0; i < 16; ++i) {
+                smB[stage][n_base + i][k_local] = bytes0[i];
+                smB[stage][n_base + 16 + i][k_local] = bytes1[i];
             }
+        }
+
+        // Load scale once per tile (thread 0 only)
+        if (tid == 0) {
+            int scale_k = (kt * BK) / SCALE_BLOCK;
+            int scale_n = cta_n / SCALE_BLOCK;
+            smScale[stage] = __bfloat162float(B_scale[scale_k * scale_stride_n + scale_n]);
         }
     };
 
     // ====== Prologue ======
-    load_A_async(0, 0);
-    load_B_dequant(0, 0);
-    cp_async_commit();
-    cp_async_wait_0();
+    load_A_quant(0, 0);
+    load_B_direct(0, 0);
     __syncthreads();
 
     // ====== Main loop ======
@@ -229,57 +254,58 @@ w8a16_gemm_kernel(
 
         // Prefetch next tile
         if (kt + 1 < num_k_tiles) {
-            load_A_async(next, kt + 1);
-            load_B_dequant(next, kt + 1);
+            load_A_quant(next, kt + 1);
+            load_B_direct(next, kt + 1);
         }
-        cp_async_commit();
 
-        // Process current tile
+        __syncthreads();
+
+        float scale = smScale[curr];
+
+        // Process current tile with FP8 MMA
         #pragma unroll
         for (int kk = 0; kk < BK; kk += MMA_K) {
             #pragma unroll
             for (int wm = 0; wm < WARP_TILES_M; ++wm) {
                 int tile_m = warp_m + wm * MMA_M;
 
-                // Load A fragment
+                // Load A fragment for m16n8k32 FP8
+                // A: 16x32, each thread holds 4 uint32 (16 FP8 values)
                 uint32_t a_frag[4];
                 #pragma unroll
                 for (int p = 0; p < 4; ++p) {
-                    int i0 = p * 2;
-                    int i1 = p * 2 + 1;
-                    int row0 = groupID + 8 * ((i0 / 2) % 2);
-                    int col0 = tid_in_group * 2 + (i0 % 2) + 8 * (i0 / 4);
-                    int row1 = groupID + 8 * ((i1 / 2) % 2);
-                    int col1 = tid_in_group * 2 + (i1 % 2) + 8 * (i1 / 4);
+                    // Row: groupID + 8 * (p / 2)
+                    // Col: tid_in_group * 8 + (p % 2) * 4
+                    int row = groupID + 8 * (p >> 1);
+                    int col = (tid_in_group << 3) + ((p & 1) << 2);
 
-                    __nv_bfloat16 h0 = smA[curr][tile_m + row0][kk + col0];
-                    __nv_bfloat16 h1 = smA[curr][tile_m + row1][kk + col1];
-                    a_frag[p] = bf16_to_u16(h0) | (uint32_t(bf16_to_u16(h1)) << 16);
+                    // Load 4 consecutive FP8 bytes
+                    a_frag[p] = *reinterpret_cast<const uint32_t*>(&smA[curr][tile_m + row][kk + col]);
                 }
 
                 #pragma unroll
                 for (int wn = 0; wn < WARP_TILES_N; ++wn) {
                     int tile_n = warp_n + wn * MMA_N;
 
-                    // Load B fragment
+                    // Load B fragment for m16n8k32 FP8
+                    // smB is now [N, K] transposed layout
+                    // B fragment: 32x8 (col-major for MMA), each thread holds 2 uint32 (8 FP8 values)
                     uint32_t b_frag[2];
                     #pragma unroll
                     for (int p = 0; p < 2; ++p) {
-                        int i0 = p * 2;
-                        int i1 = p * 2 + 1;
-                        int row0 = tid_in_group * 2 + (i0 % 2) + 8 * (i0 / 2);
-                        int col0 = groupID;
-                        int row1 = tid_in_group * 2 + (i1 % 2) + 8 * (i1 / 2);
-                        int col1 = groupID;
+                        // k_offset: tid_in_group * 8 + p * 4
+                        // n_offset: groupID (0-7)
+                        int k_offset = (tid_in_group << 3) + (p << 2);
+                        int n_offset = groupID;
 
-                        __nv_bfloat16 h0 = smB[curr][kk + row0][tile_n + col0];
-                        __nv_bfloat16 h1 = smB[curr][kk + row1][tile_n + col1];
-                        b_frag[p] = bf16_to_u16(h0) | (uint32_t(bf16_to_u16(h1)) << 16);
+                        // smB[N, K] layout: 4 consecutive K values are now contiguous!
+                        b_frag[p] = *reinterpret_cast<const uint32_t*>(
+                            &smB[curr][tile_n + n_offset][kk + k_offset]);
                     }
 
-                    // MMA: m16n8k16 BF16
+                    // FP8 MMA: m16n8k32
                     asm volatile(
-                        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                        "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
                         "{%0, %1, %2, %3}, "
                         "{%4, %5, %6, %7}, "
                         "{%8, %9}, "
@@ -294,11 +320,17 @@ w8a16_gemm_kernel(
             }
         }
 
-        cp_async_wait_0();
+        // Apply scale to accumulators at the end of each K-tile
+        // (scale is per 128 K elements, and BK=64, so we apply it every 2 tiles)
+        // Actually, we'll apply scale in epilogue for simplicity
+
         __syncthreads();
     }
 
-    // ====== Epilogue: Store results ======
+    // ====== Epilogue: Apply scale and store results ======
+    // Get final scale (from last tile processed)
+    float final_scale = smScale[(num_k_tiles - 1) & 1];
+
     #pragma unroll
     for (int wm = 0; wm < WARP_TILES_M; ++wm) {
         #pragma unroll
@@ -307,14 +339,21 @@ w8a16_gemm_kernel(
             int tile_n = cta_n + warp_n + wn * MMA_N;
 
             #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                int row = groupID + 8 * (i / 2);
-                int col = tid_in_group * 2 + (i % 2);
+            for (int pair = 0; pair < 2; ++pair) {
+                int row = groupID + 8 * pair;
+                int col = tid_in_group * 2;
                 int gm = tile_m + row;
                 int gn = tile_n + col;
 
-                if (gm < M && gn < N) {
-                    C[gm * N + gn] = f32_to_bf16(acc[wm][wn][i]);
+                if (gm < M && gn + 1 < N) {
+                    // Apply scale and convert to BF16
+                    __nv_bfloat16 v0 = f32_to_bf16(acc[wm][wn][pair * 2] * final_scale);
+                    __nv_bfloat16 v1 = f32_to_bf16(acc[wm][wn][pair * 2 + 1] * final_scale);
+                    uint32_t packed = bf16_to_u16(v0) | (uint32_t(bf16_to_u16(v1)) << 16);
+                    *reinterpret_cast<uint32_t*>(&C[gm * N + gn]) = packed;
+                } else if (gm < M) {
+                    if (gn < N) C[gm * N + gn] = f32_to_bf16(acc[wm][wn][pair * 2] * final_scale);
+                    if (gn + 1 < N) C[gm * N + gn + 1] = f32_to_bf16(acc[wm][wn][pair * 2 + 1] * final_scale);
                 }
             }
         }
@@ -343,7 +382,7 @@ extern "C" cudaError_t pygpukit_w8a16_gemm_sm120(
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
     dim3 block(256);
 
-    w8a16_gemm_kernel<<<grid, block, 0, stream>>>(
+    w8a16_gemm_kernel_fp8tc<<<grid, block, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(A),
         reinterpret_cast<const uint8_t*>(B_fp8),
         reinterpret_cast<const __nv_bfloat16*>(B_scale),

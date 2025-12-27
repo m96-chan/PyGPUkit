@@ -101,15 +101,17 @@ def _sub_native(a: GPUArray, b: GPUArray) -> GPUArray:
     return GPUArray._wrap_native(c_native)
 
 
-def mul(a: GPUArray, b: GPUArray) -> GPUArray:
+def mul(a: GPUArray, b: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """Element-wise multiplication of two arrays.
 
     Args:
         a: First input array.
         b: Second input array.
+        out: Optional pre-allocated output array. If provided, the result
+            is written to this array (for CUDA Graph capture support).
 
     Returns:
-        A new GPUArray containing the element-wise product.
+        A new GPUArray containing the element-wise product, or the out array if provided.
 
     Raises:
         ValueError: If shapes don't match.
@@ -120,7 +122,7 @@ def mul(a: GPUArray, b: GPUArray) -> GPUArray:
     backend = get_backend()
 
     if isinstance(backend, NativeBackend) and backend.is_available():
-        return _mul_native(a, b)
+        return _mul_native(a, b, out=out)
     else:
         return _mul_cpu(a, b)
 
@@ -133,15 +135,21 @@ def _mul_cpu(a: GPUArray, b: GPUArray) -> GPUArray:
     return from_numpy(result_np)
 
 
-def _mul_native(a: GPUArray, b: GPUArray) -> GPUArray:
+def _mul_native(a: GPUArray, b: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
     """Native C++ CUDA implementation of mul (zero-copy)."""
     from pygpukit.core.backend import get_native_module
 
     native = get_native_module()
     a_native = a._get_native()
     b_native = b._get_native()
-    c_native = native.mul(a_native, b_native)
-    return GPUArray._wrap_native(c_native)
+
+    if out is not None:
+        out_native = out._get_native()
+        native.mul_(a_native, b_native, out_native)
+        return out
+    else:
+        c_native = native.mul(a_native, b_native)
+        return GPUArray._wrap_native(c_native)
 
 
 def div(a: GPUArray, b: GPUArray) -> GPUArray:

@@ -155,8 +155,8 @@ extern "C" cudaError_t pygpukit_grouped_gemm_init_lut() {
     );
 }
 
-// New API: row_expert_ids instead of expert_offsets
-extern "C" cudaError_t pygpukit_grouped_gemm_fp8_bf16_v2(
+// Grouped GEMM: row_expert_ids per-row expert assignment
+extern "C" cudaError_t pygpukit_grouped_gemm_fp8_bf16(
     const void* A,              // [M, K] BF16
     const void* B_stacked,      // [num_experts, N, K] FP8
     const void* B_scale,        // [num_experts, N/128, K/128] BF16
@@ -185,22 +185,4 @@ extern "C" cudaError_t pygpukit_grouped_gemm_fp8_bf16_v2(
     );
 
     return cudaGetLastError();
-}
-
-// Keep old API for compatibility (will be deprecated)
-extern "C" cudaError_t pygpukit_grouped_gemm_fp8_bf16(
-    const void* A,
-    const void* B_stacked,
-    const void* B_scale,
-    void* C,
-    const int* expert_offsets,
-    int M_total,
-    int N,
-    int K,
-    int num_experts,
-    cudaStream_t stream
-) {
-    // This API is deprecated - use v2 with row_expert_ids instead
-    // For now, just return error
-    return cudaErrorNotSupported;
 }
