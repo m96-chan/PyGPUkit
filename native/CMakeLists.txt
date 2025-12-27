@@ -153,13 +153,18 @@ pybind11_add_module(${MODULE_NAME}
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
-    ops/matmul/matmul_fp8_sm90.cu
-    ops/matmul/matmul_fp8_sm100.cu
-    ops/matmul/matmul_fp8_fp32_sm120.cu
-    ops/matmul/matmul_fp8_fp8_sm120.cu
-    ops/matmul/matmul_nvf4_bf16_sm120.cu
-    ops/matmul/matmul_nvf4_nvf4_sm120.cu
-    ops/gemv/gemv_nvf4.cu
+    # GEMM kernels
+    ops/matmul/gemm/f32/f32/generic/f32_ampere.cu
+    ops/matmul/gemm/fp8/f32/sm90/fp8_cutlass.cu
+    ops/matmul/gemm/fp8/f32/sm100/fp8_blockwise.cu
+    ops/matmul/gemm/fp8/bf16/sm120/fp8_blockwise.cu
+    ops/matmul/gemm/fp8/fp8/sm120/fp8_cutlass.cu
+    ops/matmul/gemm/nvf4/bf16/sm120/nvf4_cutlass.cu
+    ops/matmul/gemm/nvf4/bf16/sm120/nvf4_nvf4_cutlass.cu
+    # GEMV kernels
+    ops/matmul/gemv/bf16/bf16/sm120/nvf4.cu
+    ops/matmul/gemv/bf16/bf16/sm120/nvf4_kernels.cu
+    ops/matmul/gemv/bf16/bf16/sm120/fp8_kernels.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu

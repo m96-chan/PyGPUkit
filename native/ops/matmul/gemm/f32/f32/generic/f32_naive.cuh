@@ -10,7 +10,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include "../../core/cuda_graph.hpp"
+#include "../../../../../../core/cuda_graph.hpp"
 
 namespace pygpukit {
 namespace ops {

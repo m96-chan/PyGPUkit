@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include "../jit/cublaslt_loader.hpp"
+#include "../../jit/cublaslt_loader.hpp"
 
 namespace pygpukit {
 namespace ops {

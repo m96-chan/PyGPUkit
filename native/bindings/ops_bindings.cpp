@@ -94,7 +94,7 @@ extern "C" {
     void pygpukit_nvf4_get_sizes(int K, int N, size_t* data_size, size_t* scale_size);
 
     // FP8 GEMV (W8A16: FP8 weights, BF16 activation)
-    void pygpukit_fp8_init_lut();
+    // Note: FP8 E4M3 LUT is now compile-time initialized (no init function needed)
     cudaError_t pygpukit_gemv_fp8_bf16(
         const void* A, const void* B_fp8, const void* B_scale, void* C,
         int K, int N, int scale_stride_n, cudaStream_t stream
@@ -1741,11 +1741,8 @@ void init_ops_bindings(py::module_& m) {
 
     // ========================================================================
     // FP8 GEMV for W8A16 inference (FP8 weights, BF16 activation)
+    // Note: FP8 E4M3 LUT is now compile-time initialized (no init needed)
     // ========================================================================
-
-    m.def("fp8_init_lut", []() {
-        pygpukit_fp8_init_lut();
-    }, "Initialize FP8 E4M3 lookup table (call once at startup)");
 
     m.def("gemv_fp8_bf16", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
         // A: [K] BF16 activation

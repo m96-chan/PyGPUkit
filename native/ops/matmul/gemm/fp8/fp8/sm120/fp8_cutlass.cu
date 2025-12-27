@@ -38,7 +38,7 @@
 
 // Alignment patch for Issue #2902 workaround
 #define PYGPUKIT_PATCH_CUTLASS_LDSM_POST 1
-#include "aligned_copy_sm120.cuh"
+#include "../../../../common/aligned_copy_sm120.cuh"
 
 using namespace cute;
 

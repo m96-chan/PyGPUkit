@@ -12,9 +12,9 @@
 #include <cstdio>
 
 // Include BF16, NVF4, and FP8 GEMV kernels
-#include "gemv_cutlass.cuh"
-#include "gemv_nvf4_sm120.cuh"
-#include "gemv_fp8.cuh"
+#include "../generic/bf16_cutlass.cuh"
+#include "nvf4.cuh"
+#include "fp8.cuh"
 
 namespace pygpukit {
 namespace ops {
@@ -214,13 +214,6 @@ void pygpukit_nvf4_get_sizes(
 ) {
     *data_size = (K / 2) * N;
     *scale_size = ((K + 31) / 32) * N;
-}
-
-/**
- * Initialize FP8 E4M3 lookup table (call once at startup)
- */
-void pygpukit_fp8_init_lut() {
-    pygpukit::ops::gemv::init_fp8_e4m3_lut();
 }
 
 /**

@@ -45,12 +45,12 @@
 
 // SM90 (Hopper) - CUTLASS 3.x with WGMMA/TMA
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
-#include "matmul_cutlass_sm90.cuh"
+#include "../sm90/bf16_cutlass.cuh"
 #endif
 
 // SM100 (Blackwell datacenter: B200) - CUTLASS 4.x with 2SM MMA
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
-#include "matmul_cutlass_sm100.cuh"
+#include "../sm100/bf16_cutlass.cuh"
 #endif
 
 // NOTE: SM120 CUTLASS 4.x kernels are DISABLED.
@@ -58,7 +58,7 @@
 // NOT FP32/FP16/BF16. Will be re-enabled when FP8 support is added.
 //
 // #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED) || defined(CUTLASS_ARCH_MMA_SM121_SUPPORTED)
-// #include "matmul_cutlass_sm120.cuh"
+// #include "../sm120/bf16_cutlass.cuh"
 // #endif
 
 namespace pygpukit {
