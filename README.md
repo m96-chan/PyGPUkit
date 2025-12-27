@@ -11,6 +11,8 @@
 [![Downloads](https://img.shields.io/pypi/dm/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
+> If you find this project useful, please consider giving it a star on GitHub!
+
 ---
 
 ## Documentation
