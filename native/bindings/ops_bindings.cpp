@@ -190,6 +190,21 @@ extern "C" {
         cudaStream_t stream
     );
     bool pygpukit_int4_gemv_sm120_available();
+
+    // Pure FP8/FP8/FP8 GEMV (SM120)
+    cudaError_t pygpukit_gemv_fp8_fp8_bf16_sm120(
+        const uint8_t* A, const uint8_t* B_nk,
+        const float* scale_A, const float* scale_B,
+        __nv_bfloat16* C,
+        int K, int N, cudaStream_t stream
+    );
+    cudaError_t pygpukit_gemv_fp8_fp8_fp8_sm120(
+        const uint8_t* A, const uint8_t* B_nk,
+        const float* scale_A, const float* scale_B,
+        uint8_t* C, float scale_C,
+        int K, int N, cudaStream_t stream
+    );
+    bool pygpukit_gemv_fp8_fp8_sm120_available();
 }
 
 // Optimized FP8 GEMV (warp-level reduction, smem, vectorized)
@@ -2620,6 +2635,116 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("A"), py::arg("B"), py::arg("C"),
        py::arg("scale_A") = 1.0f, py::arg("scale_B") = 1.0f,
        "Int4 GEMV: C[N] = A[K] . B[N,K]^T with Int32 output. Input is packed int4.");
+
+    // ========================================================================
+    // Pure FP8/FP8/FP8 GEMV (SM120)
+    // A[K](FP8) x B[N,K](FP8) -> C[N](BF16 or FP8)
+    // Advantage: A is FP8 (1 byte) so shared memory is halved vs W8A16
+    // ========================================================================
+
+    m.def("gemv_fp8_fp8_available", []() {
+        return pygpukit_gemv_fp8_fp8_sm120_available();
+    }, "Check if pure FP8/FP8 GEMV is available (SM120)");
+
+    m.def("gemv_fp8_fp8_bf16_sm120", [](
+        const GPUArray& A, const GPUArray& B_nk,
+        const GPUArray& scale_A, const GPUArray& scale_B,
+        GPUArray& C
+    ) {
+        // A: [K] FP8 E4M3 (stored as uint8)
+        // B_nk: [N, K] FP8 E4M3 (stored as uint8)
+        // scale_A: [K/128] FP32 blockwise scales
+        // scale_B: [N/128, K/128] FP32 blockwise scales
+        // C: [N] BF16 output
+        if (A.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: A must be uint8 (FP8 E4M3)");
+        }
+        if (B_nk.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: B_nk must be uint8 (FP8 E4M3)");
+        }
+        if (scale_A.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: scale_A must be float32");
+        }
+        if (scale_B.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: scale_B must be float32");
+        }
+        if (C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: C must be bfloat16");
+        }
+        if (A.ndim() != 1 || B_nk.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: A[K], B_nk[N,K], C[N] dimensions required");
+        }
+
+        int K = A.shape()[0];
+        int N = B_nk.shape()[0];
+
+        if (B_nk.shape()[1] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16: N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_fp8_fp8_bf16_sm120(
+            reinterpret_cast<const uint8_t*>(A.data()),
+            reinterpret_cast<const uint8_t*>(B_nk.data()),
+            reinterpret_cast<const float*>(scale_A.data()),
+            reinterpret_cast<const float*>(scale_B.data()),
+            reinterpret_cast<__nv_bfloat16*>(C.data()),
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_nk"), py::arg("scale_A"), py::arg("scale_B"), py::arg("C"),
+       "Pure FP8 GEMV: C[N](BF16) = A[K](FP8) @ B_nk[N,K](FP8)^T with blockwise scaling");
+
+    m.def("gemv_fp8_fp8_fp8_sm120", [](
+        const GPUArray& A, const GPUArray& B_nk,
+        const GPUArray& scale_A, const GPUArray& scale_B,
+        GPUArray& C, float scale_C
+    ) {
+        // A: [K] FP8 E4M3 (stored as uint8)
+        // B_nk: [N, K] FP8 E4M3 (stored as uint8)
+        // scale_A: [K/128] FP32 blockwise scales
+        // scale_B: [N/128, K/128] FP32 blockwise scales
+        // C: [N] FP8 output (stored as uint8)
+        if (A.dtype() != DataType::UInt8 || B_nk.dtype() != DataType::UInt8 || C.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_fp8_fp8: A, B, C must be uint8 (FP8 E4M3)");
+        }
+        if (scale_A.dtype() != DataType::Float32 || scale_B.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemv_fp8_fp8_fp8: scales must be float32");
+        }
+        if (A.ndim() != 1 || B_nk.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_fp8_fp8_fp8: A[K], B_nk[N,K], C[N] dimensions required");
+        }
+
+        int K = A.shape()[0];
+        int N = B_nk.shape()[0];
+
+        if (B_nk.shape()[1] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_fp8_fp8: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_fp8_fp8: N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_fp8_fp8_fp8_sm120(
+            reinterpret_cast<const uint8_t*>(A.data()),
+            reinterpret_cast<const uint8_t*>(B_nk.data()),
+            reinterpret_cast<const float*>(scale_A.data()),
+            reinterpret_cast<const float*>(scale_B.data()),
+            reinterpret_cast<uint8_t*>(C.data()),
+            scale_C,
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_fp8_fp8 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_nk"), py::arg("scale_A"), py::arg("scale_B"), py::arg("C"), py::arg("scale_C"),
+       "Pure FP8 GEMV: C[N](FP8) = A[K](FP8) @ B_nk[N,K](FP8)^T with blockwise scaling and FP8 output");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

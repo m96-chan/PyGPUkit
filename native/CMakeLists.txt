@@ -173,6 +173,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/gemv/bf16/bf16/sm120/nvf4_kernels.cu
     ops/matmul/gemv/bf16/bf16/sm120/fp8_kernels.cu
     ops/matmul/gemv/bf16/bf16/sm120/fp8_opt_kernels.cu
+    ops/matmul/gemv/fp8/fp8/sm120/fp8_gemv.cu
     ops/matmul/gemv/int4/int4/sm120/int4_gemv.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
