@@ -205,6 +205,15 @@ extern "C" {
         int K, int N, cudaStream_t stream
     );
     bool pygpukit_gemv_fp8_fp8_sm120_available();
+
+    // Pure NVF4/NVF4/NVF4 GEMV (SM120)
+    cudaError_t pygpukit_gemv_nvf4_nvf4_bf16_sm120(
+        const uint8_t* A_data, const uint8_t* A_scale,
+        const uint8_t* B_data, const uint8_t* B_scale,
+        __nv_bfloat16* C,
+        int K, int N, cudaStream_t stream
+    );
+    bool pygpukit_gemv_nvf4_nvf4_sm120_available();
 }
 
 // Optimized FP8 GEMV (warp-level reduction, smem, vectorized)
@@ -2745,6 +2754,70 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B_nk"), py::arg("scale_A"), py::arg("scale_B"), py::arg("C"), py::arg("scale_C"),
        "Pure FP8 GEMV: C[N](FP8) = A[K](FP8) @ B_nk[N,K](FP8)^T with blockwise scaling and FP8 output");
+
+    // ========================================================================
+    // Pure NVF4/NVF4/NVF4 GEMV (SM120)
+    // ========================================================================
+
+    m.def("gemv_nvf4_nvf4_available", []() {
+        return pygpukit_gemv_nvf4_nvf4_sm120_available();
+    }, "Check if pure NVF4/NVF4 GEMV is available (SM120)");
+
+    m.def("gemv_nvf4_nvf4_bf16_sm120", [](
+        const GPUArray& A_data, const GPUArray& A_scale,
+        const GPUArray& B_data, const GPUArray& B_scale,
+        GPUArray& C
+    ) {
+        // A_data: [K/2] packed NVF4 (2 values per byte)
+        // A_scale: [K/32] UE4M3 scales
+        // B_data: [K/2, N] packed NVF4 (column-major, from quantize_bf16_to_nvf4)
+        // B_scale: [K/32, N] UE4M3 scales
+        // C: [N] BF16 output
+        if (A_data.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data must be uint8 (packed NVF4)");
+        }
+        if (A_scale.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_scale must be uint8 (UE4M3)");
+        }
+        if (B_data.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: B_data must be uint8 (packed NVF4)");
+        }
+        if (B_scale.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: B_scale must be uint8 (UE4M3)");
+        }
+        if (C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: C must be bfloat16");
+        }
+        if (A_data.ndim() != 1 || B_data.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data[K/2], B_data[K/2,N], C[N] dimensions required");
+        }
+
+        // B_data is [K/2, N] from quantize_bf16_to_nvf4
+        int K_packed = static_cast<int>(B_data.shape()[0]);
+        int K = K_packed * 2;
+        int N = static_cast<int>(B_data.shape()[1]);
+
+        if (A_data.shape()[0] != static_cast<size_t>(K_packed)) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data K/2 dimension mismatch with B_data");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: C N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_nvf4_nvf4_bf16_sm120(
+            reinterpret_cast<const uint8_t*>(A_data.data()),
+            reinterpret_cast<const uint8_t*>(A_scale.data()),
+            reinterpret_cast<const uint8_t*>(B_data.data()),
+            reinterpret_cast<const uint8_t*>(B_scale.data()),
+            reinterpret_cast<__nv_bfloat16*>(C.data()),
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A_data"), py::arg("A_scale"), py::arg("B_data"), py::arg("B_scale"), py::arg("C"),
+       "Pure NVF4 GEMV: C[N](BF16) = A[K](NVF4) @ B[K,N](NVF4) with blockwise scaling");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)
