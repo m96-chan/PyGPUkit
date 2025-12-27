@@ -3,13 +3,81 @@
 *A minimal, modular GPU runtime with Rust-powered scheduler, NVRTC JIT compilation, and a clean NumPy-like API.*
 
 [![PyPI version](https://badge.fury.io/py/PyGPUkit.svg)](https://badge.fury.io/py/PyGPUkit)
+[![CUDA](https://img.shields.io/badge/CUDA-13.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![GitHub stars](https://img.shields.io/github/stars/m96-chan/PyGPUkit?style=social)](https://github.com/m96-chan/PyGPUkit)
+
+
 [![Python](https://img.shields.io/pypi/pyversions/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CUDA](https://img.shields.io/badge/CUDA-13.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![SM](https://img.shields.io/badge/SM-80%20%7C%2086%20%7C%2089%20%7C%2090%20%7C%20100%20%7C%20120a-blue.svg)](#supported-gpus)
-[![GitHub stars](https://img.shields.io/github/stars/m96-chan/PyGPUkit?style=social)](https://github.com/m96-chan/PyGPUkit)
 [![Downloads](https://img.shields.io/pypi/dm/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+
+### When GPU optimizations change your results, something is wrong.
+
+*A minimal, deterministic GPU runtime for Python.*  
+Built for people who care about **correctness**, **reproducibility**, and **real performance**.
+
+- CUDA Graph that doesn't lie
+- cuBLASLt without hidden state
+- FP8 / NVF4 / w8a16 done explicitly
+- Rust-powered scheduler for real GPU concurrency
+
+---
+
+## Why PyGPUkit Exists
+
+Modern GPU stacks optimize aggressively.  
+Sometimes, they optimize **correctness away**.
+
+PyGPUkit exists because:
+
+- CUDA Graph replay can change numerical results
+- cuBLASLt may depend on hidden workspace state
+- Stream-0 synchronization hides performance bugs
+- “It’s faster” often means “it’s nondeterministic”
+
+PyGPUkit chooses:
+
+- **Explicit** over implicit
+- **Determinism** over magic
+- **Measurable behavior** over benchmark-only claims
+
+---
+
+## What PyGPUkit Is NOT
+
+- ❌ Not a PyTorch replacement
+- ❌ Not a training framework
+- ❌ Not a convenience-first library
+- ❌ Not safe if you ignore GPU semantics
+
+PyGPUkit is for people who want to *see* and *control*
+what their GPU is actually doing.
+
+---
+
+## Core Capabilities (TL;DR)
+
+- 🚀 Driver-only deployment (no CUDA Toolkit required)
+- 🧠 Deterministic CUDA Graph execution
+- ⚙️ Explicit stream & memory control
+- 🧮 FP8 / NVF4 / BF16 / TF32 done right
+- 🎛️ Rust-based GPU scheduler with QoS & partitioning
+- 🔊 GPU-native audio & DSP (no cuFFT dependency)
+
+---
+
+## Real-World GPU Pathologies (Observed)
+
+- Same input, different output with CUDA Graph replay
+- FP8 GEMM producing correct averages but wrong tokens
+- cuBLASLt performance variance across runs
+- H2D stalls masked by stream-0 synchronization
+
+All of these are **reproducible**.  
+All of them are **documented**.  
+All of them are **why PyGPUkit exists**.
 
 ---
 
@@ -893,3 +961,12 @@ Inspired by and built upon:
 - [Triton](https://github.com/triton-lang/triton)
 
 PyGPUkit aims to fill the gap for a tiny, embeddable GPU runtime for Python.
+
+---
+
+If this project saved you from a silent GPU bug,  
+consider giving it a ⭐.
+
+Correctness deserves visibility.
+
+---
