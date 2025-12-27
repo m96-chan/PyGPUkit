@@ -30,8 +30,15 @@ cudaError_t launch_gemv_fp8_pure(
     // Shared memory for A (FP8 = 1 byte per element)
     size_t smem_size = K * sizeof(uint8_t);
 
-    // Use vectorized kernel for K >= 256
-    if (K >= 256) {
+    // Kernel selection based on K size:
+    // - K >= 512: Use optimized kernel (128-bit loads, __ldg, multi-accumulators)
+    // - K >= 256: Use vec8 kernel
+    // - K < 256: Use scalar kernel
+    if (K >= 512) {
+        gemv_fp8_pure_opt_kernel<Config><<<grid, block, smem_size, stream>>>(
+            A, B_nk, scale_A, scale_B, C, K, N
+        );
+    } else if (K >= 256) {
         gemv_fp8_pure_vec8_kernel<Config><<<grid, block, smem_size, stream>>>(
             A, B_nk, scale_A, scale_B, C, K, N
         );
