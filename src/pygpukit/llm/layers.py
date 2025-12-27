@@ -1115,7 +1115,8 @@ class MoELayer:
         expert_counts_cpu = expert_counts.to_numpy()
         expert_offsets_cpu = expert_offsets.to_numpy()
 
-        expert_outputs = zeros((num_tokens * k, hidden), dtype=x.dtype)
+        # Collect expert outputs and their positions
+        expert_output_list: list[tuple[int, int, GPUArray]] = []
         for e in range(self.num_experts):
             start = int(expert_offsets_cpu[e])
             count = int(expert_counts_cpu[e])
@@ -1128,10 +1129,16 @@ class MoELayer:
 
             # Run expert FFN
             expert_out = self.experts[e](expert_input)
+            expert_output_list.append((start, count, expert_out))
 
-            # Write to output via copy_to
-            output_slice = expert_outputs[start:end]
-            copy_to(expert_out, output_slice)
+        # Concatenate all expert outputs in order and copy to expert_outputs
+        # Build numpy array on CPU, then upload once
+        import numpy as np
+
+        expert_outputs_np = np.zeros((num_tokens * k, hidden), dtype=np.uint16)
+        for start, count, expert_out in expert_output_list:
+            expert_outputs_np[start : start + count] = expert_out.to_numpy()
+        expert_outputs = from_numpy(expert_outputs_np)
 
         # Step 7: Scatter and combine outputs
         output = zeros((num_tokens, hidden), dtype=x.dtype)

@@ -1475,20 +1475,14 @@ _FP8_LUT_INITIALIZED = False
 def fp8_init_lut() -> None:
     """Initialize FP8 E4M3 lookup table for dequantization.
 
-    Call once at startup before using gemv_fp8_bf16.
-    Thread-safe and idempotent.
+    Note: LUT is defined as __device__ __constant__ in C++ and initialized
+    at compile time, so this function is a no-op. Kept for API compatibility.
     """
     global _FP8_LUT_INITIALIZED
     if _FP8_LUT_INITIALIZED:
         return
-
-    backend = get_backend()
-    if isinstance(backend, NativeBackend) and backend.is_available():
-        from pygpukit.core.backend import get_native_module
-
-        native = get_native_module()
-        native.fp8_init_lut()
-        _FP8_LUT_INITIALIZED = True
+    # LUT is already initialized in constant memory at compile time
+    _FP8_LUT_INITIALIZED = True
 
 
 def gemv_fp8_bf16(

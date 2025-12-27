@@ -2,19 +2,36 @@
 """
 PyGPUkit - MoE (Mixture of Experts) Chat CLI
 
-A minimal chat interface for Mixtral and other MoE models.
+A minimal chat interface for MoE models (Mixtral, Qwen3-MoE, etc.).
+Supports multiple chat templates with auto-detection.
 
 Usage:
     python examples/chat_cli_moe.py --model /path/to/model.safetensors.index.json --tokenizer /path/to/tokenizer.json
 
+Example (Qwen3-30B-A3B MoE):
+    python examples/chat_cli_moe.py \
+        --model /path/to/Qwen3-30B-A3B/model.safetensors.index.json \
+        --tokenizer /path/to/Qwen3-30B-A3B/tokenizer.json
+
 Example (Mixtral-8x7B):
     python examples/chat_cli_moe.py \
-        --model ~/.cache/huggingface/hub/models--mistralai--Mixtral-8x7B-Instruct-v0.1/snapshots/.../model.safetensors.index.json \
-        --tokenizer ~/.cache/huggingface/hub/models--mistralai--Mixtral-8x7B-Instruct-v0.1/snapshots/.../tokenizer.json
+        --model /path/to/Mixtral-8x7B/model.safetensors.index.json \
+        --tokenizer /path/to/Mixtral-8x7B/tokenizer.json
+
+Example with explicit chat template:
+    python examples/chat_cli_moe.py \
+        --model /path/to/model --chat-template qwen
 
 Example with CUDA Graph (faster decode):
     python examples/chat_cli_moe.py \
         --model /path/to/model --cuda-graph
+
+Supported chat templates:
+    qwen     - Qwen2/Qwen3 (<|im_start|>...<|im_end|>)
+    mistral  - Mistral/Mixtral ([INST]...[/INST])
+    llama2   - LLaMA 2 (<<SYS>>...<</SYS>>)
+    llama3   - LLaMA 3 (<|start_header_id|>...<|eot_id|>)
+    chatml   - Generic ChatML
 
 Commands:
     /clear  - Clear conversation history
@@ -162,36 +179,18 @@ class StreamingDecoder:
         self.pending_bytes = b""
 
 
-def format_mixtral_chat(messages: list[dict], add_generation_prompt: bool = True) -> str:
-    """Format messages for Mixtral-Instruct chat template.
-
-    Mixtral uses: <s>[INST] {system}\n\n{user} [/INST] {assistant}</s>[INST] {user} [/INST]
-    """
-    result = "<s>"
-    system_content = ""
-
-    for i, msg in enumerate(messages):
-        role = msg["role"]
-        content = msg["content"]
-
-        if role == "system":
-            system_content = content
-        elif role == "user":
-            if i == 0 or (i == 1 and messages[0]["role"] == "system"):
-                # First user message (possibly after system)
-                if system_content:
-                    result += f"[INST] {system_content}\n\n{content} [/INST]"
-                else:
-                    result += f"[INST] {content} [/INST]"
-            else:
-                result += f"[INST] {content} [/INST]"
-        elif role == "assistant":
-            result += f" {content}</s>"
-
-    if add_generation_prompt and messages[-1]["role"] == "user":
-        pass  # Already ends with [/INST]
-
-    return result
+def detect_chat_template(spec_name: str) -> str:
+    """Detect chat template from model spec name."""
+    name = spec_name.lower()
+    if "qwen" in name:
+        return "qwen"
+    elif "mixtral" in name or "mistral" in name:
+        return "mistral"
+    elif "llama3" in name or "llama-3" in name:
+        return "llama3"
+    elif "llama" in name:
+        return "llama2"
+    return "chatml"
 
 
 def main():
@@ -265,6 +264,13 @@ def main():
         action="store_true",
         help="Enable CUDA Graph for faster decode (reduces kernel launch overhead)",
     )
+    parser.add_argument(
+        "--chat-template",
+        type=str,
+        default=None,
+        choices=["qwen", "mistral", "llama2", "llama3", "chatml"],
+        help="Chat template (auto-detected from model if not specified)",
+    )
     args = parser.parse_args()
 
     # Lazy imports for faster --help
@@ -279,6 +285,7 @@ def main():
         load_model_from_safetensors,
         load_safetensors,
     )
+    from pygpukit.llm.chat import format_chat_messages
     from pygpukit.llm.buffers import DecodeBuffers
     from pygpukit.llm.layers import precompute_freqs_cis
     from pygpukit.llm.sampling import sample_token
@@ -315,6 +322,12 @@ def main():
     print(f"  Vocab size: {model.embed_tokens.shape[0]}")
     if config.num_experts:
         print(f"  MoE: {config.num_experts} experts, top-{config.num_experts_per_tok}")
+
+    # Determine chat template
+    chat_template = args.chat_template
+    if chat_template is None:
+        chat_template = detect_chat_template(spec.name if spec else "")
+    print(f"  Chat template: {chat_template}")
 
     # =========================================================================
     # Initialize KV Cache
@@ -375,13 +388,15 @@ def main():
     conversation: list[dict] = []
     system_msg = {"role": "system", "content": args.system}
 
-    # Get EOS token
-    eos_token_id = tokenizer.token_to_id("</s>")
-    if eos_token_id is None:
-        eos_token_id = tokenizer.token_to_id("<|endoftext|>")
+    # Get EOS tokens (model-specific)
+    eos_token_ids: set[int] = set()
+    for eos_str in ["</s>", "<|endoftext|>", "<|im_end|>", "<|eot_id|>"]:
+        tid = tokenizer.token_to_id(eos_str)
+        if tid is not None:
+            eos_token_ids.add(tid)
 
     def is_end_token(token_id: int) -> bool:
-        return token_id == eos_token_id
+        return token_id in eos_token_ids
 
     def apply_repetition_penalty(
         logits: np.ndarray, generated_ids: list[int], penalty: float
@@ -417,7 +432,7 @@ def main():
     # =========================================================================
     def generate(messages: list[dict]) -> tuple[str, float, float, int]:
         """Generate response using M=1 decode."""
-        prompt = format_mixtral_chat(messages)
+        prompt = format_chat_messages(messages, model_type=chat_template)
         input_ids = tokenizer.encode(prompt).ids
 
         if len(input_ids) >= args.max_seq_len - 10:
