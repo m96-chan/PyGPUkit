@@ -104,6 +104,11 @@ extern "C" {
         int K, int N, int batch_count, int scale_stride_n, cudaStream_t stream
     );
     void pygpukit_fp8_get_sizes(int K, int N, size_t* scale_size);
+    // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output
+    cudaError_t pygpukit_w8a16_gemm_sm120(
+        const void* A, const void* B_fp8, const void* B_scale, void* C,
+        int M, int N, int K, int scale_stride_n, cudaStream_t stream
+    );
 }
 
 // MoE (Mixture of Experts) functions - defined in ops/moe/moe.cu
@@ -1784,6 +1789,47 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
        "FP8 GEMV: C[N] = A[K] @ B_fp8[K,N] (online dequantization with block-wise scale)");
 
+    m.def("gemv_fp8_bf16_batched", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
+        // A: [M, K] BF16 activation (M rows)
+        // B_fp8: [K, N] uint8 FP8 weights
+        // B_scale: [K/128, N/128] BF16 scale factors
+        // C: [M, N] BF16 output
+        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16_batched: A and C must be bfloat16");
+        }
+        if (B_fp8.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_bf16_batched: B_fp8 must be uint8 (FP8 E4M3)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_bf16_batched: B_scale must be bfloat16");
+        }
+        if (A.ndim() != 2 || B_fp8.ndim() != 2 || C.ndim() != 2) {
+            throw std::runtime_error("gemv_fp8_bf16_batched: A[M,K], B_fp8[K,N], C[M,N] dimensions required");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B_fp8.shape()[1];
+        int scale_stride_n = (N + 127) / 128;  // 128x128 block quantization
+
+        if (B_fp8.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_bf16_batched: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(M) || C.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_bf16_batched: output shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_fp8_bf16_batched(
+            A.data(), B_fp8.data(), B_scale.data(), C.data(),
+            K, N, M, scale_stride_n, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_bf16_batched failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
+       "Batched FP8 GEMV: C[M,N] = A[M,K] @ B_fp8[K,N] (online dequantization with block-wise scale)");
+
     m.def("fp8_get_sizes", [](int K, int N) {
         size_t scale_size;
         pygpukit_fp8_get_sizes(K, N, &scale_size);
@@ -1792,6 +1838,51 @@ void init_ops_bindings(py::module_& m) {
         return py::make_tuple(scale_k, scale_n, scale_size);
     }, py::arg("K"), py::arg("N"),
        "Get scale tensor dimensions for FP8: returns (scale_K, scale_N, scale_size_bytes)");
+
+    // ========================================================================
+    // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output (SM120)
+    // ========================================================================
+
+    m.def("w8a16_gemm_sm120", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
+        // A: [M, K] BF16 activation
+        // B_fp8: [K, N] uint8 FP8 weights
+        // B_scale: [K/128, N/128] BF16 scale factors
+        // C: [M, N] BF16 output
+        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("w8a16_gemm_sm120: A and C must be bfloat16");
+        }
+        if (B_fp8.dtype() != DataType::UInt8) {
+            throw std::runtime_error("w8a16_gemm_sm120: B_fp8 must be uint8 (FP8 E4M3)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("w8a16_gemm_sm120: B_scale must be bfloat16");
+        }
+        if (A.ndim() != 2 || B_fp8.ndim() != 2 || C.ndim() != 2) {
+            throw std::runtime_error("w8a16_gemm_sm120: A[M,K], B_fp8[K,N], C[M,N] dimensions required");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B_fp8.shape()[1];
+        int scale_stride_n = (N + 127) / 128;
+
+        if (B_fp8.shape()[0] != static_cast<size_t>(K)) {
+            throw std::runtime_error("w8a16_gemm_sm120: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(M) || C.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("w8a16_gemm_sm120: output shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_w8a16_gemm_sm120(
+            A.data(), B_fp8.data(), B_scale.data(), C.data(),
+            M, N, K, scale_stride_n, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("w8a16_gemm_sm120 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
+       "W8A16 GEMM: C[M,N] = A[M,K] @ B_fp8[K,N] (FP8 weight x BF16 activation with block-wise scale)");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

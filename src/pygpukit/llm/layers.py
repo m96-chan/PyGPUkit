@@ -45,6 +45,7 @@ from pygpukit.ops.basic import (
     split_qkv_batch,
     transpose,
     transpose_3d_021,
+    w8a16_gemm_sm120,
 )
 
 if TYPE_CHECKING:
@@ -254,7 +255,7 @@ class LinearFP8:
         """Forward pass with online dequantization.
 
         For M=1 (single token), uses FP8 GEMV kernel with online dequantization.
-        For larger batches, falls back to CPU dequantization + GPU matmul.
+        For M>1, uses W8A16 GEMM kernel (FP8 weight x BF16 activation).
         """
         if x.ndim != 2:
             raise ValueError(f"input must be 2D [batch, in_features], got {x.ndim}D")
@@ -263,16 +264,13 @@ class LinearFP8:
 
         M = x.shape[0]
 
-        # M=1 path: Use FP8 GEMV kernel with online dequantization
+        # Ensure transposed FP8 weight is ready (used by both GEMV and GEMM)
+        self._ensure_transposed_fp8()
+
         if M == 1 and self._use_gemv:
-            # Ensure transposed FP8 weight is ready
-            self._ensure_transposed_fp8()
-
-            # GEMV path: x[1,K] @ W^T[K,N] = y[1,N]
-            # View x as 1D for GEMV
+            # M=1 path: Use FP8 GEMV kernel
+            # GEMV: x[1,K] @ W^T[K,N] = y[1,N]
             x_1d = x.view((self.in_features,))
-
-            # Call FP8 GEMV kernel
             y_1d = gemv_fp8_bf16(x_1d, self._weight_fp8_t, self._scale_inv_t)
 
             if out is not None:
@@ -281,9 +279,9 @@ class LinearFP8:
             else:
                 y = y_1d.view((1, self.out_features))
         else:
-            # Fallback: dequantize to BF16 and use matmul
-            self._ensure_dequantized()
-            y = matmul(x, self._weight_dequant_t, out=out)
+            # M>1 path: Use W8A16 GEMM kernel (SM120)
+            # GEMM: x[M,K] @ W^T[K,N] = y[M,N]
+            y = w8a16_gemm_sm120(x, self._weight_fp8_t, self._scale_inv_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)
@@ -1055,7 +1053,6 @@ class MoELayer:
             Output tensor with same shape as input
         """
         from pygpukit.core.backend import get_native_module
-        from pygpukit.ops.basic import copy_to
 
         native = get_native_module()
 

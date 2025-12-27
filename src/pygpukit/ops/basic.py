@@ -60,6 +60,7 @@ from pygpukit.ops.matmul import (
     # GEMV operations
     gemv_bf16,
     gemv_fp8_bf16,
+    gemv_fp8_bf16_batched,
     gemv_nvf4_available,
     gemv_nvf4_bf16,
     linear_bias_gelu,
@@ -75,6 +76,8 @@ from pygpukit.ops.matmul import (
     nvf4_get_sizes,
     quantize_bf16_to_nvf4,
     transpose,
+    # W8A16 GEMM
+    w8a16_gemm_sm120,
 )
 
 # Re-export neural network operations
@@ -198,8 +201,11 @@ __all__ = [
     # GEMV
     "gemv_bf16",
     "gemv_fp8_bf16",
+    "gemv_fp8_bf16_batched",
     "gemv_nvf4_bf16",
     "gemv_nvf4_available",
+    # W8A16 GEMM
+    "w8a16_gemm_sm120",
     "fp8_init_lut",
     "fp8_get_sizes",
     "nvf4_get_sizes",

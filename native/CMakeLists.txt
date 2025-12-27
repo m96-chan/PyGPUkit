@@ -158,6 +158,7 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/gemm/fp8/f32/sm90/fp8_cutlass.cu
     ops/matmul/gemm/fp8/f32/sm100/fp8_blockwise.cu
     ops/matmul/gemm/fp8/bf16/sm120/fp8_blockwise.cu
+    ops/matmul/gemm/fp8/bf16/sm120/w8a16_gemm.cu
     ops/matmul/gemm/fp8/fp8/sm120/fp8_cutlass.cu
     ops/matmul/gemm/nvf4/bf16/sm120/nvf4_cutlass.cu
     ops/matmul/gemm/nvf4/bf16/sm120/nvf4_nvf4_cutlass.cu
