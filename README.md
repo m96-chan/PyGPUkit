@@ -3,7 +3,13 @@
 *A minimal, modular GPU runtime with Rust-powered scheduler, NVRTC JIT compilation, and a clean NumPy-like API.*
 
 [![PyPI version](https://badge.fury.io/py/PyGPUkit.svg)](https://badge.fury.io/py/PyGPUkit)
+[![Python](https://img.shields.io/pypi/pyversions/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CUDA](https://img.shields.io/badge/CUDA-13.x-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![SM](https://img.shields.io/badge/SM-80%20%7C%2086%20%7C%2089%20%7C%2090%20%7C%20100%20%7C%20120a-blue.svg)](#supported-gpus)
+[![GitHub stars](https://img.shields.io/github/stars/m96-chan/PyGPUkit?style=social)](https://github.com/m96-chan/PyGPUkit)
+[![Downloads](https://img.shields.io/pypi/dm/PyGPUkit.svg)](https://pypi.org/project/PyGPUkit/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 ---
 
