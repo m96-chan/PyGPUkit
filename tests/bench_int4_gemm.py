@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Benchmark Int4 GEMM via Int8/FP8 approximation (SM120)"""
 
-import numpy as np
 import time
+
+import numpy as np
+
 from pygpukit.core import from_numpy
 from pygpukit.core.backend import get_native_module
 
@@ -117,7 +119,9 @@ def test_int4_gemm():
     B_gpu_full = from_numpy(B_packed_full)
     D_gpu_full = from_numpy(np.zeros((M, N), dtype=np.int32))
 
-    native.int4_gemm_int32_sm120(A_gpu_full._get_native(), B_gpu_full._get_native(), D_gpu_full._get_native())
+    native.int4_gemm_int32_sm120(
+        A_gpu_full._get_native(), B_gpu_full._get_native(), D_gpu_full._get_native()
+    )
     native.device_synchronize()
 
     D_result_full = D_gpu_full.to_numpy()
@@ -170,14 +174,18 @@ def test_int4_gemm():
         # Benchmark Int4 -> Int32
         try:
             for _ in range(warmup):
-                native.int4_gemm_int32_sm120(A_gpu._get_native(), B_gpu._get_native(), D_int32._get_native())
+                native.int4_gemm_int32_sm120(
+                    A_gpu._get_native(), B_gpu._get_native(), D_int32._get_native()
+                )
             native.device_synchronize()
 
             times_int32 = []
             for _ in range(iterations):
                 native.device_synchronize()
                 start = time.perf_counter()
-                native.int4_gemm_int32_sm120(A_gpu._get_native(), B_gpu._get_native(), D_int32._get_native())
+                native.int4_gemm_int32_sm120(
+                    A_gpu._get_native(), B_gpu._get_native(), D_int32._get_native()
+                )
                 native.device_synchronize()
                 end = time.perf_counter()
                 times_int32.append((end - start) * 1e6)
@@ -191,14 +199,18 @@ def test_int4_gemm():
         # Benchmark Int4 -> Int8
         try:
             for _ in range(warmup):
-                native.int4_gemm_int8_sm120(A_gpu._get_native(), B_gpu._get_native(), D_int8._get_native())
+                native.int4_gemm_int8_sm120(
+                    A_gpu._get_native(), B_gpu._get_native(), D_int8._get_native()
+                )
             native.device_synchronize()
 
             times_int8 = []
             for _ in range(iterations):
                 native.device_synchronize()
                 start = time.perf_counter()
-                native.int4_gemm_int8_sm120(A_gpu._get_native(), B_gpu._get_native(), D_int8._get_native())
+                native.int4_gemm_int8_sm120(
+                    A_gpu._get_native(), B_gpu._get_native(), D_int8._get_native()
+                )
                 native.device_synchronize()
                 end = time.perf_counter()
                 times_int8.append((end - start) * 1e6)
@@ -217,5 +229,118 @@ def test_int4_gemm():
     print("      Unpacking Int4->Int8 adds overhead vs native Int4")
 
 
+def test_int4_gemv():
+    """Test Int4 GEMV for M=1 decode path"""
+    native = get_native_module()
+
+    print()
+    print("=" * 70)
+    print("Int4 GEMV (M=1 decode) Benchmark (SM120)")
+    print("=" * 70)
+
+    # Check availability
+    if not native.int4_gemv_available():
+        print("Int4 GEMV not available (requires SM120)")
+        return
+
+    print("Int4 GEMV: available")
+    print()
+
+    # Correctness test
+    print("=== Correctness Test ===")
+    K, N = 4096, 14336
+
+    np.random.seed(42)
+    A_int8 = np.random.randint(-8, 8, K, dtype=np.int8)
+    B_int8 = np.random.randint(-8, 8, (N, K), dtype=np.int8)
+
+    # Pack to Int4
+    A_packed = pack_int4(A_int8.reshape(1, -1)).reshape(-1)
+    B_packed = pack_int4(B_int8)
+
+    # Reference: C = A @ B.T (dot product per row of B)
+    C_ref = (A_int8.astype(np.int32).reshape(1, -1) @ B_int8.T.astype(np.int32)).reshape(-1)
+
+    # GPU computation
+    A_gpu = from_numpy(A_packed)
+    B_gpu = from_numpy(B_packed)
+    C_gpu = from_numpy(np.zeros(N, dtype=np.int32))
+
+    native.int4_gemv_int32_sm120(A_gpu._get_native(), B_gpu._get_native(), C_gpu._get_native())
+    native.device_synchronize()
+
+    C_result = C_gpu.to_numpy()
+
+    diff = np.abs(C_result.astype(np.float64) - C_ref.astype(np.float64))
+    max_diff = diff.max()
+    mean_diff = diff.mean()
+    rel_error = diff.sum() / (np.abs(C_ref).sum() + 1e-10)
+
+    print(f"K={K}, N={N}")
+    print(f"Max absolute diff: {max_diff}")
+    print(f"Mean absolute diff: {mean_diff:.4f}")
+    print(f"Relative error: {rel_error * 100:.4f}%")
+    print(f"Sample expected: {C_ref[:5]}")
+    print(f"Sample got:      {C_result[:5]}")
+    print()
+
+    # Performance benchmark (M=1 GEMV typical for LLM decode)
+    print("=== Performance Benchmark (M=1 GEMV) ===")
+    print(f"{'K':>6} {'N':>6} | {'TFLOPS':>10} | {'us':>10}")
+    print("-" * 42)
+
+    configs = [
+        (4096, 4096),
+        (4096, 14336),
+        (4096, 18944),
+        (8192, 8192),
+        (8192, 28672),
+    ]
+
+    warmup = 10
+    iterations = 50
+
+    for K, N in configs:
+        A_int8 = np.random.randint(-8, 8, K, dtype=np.int8)
+        B_int8 = np.random.randint(-8, 8, (N, K), dtype=np.int8)
+
+        A_packed = pack_int4(A_int8.reshape(1, -1)).reshape(-1)
+        B_packed = pack_int4(B_int8)
+
+        A_gpu = from_numpy(A_packed)
+        B_gpu = from_numpy(B_packed)
+        C_gpu = from_numpy(np.zeros(N, dtype=np.int32))
+
+        flops = 2 * K * N  # M=1 GEMV
+
+        try:
+            for _ in range(warmup):
+                native.int4_gemv_int32_sm120(
+                    A_gpu._get_native(), B_gpu._get_native(), C_gpu._get_native()
+                )
+            native.device_synchronize()
+
+            times = []
+            for _ in range(iterations):
+                native.device_synchronize()
+                start = time.perf_counter()
+                native.int4_gemv_int32_sm120(
+                    A_gpu._get_native(), B_gpu._get_native(), C_gpu._get_native()
+                )
+                native.device_synchronize()
+                end = time.perf_counter()
+                times.append((end - start) * 1e6)
+
+            median_us = np.median(times)
+            tflops = flops / median_us / 1e6
+            print(f"{K:>6} {N:>6} | {tflops:>10.2f} | {median_us:>10.1f}")
+        except Exception as e:
+            print(f"{K:>6} {N:>6} | ERROR: {e}")
+
+    print()
+    print("Note: GEMV is memory-bandwidth bound, TFLOPS is lower than GEMM")
+
+
 if __name__ == "__main__":
     test_int4_gemm()
+    test_int4_gemv()

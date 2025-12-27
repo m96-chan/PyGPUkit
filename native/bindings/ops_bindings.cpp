@@ -173,6 +173,15 @@ extern "C" {
         cudaStream_t stream
     );
     bool pygpukit_int4_gemm_sm120_available();
+
+    // Int4 GEMV for M=1 decode (SM120)
+    cudaError_t pygpukit_gemv_int4_int4_int32_sm120(
+        const uint8_t* A, const uint8_t* B_nk, int32_t* C,
+        int K, int N,
+        float scale_A, float scale_B,
+        cudaStream_t stream
+    );
+    bool pygpukit_int4_gemv_sm120_available();
 }
 
 // Optimized FP8 GEMV (warp-level reduction, smem, vectorized)
@@ -2486,6 +2495,69 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        py::arg("scale_A") = 1.0f, py::arg("scale_B") = 1.0f, py::arg("descale_D") = 1.0f,
        "Int4 GEMM via Int8/FP8: D[M,N] = A[M,K] @ B[N,K]^T with Int8 output. Input is packed int4.");
+
+    // ========================================================================
+    // Int4 GEMV for M=1 decode (SM120)
+    // Input is packed: 2 signed 4-bit values per byte (low nibble first)
+    // ========================================================================
+
+    m.def("int4_gemv_available", []() {
+        return pygpukit_int4_gemv_sm120_available();
+    }, "Check if Int4 GEMV is available (SM120 for M=1 decode)");
+
+    // Int4 GEMV with Int32 output
+    m.def("int4_gemv_int32_sm120", [](
+        const GPUArray& A, const GPUArray& B, GPUArray& C,
+        float scale_A, float scale_B
+    ) {
+        // A: [K/2] UInt8 packed (activation vector)
+        // B: [N, K/2] UInt8 packed (weights, row-major)
+        // C: [N] Int32
+        if (A.dtype() != DataType::UInt8) {
+            throw std::runtime_error("int4_gemv_int32_sm120: A must be uint8 (packed int4)");
+        }
+        if (B.dtype() != DataType::UInt8) {
+            throw std::runtime_error("int4_gemv_int32_sm120: B must be uint8 (packed int4)");
+        }
+        if (C.dtype() != DataType::Int32) {
+            throw std::runtime_error("int4_gemv_int32_sm120: C must be int32");
+        }
+        if (A.ndim() != 1) {
+            throw std::runtime_error("int4_gemv_int32_sm120: A must be 1D [K/2]");
+        }
+        if (B.ndim() != 2) {
+            throw std::runtime_error("int4_gemv_int32_sm120: B must be 2D [N, K/2]");
+        }
+        if (C.ndim() != 1) {
+            throw std::runtime_error("int4_gemv_int32_sm120: C must be 1D [N]");
+        }
+
+        int K_packed = A.shape()[0];
+        int K = K_packed * 2;  // Unpacked K dimension
+        int N = B.shape()[0];
+
+        if (B.shape()[1] != static_cast<size_t>(K_packed)) {
+            throw std::runtime_error("int4_gemv_int32_sm120: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("int4_gemv_int32_sm120: output shape mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_int4_int4_int32_sm120(
+            reinterpret_cast<const uint8_t*>(A.data()),
+            reinterpret_cast<const uint8_t*>(B.data()),
+            reinterpret_cast<int32_t*>(C.data()),
+            K, N,
+            scale_A, scale_B,
+            nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("int4_gemv_int32_sm120 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B"), py::arg("C"),
+       py::arg("scale_A") = 1.0f, py::arg("scale_B") = 1.0f,
+       "Int4 GEMV: C[N] = A[K] . B[N,K]^T with Int32 output. Input is packed int4.");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)
