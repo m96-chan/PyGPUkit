@@ -1014,15 +1014,28 @@ tokenizer = Tokenizer.from_file("/path/to/tokenizer.json")
 # from pygpukit.llm import Tokenizer
 ```
 
-### Test Models (Local)
+### LLM Models Directory
+
+**Primary model storage:** `F:/LLM/`
+
+All LLM models for inference testing are stored in `F:/LLM/`. Use this path when loading models.
 
 ```
-# Qwen3-8B (テスト用)
-/c/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/
-
-# TinyLlama-1.1B
-/c/Users/y_har/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/*/
+F:/LLM/
+├── Qwen2.5-7B-Instruct/           # Main test model
+├── Qwen3-8B/                       # Qwen3 variant
+├── TinyLlama-1.1B-Chat-v1.0/      # Small model for quick tests
+└── ...
 ```
+
+**Usage example:**
+```python
+from pygpukit.llm import QwenModel
+
+model = QwenModel.from_safetensors("F:/LLM/Qwen2.5-7B-Instruct")
+```
+
+**Note:** HuggingFace cache (`~/.cache/huggingface/`) may also contain models but `F:/LLM/` is the canonical location.
 
 ---
 

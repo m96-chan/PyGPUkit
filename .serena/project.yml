@@ -92,6 +92,8 @@ initial_prompt: |
   - .claude/skills/: Development workflow automation
   - .claude/logs/build/: Build logs (auto-saved by build.sh)
 
+  LLM models: F:/LLM/ (Qwen2.5-7B-Instruct, Qwen3-8B, TinyLlama, etc.)
+
   Build: ./build.sh [SM] [CUDA_VERSION]
   Supported SM: 80, 86, 89, 90, 100, 120a
 
