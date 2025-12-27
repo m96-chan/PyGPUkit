@@ -93,20 +93,6 @@ All of them are **why PyGPUkit exists**.
 
 ---
 
-## Overview
-**PyGPUkit** is a lightweight GPU runtime for Python that provides:
-- **Single-binary distribution** — works with just GPU drivers, no CUDA Toolkit needed
-- **Rust-powered scheduler** with admission control, QoS, and resource partitioning
-- **NVRTC JIT** (optional) for custom kernel compilation
-- A NumPy-like `GPUArray` type
-- Kubernetes-inspired GPU scheduling (bandwidth + memory guarantees)
-
-PyGPUkit aims to be the "micro-runtime for GPU computing": small, fast, and ideal for research, inference tooling, DSP, and real-time systems.
-
-> **Note:** PyGPUkit is NOT a PyTorch/CuPy replacement—it's a lightweight runtime for custom GPU workloads where full ML frameworks are overkill.
-
----
-
 ## What's New in v0.2.15
 
 ### FP8 I/O GEMM (SM120)
