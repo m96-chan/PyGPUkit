@@ -84,6 +84,7 @@ All of them are **why PyGPUkit exists**.
 
 These are not theoretical.
 They were all observed in production or real benchmarks.
+
 ---
 
 ## Documentation
