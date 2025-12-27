@@ -724,6 +724,34 @@ For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 
 > **Note:** FP8 GEMV is fastest for typical LLM sizes. Int4 GEMV excels at very large K (29568+) where FP8 has limitations.
 
+### GEMV Quantization Trade-offs (Explicit)
+
+Why is W4A16 faster than NVF4/NVF4 despite both using 4-bit weights?
+
+| Kernel | A (Activation) | B (Weight) | Dequant Work | Speed |
+|--------|---------------|------------|--------------|-------|
+| **W4A16** | BF16 (native) | NVF4 (4-bit) | 1x (B only) | **104 us** |
+| **NVF4/NVF4** | NVF4 (4-bit) | NVF4 (4-bit) | 2x (A + B) | 219 us |
+
+**Per Scale Block (32 elements):**
+| Operation | W4A16 | NVF4/NVF4 |
+|-----------|-------|-----------|
+| Scale load | 1 (B) | 2 (A + B) |
+| Scale decode (LUT) | 1 | 2 |
+| Pre-scaled LUT build | 16 mul | 16 mul |
+
+**Per Element:**
+| Operation | W4A16 | NVF4/NVF4 |
+|-----------|-------|-----------|
+| A conversion | BF16->float (free) | LUT lookup |
+| B conversion | LUT lookup | LUT lookup |
+
+**Conclusion:** NVF4/NVF4 trades speed for memory. Use when:
+- Memory-constrained (A is 4x smaller)
+- Batch inference with large A tensors
+
+For single-token decode (M=1), **W4A16 or FP8 is recommended**.
+
 ### NVF4-BF16 GEMM Performance (RTX 5090, SM120a)
 
 4-bit NVF4 GEMM with BF16 I/O using CUTLASS block-scaled tensor operations:
