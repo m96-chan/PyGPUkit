@@ -253,5 +253,20 @@ void moe_router_bf16(
     );
 }
 
+void expand_expert_offsets(
+    const int32_t* expert_offsets,
+    int32_t* row_expert_ids,
+    int num_experts,
+    int M_total,
+    cudaStream_t stream
+) {
+    if (M_total == 0) return;
+    constexpr int BLOCK_SIZE = 256;
+    int grid_size = (M_total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    expand_expert_offsets_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
+        expert_offsets, row_expert_ids, num_experts, M_total
+    );
+}
+
 }  // namespace moe
 }  // namespace pygpukit

@@ -1052,10 +1052,9 @@ class MoELayer:
         self._stacked_down_weight: GPUArray | None = None
         self._stacked_down_scale: GPUArray | None = None
 
-        # Check if first expert uses FP8
-        # TODO: grouped GEMM is not working correctly yet, disabled for now
-        # if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
-        #     self._stack_fp8_weights()
+        # Check if first expert uses FP8 - use grouped GEMM v2 for optimization
+        if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
+            self._stack_fp8_weights()
 
     # Profiling flag (set to True to enable timing)
     _profile: bool = True
@@ -1207,34 +1206,43 @@ class MoELayer:
 
         # Step 6: Run experts
         if self._use_grouped_gemm:
-            # Use grouped GEMM for all experts in single kernel launches
-            from pygpukit.ops.matmul import grouped_gemm_fp8_bf16
+            # Use grouped GEMM v2 for all experts in single kernel launches
+            from pygpukit.ops.matmul import grouped_gemm_fp8_bf16_v2
+
+            # Create row_expert_ids from expert_offsets
+            M_total = num_tokens * k
+            row_expert_ids = zeros((M_total,), dtype="int32")
+            native.moe_expand_expert_offsets(
+                expert_offsets._get_native(),
+                row_expert_ids._get_native(),
+                self.num_experts,
+            )
 
             # gate_proj: gathered[M_total, hidden] @ gate_weight[experts, inter, hidden]^T
-            gate_out = grouped_gemm_fp8_bf16(
+            gate_out = grouped_gemm_fp8_bf16_v2(
                 gathered,
                 self._stacked_gate_weight,
                 self._stacked_gate_scale,
-                expert_offsets,
+                row_expert_ids,
             )
 
             # up_proj: gathered[M_total, hidden] @ up_weight[experts, inter, hidden]^T
-            up_out = grouped_gemm_fp8_bf16(
+            up_out = grouped_gemm_fp8_bf16_v2(
                 gathered,
                 self._stacked_up_weight,
                 self._stacked_up_scale,
-                expert_offsets,
+                row_expert_ids,
             )
 
             # SiLU(gate) * up
             intermediate = mul(silu(gate_out), up_out)
 
             # down_proj: intermediate[M_total, inter] @ down_weight[experts, hidden, inter]^T
-            expert_outputs = grouped_gemm_fp8_bf16(
+            expert_outputs = grouped_gemm_fp8_bf16_v2(
                 intermediate,
                 self._stacked_down_weight,
                 self._stacked_down_scale,
-                expert_offsets,
+                row_expert_ids,
             )
         else:
             # Fallback: Run experts sequentially

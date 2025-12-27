@@ -116,6 +116,12 @@ extern "C" {
         void* C, const int* expert_offsets,
         int M_total, int N, int K, int num_experts, cudaStream_t stream
     );
+    // v2 API: row_expert_ids instead of expert_offsets (correct for mixed-expert tiles)
+    cudaError_t pygpukit_grouped_gemm_fp8_bf16_v2(
+        const void* A, const void* B_stacked, const void* B_scale,
+        void* C, const int* row_expert_ids,
+        int M, int N, int K, cudaStream_t stream
+    );
 }
 
 // MoE (Mixture of Experts) functions - defined in ops/moe/moe.cu
@@ -146,6 +152,9 @@ namespace moe {
         const __nv_bfloat16* expert_outputs, const __nv_bfloat16* router_weights,
         const int32_t* reverse_perm, __nv_bfloat16* output,
         int num_tokens, int hidden_size, int k, cudaStream_t stream);
+    void expand_expert_offsets(
+        const int32_t* expert_offsets, int32_t* row_expert_ids,
+        int num_experts, int M_total, cudaStream_t stream);
 }
 }
 
@@ -1958,6 +1967,61 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("A"), py::arg("B_stacked"), py::arg("B_scale"), py::arg("C"), py::arg("expert_offsets"),
        "Grouped GEMM for MoE: C[M_total,N] = A[M_total,K] @ B_stacked[experts,N,K] with expert_offsets routing");
 
+    m.def("grouped_gemm_fp8_bf16_v2", [](
+        const GPUArray& A,              // [M, K] BF16
+        const GPUArray& B_stacked,      // [num_experts, N, K] FP8
+        const GPUArray& B_scale,        // [num_experts, N/128, K/128] BF16
+        GPUArray& C,                    // [M, N] BF16
+        const GPUArray& row_expert_ids  // [M] int32 - expert ID per row
+    ) {
+        // Validate dtypes
+        if (A.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: A must be bfloat16");
+        }
+        if (B_stacked.dtype() != DataType::UInt8) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: B_stacked must be uint8 (FP8)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: B_scale must be bfloat16");
+        }
+        if (C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: C must be bfloat16");
+        }
+        if (row_expert_ids.dtype() != DataType::Int32) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: row_expert_ids must be int32");
+        }
+
+        // Validate dimensions
+        if (A.ndim() != 2 || B_stacked.ndim() != 3 || C.ndim() != 2) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: invalid dimensions");
+        }
+
+        int M = A.shape()[0];
+        int K = A.shape()[1];
+        int N = B_stacked.shape()[1];
+
+        if (B_stacked.shape()[2] != static_cast<size_t>(K)) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(M) || C.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: output shape mismatch");
+        }
+        if (row_expert_ids.ndim() != 1 || row_expert_ids.shape()[0] != static_cast<size_t>(M)) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2: row_expert_ids size mismatch");
+        }
+
+        cudaError_t err = pygpukit_grouped_gemm_fp8_bf16_v2(
+            A.data(), B_stacked.data(), B_scale.data(), C.data(),
+            reinterpret_cast<const int*>(row_expert_ids.data()),
+            M, N, K, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16_v2 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_stacked"), py::arg("B_scale"), py::arg("C"), py::arg("row_expert_ids"),
+       "Grouped GEMM for MoE v2: C[M,N] = A[M,K] @ B_stacked[experts,N,K] with per-row expert IDs");
+
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)
     // Priority: SM120 (if enabled) > SM90 > error
@@ -2192,4 +2256,29 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("expert_outputs"), py::arg("router_weights"), py::arg("reverse_perm"),
        py::arg("output"), py::arg("k"),
        "Scatter and combine expert outputs with router weights");
+
+    m.def("moe_expand_expert_offsets", [](
+        const GPUArray& expert_offsets,    // [num_experts + 1] int32
+        GPUArray& row_expert_ids,          // [M_total] int32
+        int num_experts
+    ) {
+        if (expert_offsets.dtype() != DataType::Int32) {
+            throw std::runtime_error("moe_expand_expert_offsets: expert_offsets must be int32");
+        }
+        if (row_expert_ids.dtype() != DataType::Int32) {
+            throw std::runtime_error("moe_expand_expert_offsets: row_expert_ids must be int32");
+        }
+        if (expert_offsets.ndim() != 1 || expert_offsets.shape()[0] != static_cast<size_t>(num_experts + 1)) {
+            throw std::runtime_error("moe_expand_expert_offsets: expert_offsets size mismatch");
+        }
+
+        int M_total = row_expert_ids.shape()[0];
+
+        moe::expand_expert_offsets(
+            reinterpret_cast<const int32_t*>(expert_offsets.data()),
+            reinterpret_cast<int32_t*>(row_expert_ids.data()),
+            num_experts, M_total, nullptr
+        );
+    }, py::arg("expert_offsets"), py::arg("row_expert_ids"), py::arg("num_experts"),
+       "Expand expert_offsets to per-row expert IDs for grouped GEMM v2");
 }

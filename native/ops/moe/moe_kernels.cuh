@@ -228,5 +228,32 @@ __global__ void moe_combine_outputs_ordered_kernel(
     }
 }
 
+// =============================================================================
+// Utility: Expand expert_offsets to row_expert_ids
+// Used for grouped GEMM v2 API
+// =============================================================================
+
+__global__ void expand_expert_offsets_kernel(
+    const int32_t* __restrict__ expert_offsets,  // [num_experts + 1]
+    int32_t* __restrict__ row_expert_ids,        // [M_total]
+    int num_experts,
+    int M_total
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M_total) return;
+
+    // Binary search to find which expert this row belongs to
+    int low = 0, high = num_experts;
+    while (low < high) {
+        int mid = (low + high) / 2;
+        if (expert_offsets[mid + 1] <= row) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    row_expert_ids[row] = low;
+}
+
 }  // namespace moe
 }  // namespace pygpukit

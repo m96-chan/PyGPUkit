@@ -1864,6 +1864,104 @@ def grouped_gemm_fp8_bf16(
         raise NotImplementedError("Grouped GEMM requires native GPU backend")
 
 
+def grouped_gemm_fp8_bf16_v2(
+    a: GPUArray,
+    b_stacked: GPUArray,
+    b_scale: GPUArray,
+    row_expert_ids: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Grouped GEMM for MoE v2: C = A @ B_stacked with per-row expert IDs.
+
+    This version correctly handles rows belonging to different experts,
+    even when they are mixed within a CUDA thread block.
+
+    Args:
+        a: Input tokens [M, K], BF16, sorted by expert.
+        b_stacked: Stacked expert weights [num_experts, N, K], FP8 (uint8).
+        b_scale: Block-wise scales [num_experts, N/128, K/128], BF16.
+        row_expert_ids: Expert ID for each row [M], int32.
+        out: Optional output tensor [M, N], BF16.
+
+    Returns:
+        Output tensor [M, N], BF16.
+    """
+    from pygpukit.core.dtypes import bfloat16, int32, uint8
+
+    if a.ndim != 2:
+        raise ValueError(f"grouped_gemm_fp8_bf16_v2 requires 2D input, got {a.ndim}D")
+
+    if b_stacked.ndim != 3:
+        raise ValueError(f"grouped_gemm_fp8_bf16_v2 requires 3D weight, got {b_stacked.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"grouped_gemm_fp8_bf16_v2 requires bfloat16 input, got {a.dtype}")
+
+    if b_stacked.dtype != uint8:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16_v2 requires uint8 (FP8) weights, got {b_stacked.dtype}"
+        )
+
+    if b_scale.dtype != bfloat16:
+        raise ValueError(f"grouped_gemm_fp8_bf16_v2 requires bfloat16 scale, got {b_scale.dtype}")
+
+    if row_expert_ids.dtype != int32:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16_v2 requires int32 row_expert_ids, got {row_expert_ids.dtype}"
+        )
+
+    M = a.shape[0]
+    K = a.shape[1]
+    N = b_stacked.shape[1]
+
+    if b_stacked.shape[2] != K:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16_v2: K mismatch A[{M},{K}] vs B[...{N},{b_stacked.shape[2]}]"
+        )
+
+    if row_expert_ids.shape[0] != M:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16_v2: row_expert_ids size {row_expert_ids.shape[0]} != M ({M})"
+        )
+
+    # Validate output
+    if out is not None:
+        if out.shape != (M, N):
+            raise ValueError(f"out shape {out.shape} does not match expected ({M}, {N})")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    # Initialize LUT if not already done
+    grouped_gemm_init_lut()
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_stacked_native = b_stacked._get_native()
+        b_scale_native = b_scale._get_native()
+        row_expert_ids_native = row_expert_ids._get_native()
+
+        if out is None:
+            out_native = native.empty([M, N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.grouped_gemm_fp8_bf16_v2(
+            a_native, b_stacked_native, b_scale_native, out_native, row_expert_ids_native
+        )
+
+        return out
+    else:
+        raise NotImplementedError("Grouped GEMM requires native GPU backend")
+
+
 def fp8_get_sizes(K: int, N: int) -> tuple[int, int, int]:
     """Get scale tensor dimensions for FP8 block quantization.
 
