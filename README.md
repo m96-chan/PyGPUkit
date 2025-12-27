@@ -126,14 +126,14 @@ if gpk.fp8_fp8_sm120_available():
     C = gpk.matmul_fp8_fp8_blockwise_sm120(A_fp8, B_fp8, scale_a, scale_b)
 ```
 
-### Pure NVF4 GEMM (446 TFLOPS)
+### Pure NVF4 GEMM (398 TFLOPS)
 GPU-side BF16->NVF4 quantization with 3-stage pipeline for maximum throughput:
 
 | Matrix Size | TFLOPS | Notes |
 |-------------|--------|-------|
-| 8192x8192 | 320 | Branchless vectorized loads |
-| 12288x12288 | 400 | 3-stage async pipeline |
-| 16384x16384 | **446** | Direct write to user buffer |
+| 8192x8192 | 261 | Branchless vectorized loads |
+| 12288x12288 | 383 | 3-stage async pipeline |
+| 16384x16384 | **398** | Direct write to user buffer |
 
 ### New Math Operations
 Extended math operations for GPU computing:
@@ -661,20 +661,41 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 
 ## Performance
 
-### Benchmark Comparison (RTX 3090 Ti, 8192×8192)
+### RTX 5090 Benchmark (SM120a, CUDA 13.1)
 
-| Library | FP32 | TF32 | FP16 | BF16 | Requirements |
-|---------|------|------|------|------|--------------|
-| **NumPy** (OpenBLAS) | ~0.8 TFLOPS | — | — | — | CPU only |
-| **cuBLAS** | ~21 TFLOPS | ~59 TFLOPS | ~75 TFLOPS | ~83 TFLOPS | CUDA Toolkit |
-| **PyGPUkit** (CUTLASS) | 18 TFLOPS | **31 TFLOPS** | **63 TFLOPS** | **63 TFLOPS** | GPU drivers only |
+#### Standard Precision (8192x8192)
 
-> Built-in matmul kernels are pre-compiled. Driver-Only and Full (JIT) modes have identical matmul performance. JIT is only needed for custom kernels.
+| Precision | TFLOPS | Notes |
+|-----------|--------|-------|
+| **FP32** | 80 | CUDA cores |
+| **TF32** | 87 | TensorCore |
+| **FP16** | 170 | TensorCore |
+| **BF16** | **173** | TensorCore |
 
-### PyGPUkit Performance by Matrix Size
+#### Quantized GEMM (M=8192, K=4096, N=14336)
 
-| Matrix Size | FP32 (NO_TF32) | TF32 (CUTLASS) | FP16 (CUTLASS) | BF16 (CUTLASS) |
-|-------------|----------------|----------------|----------------|----------------|
+| Format | TFLOPS | Error | Notes |
+|--------|--------|-------|-------|
+| **FP8xFP8** | **217** | ~0.1% | CUTLASS SM120 blockwise |
+| **W8A16** | 50 | ~0.1% | FP8 weight, BF16 activation |
+| **Int8 (via FP8)** | 142 | ~3.5% | TensorCore approximation |
+| **Int8 (dp4a)** | 44 | **0%** | Exact, CUDA cores |
+| **Int4 (via Int8)** | 121 | ~0.1% | TensorCore approximation |
+
+#### NVF4 (4-bit NormalFloat) GEMM
+
+| Matrix Size | TFLOPS | Notes |
+|-------------|--------|-------|
+| 8192x8192 | 261 | Pre-quantized |
+| 12288x12288 | 383 | 3-stage pipeline |
+| 16384x16384 | **398** | Peak performance |
+
+> **Note:** NVF4xNVF4 achieves 4x memory bandwidth reduction vs BF16 with minimal accuracy loss.
+
+### RTX 3090 Ti Benchmark (SM86)
+
+| Matrix Size | FP32 | TF32 | FP16 | BF16 |
+|-------------|------|------|------|------|
 | 2048×2048 | 9.6 TFLOPS | 13 TFLOPS | 15 TFLOPS | 21 TFLOPS |
 | 4096×4096 | 14.7 TFLOPS | 22 TFLOPS | 44 TFLOPS | 44 TFLOPS |
 | 8192×8192 | 18 TFLOPS | **31 TFLOPS** | **63 TFLOPS** | **63 TFLOPS** |
@@ -703,11 +724,11 @@ For LLM decode (M=1), custom GEMV kernels significantly outperform cuBLASLt:
 
 4-bit NVF4 GEMM with BF16 I/O using CUTLASS block-scaled tensor operations:
 
-| Matrix Size | TFLOPS | Notes |
-|-------------|--------|-------|
-| 4096×4096 | 68 | GPU-side quantization |
-| 8192×8192 | 174 | 3-stage async pipeline |
-| 16384×16384 | **316** | Direct write to user buffer |
+| Matrix Size | NVF4xBF16 | NVF4xNVF4 | Notes |
+|-------------|-----------|-----------|-------|
+| 4096×4096 | 64 TFLOPS | 87 TFLOPS | GPU-side quantization |
+| 8192×8192 | 168 TFLOPS | 261 TFLOPS | 3-stage async pipeline |
+| 16384×16384 | — | **398 TFLOPS** | Peak performance |
 
 > **Note:** GPU-side BF16->NVF4 quantization with unit scaling. No host-device copies. Ideal for memory-bound LLM inference with 4x bandwidth reduction vs BF16.
 
