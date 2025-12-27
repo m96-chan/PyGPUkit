@@ -344,6 +344,128 @@ cudaError_t quantize_bf16_to_nvf4(
     return cudaGetLastError();
 }
 
+// ============================================================================
+// Row-Major Quantization Kernel (for pure NVF4/NVF4 GEMV)
+// ============================================================================
+
+/**
+ * Row-major quantization kernel
+ * Input:  [K, N] BF16 row-major
+ * Output: [N, K/2] packed NVF4 row-major (contiguous K for each N)
+ *         [N, K/32] scale factors row-major
+ */
+__global__ void quantize_bf16_to_nvf4_rowmajor_kernel(
+    __nv_bfloat16 const* __restrict__ input,  // [K, N] row-major
+    uint8_t* __restrict__ output_data,         // [N, K/2] row-major
+    uint8_t* __restrict__ output_scale,        // [N, K/32] row-major
+    int K,
+    int N
+) {
+    const int n = blockIdx.x * blockDim.x + threadIdx.x;
+    const int scale_block = blockIdx.y;
+
+    if (n >= N) return;
+
+    const int SCALE_BLOCK = 32;
+    const int k_start = scale_block * SCALE_BLOCK;
+    const int k_end = min(k_start + SCALE_BLOCK, K);
+    const int K_packed = K / 2;
+    const int K_scale = (K + SCALE_BLOCK - 1) / SCALE_BLOCK;
+
+    // Find max absolute value in block
+    float max_abs = 0.0f;
+    for (int k = k_start; k < k_end; ++k) {
+        float val = fabsf(__bfloat162float(input[k * N + n]));
+        max_abs = fmaxf(max_abs, val);
+    }
+
+    // Compute scale factor (target range: [-6, 6] for NVF4)
+    const float NVF4_MAX = 6.0f;
+    float scale = (max_abs > 1e-8f) ? (max_abs / NVF4_MAX) : 1.0f;
+    float inv_scale = 1.0f / scale;
+
+    // Encode scale as UE4M3
+    int exp_raw = 0;
+    float normalized = scale;
+
+    if (normalized >= 2.0f) {
+        while (normalized >= 2.0f && exp_raw < 8) {
+            normalized *= 0.5f;
+            exp_raw++;
+        }
+    } else if (normalized < 1.0f && normalized > 1e-8f) {
+        while (normalized < 1.0f && exp_raw > -7) {
+            normalized *= 2.0f;
+            exp_raw--;
+        }
+    }
+
+    // Compute mantissa
+    int mant = __float2int_rn((normalized - 1.0f) * 8.0f);
+    mant = max(0, min(7, mant));
+
+    // Compute biased exponent
+    int exp_biased = exp_raw + 7;
+    exp_biased = max(0, min(15, exp_biased));
+
+    uint8_t scale_encoded = ((exp_biased & 0xF) << 3) | (mant & 0x7);
+    // Row-major: [N, K/32] -> index = n * K_scale + scale_block
+    output_scale[n * K_scale + scale_block] = scale_encoded;
+
+    // Recompute actual encoded scale for accurate quantization
+    float encoded_scale = (1.0f + mant / 8.0f) * ldexpf(1.0f, exp_biased - 7);
+    inv_scale = 1.0f / encoded_scale;
+
+    // Quantize values to NVF4
+    for (int k = k_start; k < k_end; k += 2) {
+        float v0 = __bfloat162float(input[k * N + n]) * inv_scale;
+        float v1 = (k + 1 < k_end) ? __bfloat162float(input[(k + 1) * N + n]) * inv_scale : 0.0f;
+
+        // Quantize to NVF4 (nearest value in lookup table)
+        auto quantize_nvf4 = [](float val) -> uint8_t {
+            uint8_t sign = (val < 0) ? 0x8 : 0x0;
+            val = fabsf(val);
+            if (val < 0.25f) return sign | 0;       // 0
+            if (val < 0.75f) return sign | 1;       // 0.5
+            if (val < 1.25f) return sign | 2;       // 1.0
+            if (val < 1.75f) return sign | 3;       // 1.5
+            if (val < 2.5f)  return sign | 4;       // 2.0
+            if (val < 3.5f)  return sign | 5;       // 3.0
+            if (val < 5.0f)  return sign | 6;       // 4.0
+            return sign | 7;                         // 6.0
+        };
+
+        uint8_t q0 = quantize_nvf4(v0);
+        uint8_t q1 = quantize_nvf4(v1);
+
+        // Pack: low nibble = first element, high nibble = second
+        int k_packed = k / 2;
+        // Row-major: [N, K/2] -> index = n * K_packed + k_packed
+        output_data[n * K_packed + k_packed] = (q1 << 4) | (q0 & 0x0F);
+    }
+}
+
+cudaError_t quantize_bf16_to_nvf4_rowmajor(
+    const __nv_bfloat16* input,
+    uint8_t* output_data,
+    uint8_t* output_scale,
+    int K,
+    int N,
+    cudaStream_t stream
+) {
+    const int SCALE_BLOCK = 32;
+    int num_scale_blocks = (K + SCALE_BLOCK - 1) / SCALE_BLOCK;
+
+    dim3 block(256);
+    dim3 grid((N + 255) / 256, num_scale_blocks);
+
+    quantize_bf16_to_nvf4_rowmajor_kernel<<<grid, block, 0, stream>>>(
+        input, output_data, output_scale, K, N
+    );
+
+    return cudaGetLastError();
+}
+
 }  // namespace gemv_nvf4
 }  // namespace ops
 }  // namespace pygpukit

@@ -8,12 +8,14 @@
  * - Shared memory requirement: K/2 bytes vs K*2 bytes (4x reduction!)
  * - Supports K up to 96K without shared memory overflow
  *
- * Memory layout (matches existing quantize_bf16_to_nvf4):
+ * Memory layout (ROW-MAJOR B for coalesced access):
  * - A_data: [K/2] packed NVF4 (2 values per byte)
  * - A_scale: [K/32] UE4M3 scale factors
- * - B_data: [K/2, N] packed NVF4 (column-major, K packing on rows)
- * - B_scale: [K/32, N] UE4M3 scale factors
+ * - B_data: [N, K/2] packed NVF4 (row-major, contiguous K for each N)
+ * - B_scale: [N, K/32] UE4M3 scale factors (row-major)
  * - C: [N] BF16 output
+ *
+ * Use quantize_bf16_to_nvf4_rowmajor() to create B in this layout.
  *
  * Optimizations:
  * 1. Warp-level reduction over K dimension
@@ -21,6 +23,7 @@
  * 3. LUT-based dequantization (constant memory)
  * 4. Vectorized loads (uint64 = 16 NVF4 values)
  * 5. Multiple accumulators
+ * 6. Row-major B layout for coalesced memory access
  */
 
 #pragma once
@@ -111,12 +114,14 @@ struct GemvNvf4PureConfig {
  * Each warp handles ONE output element (N dimension)
  * 32 threads in warp cooperatively reduce over K dimension
  *
- * Memory layout (column-major for B, matching quantize_bf16_to_nvf4):
+ * Memory layout (ROW-MAJOR for B - contiguous K for coalesced access):
  * - A_data: [K/2] packed NVF4 (2 values per byte)
  * - A_scale: [K/32] UE4M3 scale factors
- * - B_data: [K/2, N] packed NVF4 (column-major: K/2 rows, N cols)
- * - B_scale: [K/32, N] UE4M3 scale factors (column-major)
+ * - B_data: [N, K/2] packed NVF4 (row-major: contiguous K for each N)
+ * - B_scale: [N, K/32] UE4M3 scale factors (row-major)
  * - C: [N] BF16 output vector
+ *
+ * This layout enables coalesced memory access when reading B.
  */
 template<typename Config = GemvNvf4PureConfig>
 __global__ void gemv_nvf4_pure_kernel(
@@ -154,8 +159,10 @@ __global__ void gemv_nvf4_pure_kernel(
     }
     __syncthreads();
 
-    // B_data is [K/2, N] column-major: element at (k_packed, n) is at B_data[k_packed * N + n]
-    // B_scale is [K/32, N] column-major: element at (scale_k, n) is at B_scale[scale_k * N + n]
+    // B_data is [N, K/2] row-major: element at (n, k_packed) is at B_data[n * K_packed + k_packed]
+    // B_scale is [N, K/32] row-major: element at (n, scale_k) is at B_scale[n * K_scale_blocks + scale_k]
+    const uint8_t* B_row = B_data + global_n * K_packed;
+    const uint8_t* S_row = B_scale + global_n * K_scale_blocks;
 
     float acc = 0.0f;
 
@@ -167,11 +174,11 @@ __global__ void gemv_nvf4_pure_kernel(
 
         // Load scales
         float sA = decode_ue4m3_scale(smem_A_scale[scale_k]);
-        float sB = decode_ue4m3_scale(__ldg(&B_scale[scale_k * N + global_n]));
+        float sB = decode_ue4m3_scale(__ldg(&S_row[scale_k]));
 
-        // Load packed bytes (column-major for B)
+        // Load packed bytes (row-major for B - contiguous access)
         uint8_t a_packed = smem_A_data[packed_idx];
-        uint8_t b_packed = __ldg(&B_data[packed_idx * N + global_n]);
+        uint8_t b_packed = __ldg(&B_row[packed_idx]);
 
         // Dequantize and accumulate (2 values per byte)
         float a0 = dequant_nvf4(a_packed & 0x0F) * sA;
@@ -197,6 +204,10 @@ __global__ void gemv_nvf4_pure_kernel(
 
 /**
  * Optimized variant: 64-bit loads (16 NVF4 values at once)
+ *
+ * Memory layout (ROW-MAJOR for B):
+ * - B_data: [N, K/2] row-major
+ * - B_scale: [N, K/32] row-major
  */
 template<typename Config = GemvNvf4PureConfig>
 __global__ void gemv_nvf4_pure_opt_kernel(
@@ -237,10 +248,9 @@ __global__ void gemv_nvf4_pure_opt_kernel(
     }
     __syncthreads();
 
-    // B row pointers
+    // B row pointers (row-major: contiguous K for each N)
     const uint8_t* B_row = B_data + global_n * K_packed;
-    const int scale_n = global_n / Config::SCALE_BLOCK_SIZE;
-    const int scale_stride_k = K_scale_blocks;
+    const uint8_t* S_row = B_scale + global_n * K_scale_blocks;
 
     // 4 independent accumulators
     float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
@@ -251,10 +261,10 @@ __global__ void gemv_nvf4_pure_opt_kernel(
         const int scale_k = k_base / Config::SCALE_BLOCK_SIZE;
 
         float sA = decode_ue4m3_scale(smem_A_scale[scale_k]);
-        float sB = decode_ue4m3_scale(__ldg(&B_scale[scale_n * scale_stride_k + scale_k]));
+        float sB = decode_ue4m3_scale(__ldg(&S_row[scale_k]));
         float combined_scale = sA * sB;
 
-        // Load 8 packed bytes (16 NVF4 values)
+        // Load 8 packed bytes (16 NVF4 values) - contiguous access!
         uint64_t a8 = *reinterpret_cast<const uint64_t*>(&smem_A_data[packed_base]);
         uint64_t b8 = *reinterpret_cast<const uint64_t*>(&B_row[packed_base]);
 
@@ -312,7 +322,7 @@ __global__ void gemv_nvf4_pure_opt_kernel(
         const int scale_k = k / Config::SCALE_BLOCK_SIZE;
 
         float sA = decode_ue4m3_scale(smem_A_scale[scale_k]);
-        float sB = decode_ue4m3_scale(__ldg(&B_scale[scale_n * scale_stride_k + scale_k]));
+        float sB = decode_ue4m3_scale(__ldg(&S_row[scale_k]));
 
         uint8_t a_packed = smem_A_data[packed_idx];
         uint8_t b_packed = B_row[packed_idx];

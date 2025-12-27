@@ -124,6 +124,32 @@ cudaError_t pygpukit_quantize_bf16_to_nvf4(
 }
 
 /**
+ * Quantize BF16 weights to NVF4 format (row-major layout)
+ * For pure NVF4/NVF4 GEMV - better memory coalescing
+ *
+ * @param input      [K, N] BF16 row-major
+ * @param out_data   [N, K/2] packed NVF4 row-major (pre-allocated)
+ * @param out_scale  [N, K/32] scale factors row-major (pre-allocated)
+ * @param K          Inner dimension
+ * @param N          Output dimension
+ */
+cudaError_t pygpukit_quantize_bf16_to_nvf4_rowmajor(
+    const void* input,
+    void* out_data,
+    void* out_scale,
+    int K,
+    int N,
+    cudaStream_t stream
+) {
+    return pygpukit::ops::gemv_nvf4::quantize_bf16_to_nvf4_rowmajor(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<uint8_t*>(out_data),
+        static_cast<uint8_t*>(out_scale),
+        K, N, stream
+    );
+}
+
+/**
  * NVF4 GEMV: C[1,N] = A[1,K] @ B[K,N] (NVF4 quantized)
  *
  * @param A         [K] BF16 input vector

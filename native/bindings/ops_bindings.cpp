@@ -88,6 +88,11 @@ extern "C" {
         const void* input, void* out_data, void* out_scale,
         int K, int N, cudaStream_t stream
     );
+    // Row-major version for pure NVF4/NVF4 GEMV (coalesced memory access)
+    cudaError_t pygpukit_quantize_bf16_to_nvf4_rowmajor(
+        const void* input, void* out_data, void* out_scale,
+        int K, int N, cudaStream_t stream
+    );
     cudaError_t pygpukit_gemv_nvf4_bf16(
         const void* A, const void* B_data, const void* B_scale, void* C,
         int K, int N, float alpha, cudaStream_t stream
@@ -1828,7 +1833,32 @@ void init_ops_bindings(py::module_& m) {
             throw std::runtime_error("quantize_bf16_to_nvf4 failed: " + std::string(cudaGetErrorString(err)));
         }
     }, py::arg("input"), py::arg("out_data"), py::arg("out_scale"),
-       "Quantize BF16 weights to NVF4 format for SM120 GEMV");
+       "Quantize BF16 weights to NVF4 format (column-major output [K/2,N]) for SM120 W4A16 GEMV");
+
+    m.def("quantize_bf16_to_nvf4_rowmajor", [](const GPUArray& input, GPUArray& out_data, GPUArray& out_scale) {
+        // Quantize BF16 to NVF4 with row-major output layout for pure NVF4/NVF4 GEMV
+        // Input: [K, N] BF16 row-major
+        // Output: [N, K/2] data, [N, K/32] scale (row-major, contiguous K for coalesced access)
+        if (input.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("quantize_bf16_to_nvf4_rowmajor: input must be bfloat16");
+        }
+        if (input.ndim() != 2) {
+            throw std::runtime_error("quantize_bf16_to_nvf4_rowmajor: input must be 2D [K, N]");
+        }
+
+        int K = input.shape()[0];
+        int N = input.shape()[1];
+
+        cudaError_t err = pygpukit_quantize_bf16_to_nvf4_rowmajor(
+            input.data(), out_data.data(), out_scale.data(),
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("quantize_bf16_to_nvf4_rowmajor failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("input"), py::arg("out_data"), py::arg("out_scale"),
+       "Quantize BF16 weights to NVF4 format (row-major output [N,K/2]) for pure NVF4/NVF4 GEMV");
 
     m.def("gemv_nvf4_bf16", [](const GPUArray& A, const GPUArray& B_data, const GPUArray& B_scale, GPUArray& C, float alpha) {
         if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
@@ -2770,8 +2800,8 @@ void init_ops_bindings(py::module_& m) {
     ) {
         // A_data: [K/2] packed NVF4 (2 values per byte)
         // A_scale: [K/32] UE4M3 scales
-        // B_data: [K/2, N] packed NVF4 (column-major, from quantize_bf16_to_nvf4)
-        // B_scale: [K/32, N] UE4M3 scales
+        // B_data: [N, K/2] packed NVF4 (row-major, from quantize_bf16_to_nvf4_rowmajor)
+        // B_scale: [N, K/32] UE4M3 scales (row-major)
         // C: [N] BF16 output
         if (A_data.dtype() != DataType::UInt8) {
             throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data must be uint8 (packed NVF4)");
@@ -2789,13 +2819,13 @@ void init_ops_bindings(py::module_& m) {
             throw std::runtime_error("gemv_nvf4_nvf4_bf16: C must be bfloat16");
         }
         if (A_data.ndim() != 1 || B_data.ndim() != 2 || C.ndim() != 1) {
-            throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data[K/2], B_data[K/2,N], C[N] dimensions required");
+            throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data[K/2], B_data[N,K/2], C[N] dimensions required");
         }
 
-        // B_data is [K/2, N] from quantize_bf16_to_nvf4
-        int K_packed = static_cast<int>(B_data.shape()[0]);
+        // B_data is [N, K/2] row-major from quantize_bf16_to_nvf4_rowmajor
+        int N = static_cast<int>(B_data.shape()[0]);
+        int K_packed = static_cast<int>(B_data.shape()[1]);
         int K = K_packed * 2;
-        int N = static_cast<int>(B_data.shape()[1]);
 
         if (A_data.shape()[0] != static_cast<size_t>(K_packed)) {
             throw std::runtime_error("gemv_nvf4_nvf4_bf16: A_data K/2 dimension mismatch with B_data");
@@ -2817,7 +2847,7 @@ void init_ops_bindings(py::module_& m) {
             throw std::runtime_error("gemv_nvf4_nvf4_bf16 failed: " + std::string(cudaGetErrorString(err)));
         }
     }, py::arg("A_data"), py::arg("A_scale"), py::arg("B_data"), py::arg("B_scale"), py::arg("C"),
-       "Pure NVF4 GEMV: C[N](BF16) = A[K](NVF4) @ B[K,N](NVF4) with blockwise scaling");
+       "Pure NVF4 GEMV: C[N](BF16) = A[K](NVF4) @ B[K,N](NVF4) with row-major B for coalesced access");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

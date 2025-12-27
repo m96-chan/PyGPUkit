@@ -154,6 +154,17 @@ cudaError_t quantize_bf16_to_nvf4(
     cudaStream_t stream = nullptr
 );
 
+// Row-major version for pure NVF4/NVF4 GEMV (coalesced memory access)
+// Output: [N, K/2] data, [N, K/32] scale (row-major)
+cudaError_t quantize_bf16_to_nvf4_rowmajor(
+    const __nv_bfloat16* input,
+    uint8_t* output_data,
+    uint8_t* output_scale,
+    int K,
+    int N,
+    cudaStream_t stream = nullptr
+);
+
 // ============================================================================
 // High-Level API
 // ============================================================================
