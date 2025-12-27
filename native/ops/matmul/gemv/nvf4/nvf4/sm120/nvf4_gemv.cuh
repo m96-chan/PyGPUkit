@@ -98,10 +98,9 @@ __device__ __forceinline__ float dequant_nvf4(uint8_t nvf4_val) {
 // ============================================================================
 
 struct GemvNvf4PureConfig {
-    static constexpr int WARPS_PER_BLOCK = 8;
-    static constexpr int BLOCK_SIZE = WARPS_PER_BLOCK * 32;  // 256 threads
-    static constexpr int WARP_SIZE = 32;
-    static constexpr int SCALE_BLOCK_SIZE = 32;  // NVF4 uses 32-element blocks
+    static constexpr int BLOCK_SIZE = 256;      // Threads per block
+    static constexpr int TILE_N = 256;          // Output elements per block (1 thread = 1 output)
+    static constexpr int SCALE_BLOCK_SIZE = 32; // NVF4 uses 32-element blocks
 };
 
 // ============================================================================
@@ -109,10 +108,10 @@ struct GemvNvf4PureConfig {
 // ============================================================================
 
 /**
- * Pure NVF4 GEMV with warp-level reduction
+ * Pure NVF4 GEMV with 1 thread = 1 output pattern (like W4A16)
  *
- * Each warp handles ONE output element (N dimension)
- * 32 threads in warp cooperatively reduce over K dimension
+ * Each thread handles ONE output element, loops over all K
+ * Uses pre-scaled LUT in registers for efficient dequantization
  *
  * Memory layout (ROW-MAJOR for B - contiguous K for coalesced access):
  * - A_data: [K/2] packed NVF4 (2 values per byte)
@@ -120,8 +119,6 @@ struct GemvNvf4PureConfig {
  * - B_data: [N, K/2] packed NVF4 (row-major: contiguous K for each N)
  * - B_scale: [N, K/32] UE4M3 scale factors (row-major)
  * - C: [N] BF16 output vector
- *
- * This layout enables coalesced memory access when reading B.
  */
 template<typename Config = GemvNvf4PureConfig>
 __global__ void gemv_nvf4_pure_kernel(
@@ -133,81 +130,82 @@ __global__ void gemv_nvf4_pure_kernel(
     int K,
     int N
 ) {
-    const int warp_id = threadIdx.x / Config::WARP_SIZE;
-    const int lane_id = threadIdx.x % Config::WARP_SIZE;
-    const int global_n = blockIdx.x * Config::WARPS_PER_BLOCK + warp_id;
+    const int tid = threadIdx.x;
+    const int block_n = blockIdx.x * Config::TILE_N;
+    const int global_n = block_n + tid;
 
     if (global_n >= N) return;
-
-    // Shared memory layout:
-    // [0, K/2): A_data packed NVF4
-    // [K/2, K/2 + K/32): A_scale UE4M3
-    extern __shared__ uint8_t smem[];
-    uint8_t* smem_A_data = smem;
-    uint8_t* smem_A_scale = smem + (K / 2);
 
     const int K_packed = K / 2;
     const int K_scale_blocks = (K + Config::SCALE_BLOCK_SIZE - 1) / Config::SCALE_BLOCK_SIZE;
 
-    // Cooperative load of A_data into shared memory
-    for (int i = threadIdx.x; i < K_packed; i += Config::BLOCK_SIZE) {
-        smem_A_data[i] = A_data[i];
-    }
-    // Cooperative load of A_scale
-    for (int i = threadIdx.x; i < K_scale_blocks; i += Config::BLOCK_SIZE) {
-        smem_A_scale[i] = A_scale[i];
-    }
-    __syncthreads();
-
-    // B_data is [N, K/2] row-major: element at (n, k_packed) is at B_data[n * K_packed + k_packed]
-    // B_scale is [N, K/32] row-major: element at (n, scale_k) is at B_scale[n * K_scale_blocks + scale_k]
+    // B row pointers (row-major: contiguous K for each N)
     const uint8_t* B_row = B_data + global_n * K_packed;
-    const uint8_t* S_row = B_scale + global_n * K_scale_blocks;
+    const uint8_t* B_scale_row = B_scale + global_n * K_scale_blocks;
 
     float acc = 0.0f;
 
-    // Each lane handles elements with stride 32
-    // Process 2 values per byte (packed NVF4)
-    for (int k = lane_id * 2; k < K; k += Config::WARP_SIZE * 2) {
-        const int packed_idx = k / 2;
-        const int scale_k = k / Config::SCALE_BLOCK_SIZE;
+    // Process in scale blocks (32 elements = 16 packed bytes per block)
+    for (int sb = 0; sb < K_scale_blocks; ++sb) {
+        // Load scale factors for this block
+        float sA = decode_ue4m3_scale(A_scale[sb]);
+        float sB = decode_ue4m3_scale(__ldg(&B_scale_row[sb]));
+        float combined_scale = sA * sB;
 
-        // Load scales
-        float sA = decode_ue4m3_scale(smem_A_scale[scale_k]);
-        float sB = decode_ue4m3_scale(__ldg(&S_row[scale_k]));
+        // Pre-compute scaled LUT in registers (16 values)
+        // NVF4 values: 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0 (positive)
+        //              0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0 (negative)
+        float lut[16];
+        lut[0]  = 0.0f;
+        lut[1]  = 0.5f * combined_scale;
+        lut[2]  = 1.0f * combined_scale;
+        lut[3]  = 1.5f * combined_scale;
+        lut[4]  = 2.0f * combined_scale;
+        lut[5]  = 3.0f * combined_scale;
+        lut[6]  = 4.0f * combined_scale;
+        lut[7]  = 6.0f * combined_scale;
+        lut[8]  = 0.0f;
+        lut[9]  = -0.5f * combined_scale;
+        lut[10] = -1.0f * combined_scale;
+        lut[11] = -1.5f * combined_scale;
+        lut[12] = -2.0f * combined_scale;
+        lut[13] = -3.0f * combined_scale;
+        lut[14] = -4.0f * combined_scale;
+        lut[15] = -6.0f * combined_scale;
 
-        // Load packed bytes (row-major for B - contiguous access)
-        uint8_t a_packed = smem_A_data[packed_idx];
-        uint8_t b_packed = __ldg(&B_row[packed_idx]);
+        int k_start = sb * Config::SCALE_BLOCK_SIZE;
+        int k_end = min(k_start + Config::SCALE_BLOCK_SIZE, K);
+        int k_packed_start = k_start / 2;
+        int k_packed_end = k_end / 2;
 
-        // Dequantize and accumulate (2 values per byte)
-        float a0 = dequant_nvf4(a_packed & 0x0F) * sA;
-        float a1 = dequant_nvf4((a_packed >> 4) & 0x0F) * sA;
-        float b0 = dequant_nvf4(b_packed & 0x0F) * sB;
-        float b1 = dequant_nvf4((b_packed >> 4) & 0x0F) * sB;
+        // Process pairs (2 NVF4 values per byte)
+        #pragma unroll 4
+        for (int kp = k_packed_start; kp < k_packed_end; ++kp) {
+            // Load packed bytes
+            uint8_t a_packed = A_data[kp];
+            uint8_t b_packed = __ldg(&B_row[kp]);
 
-        acc = fmaf(a0, b0, acc);
-        acc = fmaf(a1, b1, acc);
+            // Dequantize using pre-scaled LUT (product of dequantized values)
+            // Result = (a_raw * sA) * (b_raw * sB) = a_raw * b_raw * combined_scale
+            float a0 = NVF4_LUT[a_packed & 0x0F];
+            float a1 = NVF4_LUT[(a_packed >> 4) & 0x0F];
+            float b0 = lut[b_packed & 0x0F];
+            float b1 = lut[(b_packed >> 4) & 0x0F];
+
+            // Accumulate: a * (b * combined_scale) = a * b * sA * sB
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+        }
     }
 
-    // Warp-level reduction using shuffle
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-    }
-
-    // Lane 0 writes the result
-    if (lane_id == 0) {
-        C[global_n] = __float2bfloat16(acc);
-    }
+    C[global_n] = __float2bfloat16(acc);
 }
 
 /**
- * Optimized variant: 64-bit loads (16 NVF4 values at once)
+ * Optimized variant with full unrolling per scale block (like W4A16)
  *
- * Memory layout (ROW-MAJOR for B):
- * - B_data: [N, K/2] row-major
- * - B_scale: [N, K/32] row-major
+ * 1 thread = 1 output, pre-scaled LUT in registers
+ * Unrolled inner loop for better instruction scheduling
  */
 template<typename Config = GemvNvf4PureConfig>
 __global__ void gemv_nvf4_pure_opt_kernel(
@@ -219,135 +217,141 @@ __global__ void gemv_nvf4_pure_opt_kernel(
     int K,
     int N
 ) {
-    const int warp_id = threadIdx.x / Config::WARP_SIZE;
-    const int lane_id = threadIdx.x % Config::WARP_SIZE;
-    const int global_n = blockIdx.x * Config::WARPS_PER_BLOCK + warp_id;
+    const int tid = threadIdx.x;
+    const int block_n = blockIdx.x * Config::TILE_N;
+    const int global_n = block_n + tid;
 
     if (global_n >= N) return;
 
-    // Shared memory
-    extern __shared__ uint8_t smem[];
-    uint8_t* smem_A_data = smem;
-    uint8_t* smem_A_scale = smem + (K / 2);
-
     const int K_packed = K / 2;
+    const int num_scale_blocks = K / Config::SCALE_BLOCK_SIZE;
+    const int K_remainder = K % Config::SCALE_BLOCK_SIZE;
     const int K_scale_blocks = (K + Config::SCALE_BLOCK_SIZE - 1) / Config::SCALE_BLOCK_SIZE;
-
-    // Vectorized load of A_data (64-bit = 8 bytes = 16 NVF4 values)
-    const int K_packed_aligned8 = K_packed & ~7;
-    for (int i = threadIdx.x * 8; i < K_packed_aligned8; i += Config::BLOCK_SIZE * 8) {
-        *reinterpret_cast<uint64_t*>(&smem_A_data[i]) =
-            *reinterpret_cast<const uint64_t*>(&A_data[i]);
-    }
-    for (int i = K_packed_aligned8 + threadIdx.x; i < K_packed; i += Config::BLOCK_SIZE) {
-        smem_A_data[i] = A_data[i];
-    }
-    // Load A_scale
-    for (int i = threadIdx.x; i < K_scale_blocks; i += Config::BLOCK_SIZE) {
-        smem_A_scale[i] = A_scale[i];
-    }
-    __syncthreads();
 
     // B row pointers (row-major: contiguous K for each N)
     const uint8_t* B_row = B_data + global_n * K_packed;
-    const uint8_t* S_row = B_scale + global_n * K_scale_blocks;
+    const uint8_t* B_scale_row = B_scale + global_n * K_scale_blocks;
 
-    // 4 independent accumulators
-    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    float acc = 0.0f;
 
-    // Main loop: each lane handles 16 NVF4 values (8 bytes) per iteration
-    for (int k_base = lane_id * 16; k_base < (K & ~15); k_base += Config::WARP_SIZE * 16) {
-        const int packed_base = k_base / 2;
-        const int scale_k = k_base / Config::SCALE_BLOCK_SIZE;
-
-        float sA = decode_ue4m3_scale(smem_A_scale[scale_k]);
-        float sB = decode_ue4m3_scale(__ldg(&S_row[scale_k]));
+    // Main loop: process complete scale blocks with full unroll
+    for (int sb = 0; sb < num_scale_blocks; ++sb) {
+        // Load scale factors for this block
+        float sA = decode_ue4m3_scale(A_scale[sb]);
+        float sB = decode_ue4m3_scale(__ldg(&B_scale_row[sb]));
         float combined_scale = sA * sB;
 
-        // Load 8 packed bytes (16 NVF4 values) - contiguous access!
-        uint64_t a8 = *reinterpret_cast<const uint64_t*>(&smem_A_data[packed_base]);
-        uint64_t b8 = *reinterpret_cast<const uint64_t*>(&B_row[packed_base]);
+        // Pre-compute scaled LUT in registers
+        float lut0  = 0.0f;
+        float lut1  = 0.5f * combined_scale;
+        float lut2  = 1.0f * combined_scale;
+        float lut3  = 1.5f * combined_scale;
+        float lut4  = 2.0f * combined_scale;
+        float lut5  = 3.0f * combined_scale;
+        float lut6  = 4.0f * combined_scale;
+        float lut7  = 6.0f * combined_scale;
+        float lut8  = 0.0f;
+        float lut9  = -0.5f * combined_scale;
+        float lut10 = -1.0f * combined_scale;
+        float lut11 = -1.5f * combined_scale;
+        float lut12 = -2.0f * combined_scale;
+        float lut13 = -3.0f * combined_scale;
+        float lut14 = -4.0f * combined_scale;
+        float lut15 = -6.0f * combined_scale;
 
-        // Unpack and accumulate (4 accumulators for 16 values)
+        float lut[16] = {lut0, lut1, lut2, lut3, lut4, lut5, lut6, lut7,
+                         lut8, lut9, lut10, lut11, lut12, lut13, lut14, lut15};
+
+        int k_packed_base = sb * (Config::SCALE_BLOCK_SIZE / 2);
+
+        // Process 32 elements (16 packed bytes) with full unroll
         #pragma unroll
-        for (int i = 0; i < 2; ++i) {
-            uint8_t a_byte = (a8 >> (i * 8)) & 0xFF;
-            uint8_t b_byte = (b8 >> (i * 8)) & 0xFF;
-            float a0 = dequant_nvf4(a_byte & 0x0F) * combined_scale;
-            float a1 = dequant_nvf4((a_byte >> 4) & 0x0F) * combined_scale;
-            float b0 = dequant_nvf4(b_byte & 0x0F);
-            float b1 = dequant_nvf4((b_byte >> 4) & 0x0F);
-            acc0 = fmaf(a0, b0, acc0);
-            acc0 = fmaf(a1, b1, acc0);
-        }
-        #pragma unroll
-        for (int i = 2; i < 4; ++i) {
-            uint8_t a_byte = (a8 >> (i * 8)) & 0xFF;
-            uint8_t b_byte = (b8 >> (i * 8)) & 0xFF;
-            float a0 = dequant_nvf4(a_byte & 0x0F) * combined_scale;
-            float a1 = dequant_nvf4((a_byte >> 4) & 0x0F) * combined_scale;
-            float b0 = dequant_nvf4(b_byte & 0x0F);
-            float b1 = dequant_nvf4((b_byte >> 4) & 0x0F);
-            acc1 = fmaf(a0, b0, acc1);
-            acc1 = fmaf(a1, b1, acc1);
-        }
-        #pragma unroll
-        for (int i = 4; i < 6; ++i) {
-            uint8_t a_byte = (a8 >> (i * 8)) & 0xFF;
-            uint8_t b_byte = (b8 >> (i * 8)) & 0xFF;
-            float a0 = dequant_nvf4(a_byte & 0x0F) * combined_scale;
-            float a1 = dequant_nvf4((a_byte >> 4) & 0x0F) * combined_scale;
-            float b0 = dequant_nvf4(b_byte & 0x0F);
-            float b1 = dequant_nvf4((b_byte >> 4) & 0x0F);
-            acc2 = fmaf(a0, b0, acc2);
-            acc2 = fmaf(a1, b1, acc2);
-        }
-        #pragma unroll
-        for (int i = 6; i < 8; ++i) {
-            uint8_t a_byte = (a8 >> (i * 8)) & 0xFF;
-            uint8_t b_byte = (b8 >> (i * 8)) & 0xFF;
-            float a0 = dequant_nvf4(a_byte & 0x0F) * combined_scale;
-            float a1 = dequant_nvf4((a_byte >> 4) & 0x0F) * combined_scale;
-            float b0 = dequant_nvf4(b_byte & 0x0F);
-            float b1 = dequant_nvf4((b_byte >> 4) & 0x0F);
-            acc3 = fmaf(a0, b0, acc3);
-            acc3 = fmaf(a1, b1, acc3);
+        for (int i = 0; i < 16; i += 4) {
+            // Load 4 packed bytes from A and B
+            uint8_t a0 = A_data[k_packed_base + i + 0];
+            uint8_t a1 = A_data[k_packed_base + i + 1];
+            uint8_t a2 = A_data[k_packed_base + i + 2];
+            uint8_t a3 = A_data[k_packed_base + i + 3];
+
+            uint8_t b0 = __ldg(&B_row[k_packed_base + i + 0]);
+            uint8_t b1 = __ldg(&B_row[k_packed_base + i + 1]);
+            uint8_t b2 = __ldg(&B_row[k_packed_base + i + 2]);
+            uint8_t b3 = __ldg(&B_row[k_packed_base + i + 3]);
+
+            // Dequantize A from constant LUT, B from pre-scaled register LUT
+            float da0_0 = NVF4_LUT[a0 & 0x0F];
+            float da0_1 = NVF4_LUT[(a0 >> 4) & 0x0F];
+            float da1_0 = NVF4_LUT[a1 & 0x0F];
+            float da1_1 = NVF4_LUT[(a1 >> 4) & 0x0F];
+            float da2_0 = NVF4_LUT[a2 & 0x0F];
+            float da2_1 = NVF4_LUT[(a2 >> 4) & 0x0F];
+            float da3_0 = NVF4_LUT[a3 & 0x0F];
+            float da3_1 = NVF4_LUT[(a3 >> 4) & 0x0F];
+
+            float db0_0 = lut[b0 & 0x0F];
+            float db0_1 = lut[(b0 >> 4) & 0x0F];
+            float db1_0 = lut[b1 & 0x0F];
+            float db1_1 = lut[(b1 >> 4) & 0x0F];
+            float db2_0 = lut[b2 & 0x0F];
+            float db2_1 = lut[(b2 >> 4) & 0x0F];
+            float db3_0 = lut[b3 & 0x0F];
+            float db3_1 = lut[(b3 >> 4) & 0x0F];
+
+            // Accumulate
+            acc = fmaf(da0_0, db0_0, acc);
+            acc = fmaf(da0_1, db0_1, acc);
+            acc = fmaf(da1_0, db1_0, acc);
+            acc = fmaf(da1_1, db1_1, acc);
+            acc = fmaf(da2_0, db2_0, acc);
+            acc = fmaf(da2_1, db2_1, acc);
+            acc = fmaf(da3_0, db3_0, acc);
+            acc = fmaf(da3_1, db3_1, acc);
         }
     }
 
-    // Handle remainder
-    const int K_aligned16 = K & ~15;
-    for (int k = K_aligned16 + lane_id * 2; k < K; k += Config::WARP_SIZE * 2) {
-        const int packed_idx = k / 2;
-        const int scale_k = k / Config::SCALE_BLOCK_SIZE;
+    // Handle remainder (if K is not multiple of SCALE_BLOCK_SIZE)
+    if (K_remainder > 0) {
+        int sb = num_scale_blocks;
+        float sA = decode_ue4m3_scale(A_scale[sb]);
+        float sB = decode_ue4m3_scale(__ldg(&B_scale_row[sb]));
+        float combined_scale = sA * sB;
 
-        float sA = decode_ue4m3_scale(smem_A_scale[scale_k]);
-        float sB = decode_ue4m3_scale(__ldg(&S_row[scale_k]));
+        float lut[16];
+        lut[0]  = 0.0f;
+        lut[1]  = 0.5f * combined_scale;
+        lut[2]  = 1.0f * combined_scale;
+        lut[3]  = 1.5f * combined_scale;
+        lut[4]  = 2.0f * combined_scale;
+        lut[5]  = 3.0f * combined_scale;
+        lut[6]  = 4.0f * combined_scale;
+        lut[7]  = 6.0f * combined_scale;
+        lut[8]  = 0.0f;
+        lut[9]  = -0.5f * combined_scale;
+        lut[10] = -1.0f * combined_scale;
+        lut[11] = -1.5f * combined_scale;
+        lut[12] = -2.0f * combined_scale;
+        lut[13] = -3.0f * combined_scale;
+        lut[14] = -4.0f * combined_scale;
+        lut[15] = -6.0f * combined_scale;
 
-        uint8_t a_packed = smem_A_data[packed_idx];
-        uint8_t b_packed = B_row[packed_idx];
+        int k_packed_base = sb * (Config::SCALE_BLOCK_SIZE / 2);
+        int k_packed_end = K_packed;
 
-        float a0 = dequant_nvf4(a_packed & 0x0F) * sA;
-        float a1 = dequant_nvf4((a_packed >> 4) & 0x0F) * sA;
-        float b0 = dequant_nvf4(b_packed & 0x0F) * sB;
-        float b1 = dequant_nvf4((b_packed >> 4) & 0x0F) * sB;
+        for (int kp = k_packed_base; kp < k_packed_end; ++kp) {
+            uint8_t a_packed = A_data[kp];
+            uint8_t b_packed = __ldg(&B_row[kp]);
 
-        acc0 = fmaf(a0, b0, acc0);
-        acc0 = fmaf(a1, b1, acc0);
+            float a0 = NVF4_LUT[a_packed & 0x0F];
+            float a1 = NVF4_LUT[(a_packed >> 4) & 0x0F];
+            float b0 = lut[b_packed & 0x0F];
+            float b1 = lut[(b_packed >> 4) & 0x0F];
+
+            acc = fmaf(a0, b0, acc);
+            acc = fmaf(a1, b1, acc);
+        }
     }
 
-    // Combine accumulators
-    float acc = acc0 + acc1 + acc2 + acc3;
-
-    // Warp-level reduction
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-    }
-
-    if (lane_id == 0) {
-        C[global_n] = __float2bfloat16(acc);
-    }
+    C[global_n] = __float2bfloat16(acc);
 }
 
 // ============================================================================

@@ -25,17 +25,18 @@ cudaError_t launch_gemv_nvf4_pure(
     using Config = GemvNvf4PureConfig;
 
     dim3 block(Config::BLOCK_SIZE);  // 256 threads
-    dim3 grid((N + Config::WARPS_PER_BLOCK - 1) / Config::WARPS_PER_BLOCK);
+    dim3 grid((N + Config::TILE_N - 1) / Config::TILE_N);  // 1 thread = 1 output
 
-    // Shared memory: A_data (K/2 bytes) + A_scale (K/32 bytes)
-    const int K_packed = K / 2;
-    const int K_scale_blocks = (K + Config::SCALE_BLOCK_SIZE - 1) / Config::SCALE_BLOCK_SIZE;
-    size_t smem_size = K_packed + K_scale_blocks;
-
-    // Use basic kernel (column-major B layout doesn't allow vectorized B loads)
-    gemv_nvf4_pure_kernel<Config><<<grid, block, smem_size, stream>>>(
-        A_data, A_scale, B_data, B_scale, C, K, N
-    );
+    // Use optimized kernel for aligned K, basic kernel otherwise
+    if (K % Config::SCALE_BLOCK_SIZE == 0 && K >= Config::SCALE_BLOCK_SIZE) {
+        gemv_nvf4_pure_opt_kernel<Config><<<grid, block, 0, stream>>>(
+            A_data, A_scale, B_data, B_scale, C, K, N
+        );
+    } else {
+        gemv_nvf4_pure_kernel<Config><<<grid, block, 0, stream>>>(
+            A_data, A_scale, B_data, B_scale, C, K, N
+        );
+    }
 
     return cudaGetLastError();
 }
@@ -55,8 +56,8 @@ extern "C" {
  *
  * @param A_data   [K/2] packed NVF4 activation (2 values per byte)
  * @param A_scale  [K/32] UE4M3 scales for A (blockwise)
- * @param B_data   [K/2, N] packed NVF4 weight matrix (column-major)
- * @param B_scale  [K/32, N] UE4M3 scales for B (blockwise)
+ * @param B_data   [N, K/2] packed NVF4 weight matrix (row-major, use quantize_bf16_to_nvf4_rowmajor)
+ * @param B_scale  [N, K/32] UE4M3 scales for B (row-major)
  * @param C        [N] BF16 output vector
  * @param K        Inner dimension (must be even)
  * @param N        Output dimension
