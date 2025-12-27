@@ -195,7 +195,6 @@ class DecodeM1Graph(DecodeStrategy):
         Input: attn_out in buffers (from SDPA)
         Output: Updated hidden in buffers
         """
-        from pygpukit.llm.layers import MoELayer
 
         attn = block.attn
         mlp = block.mlp
@@ -290,7 +289,10 @@ class DecodeM1Graph(DecodeStrategy):
 
         # Allocate decode buffers (with MoE buffers if needed)
         self._decode_buffers = DecodeBuffers.allocate(
-            model.config, dtype=dtype, use_qk_norm=use_qk_norm, vocab_size=vocab_size,
+            model.config,
+            dtype=dtype,
+            use_qk_norm=use_qk_norm,
+            vocab_size=vocab_size,
             moe_config=moe_config,
         )
         buffers = self._decode_buffers

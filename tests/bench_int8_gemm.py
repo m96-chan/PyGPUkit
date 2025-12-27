@@ -2,8 +2,9 @@
 """Benchmark Int8 GEMM via FP8 approximation (SM120)."""
 
 import time
+
 import numpy as np
-import pygpukit as gk
+
 from pygpukit.core import from_numpy
 from pygpukit.core.backend import get_native_module
 
@@ -66,7 +67,9 @@ def bench_int8_gemm():
         try:
             # Warmup
             for _ in range(warmup):
-                native.int8_gemm_int32_sm120(A._get_native(), B._get_native(), D_int32._get_native())
+                native.int8_gemm_int32_sm120(
+                    A._get_native(), B._get_native(), D_int32._get_native()
+                )
             native.device_synchronize()
 
             # Benchmark
@@ -74,7 +77,9 @@ def bench_int8_gemm():
             for _ in range(iterations):
                 native.device_synchronize()
                 start = time.perf_counter()
-                native.int8_gemm_int32_sm120(A._get_native(), B._get_native(), D_int32._get_native())
+                native.int8_gemm_int32_sm120(
+                    A._get_native(), B._get_native(), D_int32._get_native()
+                )
                 native.device_synchronize()
                 end = time.perf_counter()
                 times_int32.append((end - start) * 1e6)
@@ -122,7 +127,9 @@ def bench_int8_gemm():
         is_correct = rel_error < 0.15  # 15% tolerance for FP8 approximation
 
         status = "PASS" if is_correct else f"FAIL({rel_error:.1%})"
-        print(f"{M:>6} {K:>6} {N:>6} | {tflops_int32:>10.1f} T  | {tflops_int8:>10.1f} T  | {status:>8}")
+        print(
+            f"{M:>6} {K:>6} {N:>6} | {tflops_int32:>10.1f} T  | {tflops_int8:>10.1f} T  | {status:>8}"
+        )
 
     print()
     print("T = TFLOPS (effective Int8 ops)")

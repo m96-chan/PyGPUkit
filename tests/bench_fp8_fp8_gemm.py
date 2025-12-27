@@ -2,8 +2,9 @@
 """Quick benchmark for CUTLASS FP8×FP8 GEMM."""
 
 import time
+
 import numpy as np
-import pygpukit as gk
+
 from pygpukit.core import from_numpy
 from pygpukit.core.backend import get_native_module
 
@@ -52,9 +53,7 @@ def bench_fp8_fp8_gemm():
             # Warmup
             for _ in range(warmup):
                 native.gemm_fp8_fp8_sm120(
-                    A_fp8._get_native(),
-                    B_fp8._get_native(),
-                    C_fp8._get_native()
+                    A_fp8._get_native(), B_fp8._get_native(), C_fp8._get_native()
                 )
             native.device_synchronize()
 
@@ -64,9 +63,7 @@ def bench_fp8_fp8_gemm():
                 native.device_synchronize()
                 start = time.perf_counter()
                 native.gemm_fp8_fp8_sm120(
-                    A_fp8._get_native(),
-                    B_fp8._get_native(),
-                    C_fp8._get_native()
+                    A_fp8._get_native(), B_fp8._get_native(), C_fp8._get_native()
                 )
                 native.device_synchronize()
                 end = time.perf_counter()

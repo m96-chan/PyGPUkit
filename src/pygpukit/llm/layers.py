@@ -29,7 +29,6 @@ from pygpukit.ops.basic import (
     gelu,
     gemv_bf16,
     gemv_fp8_bf16,
-    gemv_fp8_bf16_batched,
     kv_cache_prefill_gqa,
     kv_cache_update_gqa,
     layernorm,
@@ -46,6 +45,7 @@ from pygpukit.ops.basic import (
     split_qkv_batch,
     transpose,
     transpose_3d_021,
+    w8a16_gemm_sm120,
 )
 
 if TYPE_CHECKING:
@@ -276,8 +276,9 @@ class LinearFP8:
                 y_1d = gemv_fp8_bf16(x_1d, self.weight_fp8, self.scale_inv)
                 y = y_1d.view((1, self.out_features))
         else:
-            # M>1 path: Use batched FP8 GEMV kernel with B[N,K] layout (no transpose)
-            y = gemv_fp8_bf16_batched(x, self.weight_fp8, self.scale_inv, out=out)
+            # M>1 path: Use W8A16 GEMM with FP8 TensorCore (requires transposed weights)
+            self._ensure_transposed_fp8()
+            y = w8a16_gemm_sm120(x, self._weight_fp8_t, self._scale_inv_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)
