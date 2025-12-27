@@ -29,6 +29,7 @@ from pygpukit.ops.basic import (
     gelu,
     gemv_bf16,
     gemv_fp8_bf16,
+    gemv_fp8_bf16_batched,
     kv_cache_prefill_gqa,
     kv_cache_update_gqa,
     layernorm,
@@ -45,7 +46,6 @@ from pygpukit.ops.basic import (
     split_qkv_batch,
     transpose,
     transpose_3d_021,
-    w8a16_gemm_sm120,
 )
 
 if TYPE_CHECKING:
@@ -255,7 +255,7 @@ class LinearFP8:
         """Forward pass with online dequantization.
 
         For M=1 (single token), uses FP8 GEMV kernel with online dequantization.
-        For M>1, uses W8A16 GEMM kernel (FP8 weight x BF16 activation).
+        For M>1, uses batched FP8 GEMV kernel.
         """
         if x.ndim != 2:
             raise ValueError(f"input must be 2D [batch, in_features], got {x.ndim}D")
@@ -264,7 +264,7 @@ class LinearFP8:
 
         M = x.shape[0]
 
-        # Ensure transposed FP8 weight is ready (used by both GEMV and GEMM)
+        # Ensure transposed FP8 weight is ready
         self._ensure_transposed_fp8()
 
         if M == 1 and self._use_gemv:
@@ -279,9 +279,9 @@ class LinearFP8:
             else:
                 y = y_1d.view((1, self.out_features))
         else:
-            # M>1 path: Use W8A16 GEMM kernel (SM120)
-            # GEMM: x[M,K] @ W^T[K,N] = y[M,N]
-            y = w8a16_gemm_sm120(x, self._weight_fp8_t, self._scale_inv_t, out=out)
+            # M>1 path: Use batched FP8 GEMV kernel
+            # Batched GEMV: x[M,K] @ W^T[K,N] = y[M,N]
+            y = gemv_fp8_bf16_batched(x, self._weight_fp8_t, self._scale_inv_t, out=out)
 
         if self.bias is not None:
             bias_add_inplace(y, self.bias)
@@ -1043,6 +1043,91 @@ class MoELayer:
             )
             self.experts.append(expert)
 
+        # Check if all experts use FP8 weights for grouped GEMM optimization
+        self._use_grouped_gemm = False
+        self._stacked_gate_weight: GPUArray | None = None
+        self._stacked_gate_scale: GPUArray | None = None
+        self._stacked_up_weight: GPUArray | None = None
+        self._stacked_up_scale: GPUArray | None = None
+        self._stacked_down_weight: GPUArray | None = None
+        self._stacked_down_scale: GPUArray | None = None
+
+        # Check if first expert uses FP8
+        # TODO: grouped GEMM is not working correctly yet, disabled for now
+        # if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
+        #     self._stack_fp8_weights()
+
+    # Profiling flag (set to True to enable timing)
+    _profile: bool = True
+    _profile_count: int = 0
+
+    def _stack_fp8_weights(self) -> None:
+        """Stack FP8 expert weights for grouped GEMM optimization."""
+        # Collect weights from all experts
+        gate_weights = []
+        gate_scales = []
+        up_weights = []
+        up_scales = []
+        down_weights = []
+        down_scales = []
+
+        for expert in self.experts:
+            if not isinstance(expert.gate_proj, LinearFP8):
+                return  # Not all experts are FP8, abort
+
+            gate_weights.append(expert.gate_proj.weight_fp8)
+            gate_scales.append(expert.gate_proj.scale_inv)
+            up_weights.append(expert.up_proj.weight_fp8)
+            up_scales.append(expert.up_proj.scale_inv)
+            down_weights.append(expert.down_proj.weight_fp8)
+            down_scales.append(expert.down_proj.scale_inv)
+
+        # Stack weights: [num_experts, N, K]
+        # gate_proj: [intermediate_size, hidden_size] -> stacked [num_experts, intermediate_size, hidden_size]
+        # Each weight is [N, K], stack along new axis 0
+
+        def stack_arrays_fast(arrays: list[GPUArray]) -> GPUArray:
+            """Stack arrays along new axis 0 using single allocation + cudaMemcpy."""
+            from pygpukit.core.backend import get_native_module
+
+            native = get_native_module()
+
+            # Get shape info from first array
+            first = arrays[0]
+            num_arrays = len(arrays)
+            inner_shape = first.shape  # [N, K] or [N/128, K/128]
+
+            # Calculate strides (nbytes is property, not method)
+            bytes_per_array = first._get_native().nbytes
+
+            # Allocate output: [num_arrays, *inner_shape]
+            out_shape = [num_arrays] + list(inner_shape)
+            out_native = native.empty(out_shape, first._get_native().dtype)
+            out = GPUArray._wrap_native(out_native)
+
+            # Copy each array to its slice using cuMemcpy
+            for i, arr in enumerate(arrays):
+                offset_bytes = i * bytes_per_array
+                native.memcpy_device_to_device_offset(
+                    arr._get_native(),
+                    out._get_native(),
+                    0,  # src offset
+                    offset_bytes,  # dst offset
+                    bytes_per_array,
+                )
+
+            return out
+
+        self._stacked_gate_weight = stack_arrays_fast(gate_weights)
+        self._stacked_gate_scale = stack_arrays_fast(gate_scales)
+        self._stacked_up_weight = stack_arrays_fast(up_weights)
+        self._stacked_up_scale = stack_arrays_fast(up_scales)
+        self._stacked_down_weight = stack_arrays_fast(down_weights)
+        self._stacked_down_scale = stack_arrays_fast(down_scales)
+
+        self._use_grouped_gemm = True
+        print(f"[MoE] Stacked {self.num_experts} expert weights for grouped GEMM")
+
     def __call__(self, x: GPUArray) -> GPUArray:
         """Forward pass through MoE layer.
 
@@ -1052,9 +1137,16 @@ class MoELayer:
         Returns:
             Output tensor with same shape as input
         """
+        import time
+
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
+
+        profile = self._profile and MoELayer._profile_count < 3
+        if profile:
+            native.device_synchronize()
+            t0 = time.perf_counter()
 
         original_shape = x.shape
         # Flatten to [num_tokens, hidden_size]
@@ -1069,6 +1161,9 @@ class MoELayer:
 
         # Step 1: Compute router logits
         router_logits = self.gate(x)  # [num_tokens, num_experts]
+        if profile:
+            native.device_synchronize()
+            t1 = time.perf_counter()
 
         # Step 2: Top-K selection
         router_weights = zeros((num_tokens, k), dtype=x.dtype)
@@ -1106,36 +1201,71 @@ class MoELayer:
             gathered._get_native(),
             k,
         )
+        if profile:
+            native.device_synchronize()
+            t2 = time.perf_counter()
 
-        # Step 6: Run experts (loop for now, grouped_gemm for future)
-        # Get expert counts on CPU for loop
-        expert_counts_cpu = expert_counts.to_numpy()
-        expert_offsets_cpu = expert_offsets.to_numpy()
+        # Step 6: Run experts
+        if self._use_grouped_gemm:
+            # Use grouped GEMM for all experts in single kernel launches
+            from pygpukit.ops.matmul import grouped_gemm_fp8_bf16
 
-        # Collect expert outputs and their positions
-        expert_output_list: list[tuple[int, int, GPUArray]] = []
-        for e in range(self.num_experts):
-            start = int(expert_offsets_cpu[e])
-            count = int(expert_counts_cpu[e])
-            if count == 0:
-                continue
+            # gate_proj: gathered[M_total, hidden] @ gate_weight[experts, inter, hidden]^T
+            gate_out = grouped_gemm_fp8_bf16(
+                gathered,
+                self._stacked_gate_weight,
+                self._stacked_gate_scale,
+                expert_offsets,
+            )
 
-            # Slice input for this expert using indexing
-            end = start + count
-            expert_input = gathered[start:end]  # [count, hidden]
+            # up_proj: gathered[M_total, hidden] @ up_weight[experts, inter, hidden]^T
+            up_out = grouped_gemm_fp8_bf16(
+                gathered,
+                self._stacked_up_weight,
+                self._stacked_up_scale,
+                expert_offsets,
+            )
 
-            # Run expert FFN
-            expert_out = self.experts[e](expert_input)
-            expert_output_list.append((start, count, expert_out))
+            # SiLU(gate) * up
+            intermediate = mul(silu(gate_out), up_out)
 
-        # Concatenate all expert outputs in order and copy to expert_outputs
-        # Build numpy array on CPU, then upload once
-        import numpy as np
+            # down_proj: intermediate[M_total, inter] @ down_weight[experts, hidden, inter]^T
+            expert_outputs = grouped_gemm_fp8_bf16(
+                intermediate,
+                self._stacked_down_weight,
+                self._stacked_down_scale,
+                expert_offsets,
+            )
+        else:
+            # Fallback: Run experts sequentially
+            # Get expert counts on CPU for loop
+            expert_counts_cpu = expert_counts.to_numpy()
+            expert_offsets_cpu = expert_offsets.to_numpy()
 
-        expert_outputs_np = np.zeros((num_tokens * k, hidden), dtype=np.uint16)
-        for start, count, expert_out in expert_output_list:
-            expert_outputs_np[start : start + count] = expert_out.to_numpy()
-        expert_outputs = from_numpy(expert_outputs_np)
+            # Build list of (expert_id, start, count) for non-empty experts
+            expert_tasks = []
+            for e in range(self.num_experts):
+                start = int(expert_offsets_cpu[e])
+                count = int(expert_counts_cpu[e])
+                if count > 0:
+                    expert_tasks.append((e, start, count))
+
+            def run_expert(task: tuple) -> GPUArray:
+                e, start, count = task
+                expert_input = gathered[start : start + count]
+                return self.experts[e](expert_input)
+
+            # Run experts sequentially
+            expert_output_list = [run_expert(task) for task in expert_tasks]
+
+            # Concatenate all expert outputs on GPU
+            from functools import reduce
+
+            expert_outputs = reduce(concat_axis0, expert_output_list)
+
+        if profile:
+            native.device_synchronize()
+            t3 = time.perf_counter()
 
         # Step 7: Scatter and combine outputs
         output = zeros((num_tokens, hidden), dtype=x.dtype)
@@ -1146,6 +1276,13 @@ class MoELayer:
             output._get_native(),
             k,
         )
+        if profile:
+            native.device_synchronize()
+            t4 = time.perf_counter()
+            MoELayer._profile_count += 1
+            print(
+                f"[MoE Profile] router={t1 - t0:.3f}s, routing={t2 - t1:.3f}s, experts={t3 - t2:.3f}s, scatter={t4 - t3:.3f}s"
+            )
 
         # Reshape back
         if len(original_shape) == 3:

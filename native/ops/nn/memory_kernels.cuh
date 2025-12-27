@@ -204,6 +204,28 @@ __global__ void concat_axis0_bf16_kernel(
     }
 }
 
+// UInt8 concat along axis 0 (for FP8 weights)
+__global__ void concat_axis0_u8_kernel(
+    const uint8_t* __restrict__ src1,
+    const uint8_t* __restrict__ src2,
+    uint8_t* __restrict__ dst,
+    size_t dim0_1,
+    size_t dim0_2,
+    size_t stride
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total_src1 = dim0_1 * stride;
+    size_t total = (dim0_1 + dim0_2) * stride;
+
+    if (idx < total) {
+        if (idx < total_src1) {
+            dst[idx] = src1[idx];
+        } else {
+            dst[idx] = src2[idx - total_src1];
+        }
+    }
+}
+
 // Repeat tensor along axis 1 (for GQA expansion)
 // src: [dim0, dim1, dim2] -> dst: [dim0, dim1 * repeats, dim2]
 // Each element in dim1 is repeated 'repeats' times

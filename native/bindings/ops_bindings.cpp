@@ -109,6 +109,13 @@ extern "C" {
         const void* A, const void* B_fp8, const void* B_scale, void* C,
         int M, int N, int K, int scale_stride_n, cudaStream_t stream
     );
+    // Grouped GEMM for MoE: FP8 weights x BF16 activations -> BF16 output
+    cudaError_t pygpukit_grouped_gemm_init_lut();
+    cudaError_t pygpukit_grouped_gemm_fp8_bf16(
+        const void* A, const void* B_stacked, const void* B_scale,
+        void* C, const int* expert_offsets,
+        int M_total, int N, int K, int num_experts, cudaStream_t stream
+    );
 }
 
 // MoE (Mixture of Experts) functions - defined in ops/moe/moe.cu
@@ -1883,6 +1890,73 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
        "W8A16 GEMM: C[M,N] = A[M,K] @ B_fp8[K,N] (FP8 weight x BF16 activation with block-wise scale)");
+
+    // ========================================================================
+    // Grouped GEMM for MoE (FP8 weights x BF16 activations)
+    // ========================================================================
+
+    m.def("grouped_gemm_init_lut", []() {
+        cudaError_t err = pygpukit_grouped_gemm_init_lut();
+        if (err != cudaSuccess) {
+            throw std::runtime_error("grouped_gemm_init_lut failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, "Initialize FP8->BF16 LUT for grouped GEMM");
+
+    m.def("grouped_gemm_fp8_bf16", [](
+        const GPUArray& A,           // [M_total, K] BF16
+        const GPUArray& B_stacked,   // [num_experts, N, K] FP8
+        const GPUArray& B_scale,     // [num_experts, N/128, K/128] BF16
+        GPUArray& C,                 // [M_total, N] BF16
+        const GPUArray& expert_offsets  // [num_experts + 1] int32
+    ) {
+        // Validate dtypes
+        if (A.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: A must be bfloat16");
+        }
+        if (B_stacked.dtype() != DataType::UInt8) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: B_stacked must be uint8 (FP8)");
+        }
+        if (B_scale.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: B_scale must be bfloat16");
+        }
+        if (C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: C must be bfloat16");
+        }
+        if (expert_offsets.dtype() != DataType::Int32) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: expert_offsets must be int32");
+        }
+
+        // Validate dimensions
+        if (A.ndim() != 2 || B_stacked.ndim() != 3 || C.ndim() != 2) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: invalid dimensions");
+        }
+
+        int M_total = A.shape()[0];
+        int K = A.shape()[1];
+        int num_experts = B_stacked.shape()[0];
+        int N = B_stacked.shape()[1];
+
+        if (B_stacked.shape()[2] != static_cast<size_t>(K)) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(M_total) || C.shape()[1] != static_cast<size_t>(N)) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: output shape mismatch");
+        }
+        if (expert_offsets.shape()[0] != static_cast<size_t>(num_experts + 1)) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16: expert_offsets size mismatch");
+        }
+
+        cudaError_t err = pygpukit_grouped_gemm_fp8_bf16(
+            A.data(), B_stacked.data(), B_scale.data(), C.data(),
+            reinterpret_cast<const int*>(expert_offsets.data()),
+            M_total, N, K, num_experts, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("grouped_gemm_fp8_bf16 failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_stacked"), py::arg("B_scale"), py::arg("C"), py::arg("expert_offsets"),
+       "Grouped GEMM for MoE: C[M_total,N] = A[M_total,K] @ B_stacked[experts,N,K] with expert_offsets routing");
 
     // ========================================================================
     // FP8 GEMM auto-dispatch (selects best available backend)

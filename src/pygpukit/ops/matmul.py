@@ -1739,6 +1739,131 @@ def w8a16_gemm_sm120(
         raise NotImplementedError("W8A16 GEMM requires native GPU backend with SM120")
 
 
+# Track if grouped GEMM LUT is initialized
+_grouped_gemm_lut_initialized = False
+
+
+def grouped_gemm_init_lut() -> None:
+    """Initialize FP8->BF16 LUT for grouped GEMM.
+
+    This must be called once before using grouped_gemm_fp8_bf16.
+    """
+    global _grouped_gemm_lut_initialized
+    if _grouped_gemm_lut_initialized:
+        return
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        native.grouped_gemm_init_lut()
+        _grouped_gemm_lut_initialized = True
+    else:
+        raise NotImplementedError("Grouped GEMM requires native GPU backend")
+
+
+def grouped_gemm_fp8_bf16(
+    a: GPUArray,
+    b_stacked: GPUArray,
+    b_scale: GPUArray,
+    expert_offsets: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Grouped GEMM for MoE: C = A @ B_stacked with expert routing.
+
+    Each expert has different M (number of tokens), same N and K.
+    Tokens are sorted by expert, and expert_offsets indicates where
+    each expert's tokens start.
+
+    Args:
+        a: Input tokens [M_total, K], BF16, sorted by expert.
+        b_stacked: Stacked expert weights [num_experts, N, K], FP8 (uint8).
+        b_scale: Block-wise scales [num_experts, N/128, K/128], BF16.
+        expert_offsets: Cumulative token counts [num_experts + 1], int32.
+        out: Optional output tensor [M_total, N], BF16.
+
+    Returns:
+        Output tensor [M_total, N], BF16.
+    """
+    from pygpukit.core.dtypes import bfloat16, int32, uint8
+
+    if a.ndim != 2:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires 2D input, got {a.ndim}D")
+
+    if b_stacked.ndim != 3:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires 3D weight, got {b_stacked.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires bfloat16 input, got {a.dtype}")
+
+    if b_stacked.dtype != uint8:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16 requires uint8 (FP8) weights, got {b_stacked.dtype}"
+        )
+
+    if b_scale.dtype != bfloat16:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires bfloat16 scale, got {b_scale.dtype}")
+
+    if expert_offsets.dtype != int32:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16 requires int32 expert_offsets, got {expert_offsets.dtype}"
+        )
+
+    M_total = a.shape[0]
+    K = a.shape[1]
+    num_experts = b_stacked.shape[0]
+    N = b_stacked.shape[1]
+
+    if b_stacked.shape[2] != K:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16: K mismatch A[{M_total},{K}] vs B[{num_experts},{N},{b_stacked.shape[2]}]"
+        )
+
+    if expert_offsets.shape[0] != num_experts + 1:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16: expert_offsets size {expert_offsets.shape[0]} != num_experts+1 ({num_experts + 1})"
+        )
+
+    # Validate output
+    if out is not None:
+        if out.shape != (M_total, N):
+            raise ValueError(f"out shape {out.shape} does not match expected ({M_total}, {N})")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    # Initialize LUT if not already done
+    grouped_gemm_init_lut()
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_stacked_native = b_stacked._get_native()
+        b_scale_native = b_scale._get_native()
+        expert_offsets_native = expert_offsets._get_native()
+
+        if out is None:
+            out_native = native.empty([M_total, N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.grouped_gemm_fp8_bf16(
+            a_native, b_stacked_native, b_scale_native, out_native, expert_offsets_native
+        )
+
+        return out
+    else:
+        raise NotImplementedError("Grouped GEMM requires native GPU backend")
+
+
 def fp8_get_sizes(K: int, N: int) -> tuple[int, int, int]:
     """Get scale tensor dimensions for FP8 block quantization.
 

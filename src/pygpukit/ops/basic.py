@@ -63,6 +63,9 @@ from pygpukit.ops.matmul import (
     gemv_fp8_bf16_batched,
     gemv_nvf4_available,
     gemv_nvf4_bf16,
+    # Grouped GEMM for MoE
+    grouped_gemm_fp8_bf16,
+    grouped_gemm_init_lut,
     linear_bias_gelu,
     matmul,
     matmul_fp8,
@@ -206,6 +209,9 @@ __all__ = [
     "gemv_nvf4_available",
     # W8A16 GEMM
     "w8a16_gemm_sm120",
+    # Grouped GEMM for MoE
+    "grouped_gemm_fp8_bf16",
+    "grouped_gemm_init_lut",
     "fp8_init_lut",
     "fp8_get_sizes",
     "nvf4_get_sizes",
