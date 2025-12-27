@@ -23,12 +23,14 @@ pub enum PyDtype {
     Float16 = 1,
     BFloat16 = 2,
     Float64 = 3,
-    Int32 = 4,
-    Int64 = 5,
-    Int16 = 6,
-    Int8 = 7,
-    UInt8 = 8,
-    Bool = 9,
+    Float8E4M3 = 4,  // FP8 E4M3
+    Float8E5M2 = 5,  // FP8 E5M2
+    Int32 = 6,
+    Int64 = 7,
+    Int16 = 8,
+    Int8 = 9,
+    UInt8 = 10,
+    Bool = 11,
 }
 
 impl From<Dtype> for PyDtype {
@@ -38,6 +40,8 @@ impl From<Dtype> for PyDtype {
             Dtype::Float16 => PyDtype::Float16,
             Dtype::BFloat16 => PyDtype::BFloat16,
             Dtype::Float64 => PyDtype::Float64,
+            Dtype::Float8E4M3 => PyDtype::Float8E4M3,
+            Dtype::Float8E5M2 => PyDtype::Float8E5M2,
             Dtype::Int32 => PyDtype::Int32,
             Dtype::Int64 => PyDtype::Int64,
             Dtype::Int16 => PyDtype::Int16,
@@ -57,7 +61,7 @@ impl PyDtype {
             PyDtype::Float64 | PyDtype::Int64 => 8,
             PyDtype::Float32 | PyDtype::Int32 => 4,
             PyDtype::Float16 | PyDtype::BFloat16 | PyDtype::Int16 => 2,
-            PyDtype::Int8 | PyDtype::UInt8 | PyDtype::Bool => 1,
+            PyDtype::Int8 | PyDtype::UInt8 | PyDtype::Bool | PyDtype::Float8E4M3 | PyDtype::Float8E5M2 => 1,
         }
     }
 
@@ -67,6 +71,8 @@ impl PyDtype {
             PyDtype::Float16 => "Dtype.Float16",
             PyDtype::BFloat16 => "Dtype.BFloat16",
             PyDtype::Float64 => "Dtype.Float64",
+            PyDtype::Float8E4M3 => "Dtype.Float8E4M3",
+            PyDtype::Float8E5M2 => "Dtype.Float8E5M2",
             PyDtype::Int32 => "Dtype.Int32",
             PyDtype::Int64 => "Dtype.Int64",
             PyDtype::Int16 => "Dtype.Int16",

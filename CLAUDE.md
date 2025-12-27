@@ -52,6 +52,7 @@ PyGPUkit/
 │   ├── core/               # C++ (CUDA Runtime/Driver API)
 │   ├── jit/                # C++ (NVRTC)
 │   ├── ops/                # C++ (CUDA kernels)
+│   │   └── matmul/         # MatMul kernels (see below)
 │   └── bindings/           # pybind11
 ├── rust/
 │   ├── pygpukit-core/      # Pure Rust GPU runtime
@@ -63,6 +64,40 @@ PyGPUkit/
 ├── examples/
 ├── benchmarks/             # Performance benchmarks
 └── tests/
+```
+
+### MatMul Kernel Structure
+
+```
+native/ops/matmul/
+├── common/                          # Shared utilities
+│   └── aligned_copy_sm120.cuh
+├── gemm/                            # GEMM kernels (M > 1)
+│   └── {input_dtype}/{output_dtype}/{arch}/{compute}_{suffix}.{cu,cuh}
+├── gemv/                            # GEMV kernels (M = 1)
+│   └── {input_dtype}/{output_dtype}/{arch}/{compute}_{suffix}.{cu,cuh}
+├── cublaslt.cuh                     # cuBLASLt wrapper
+├── matmul.cu                        # Main dispatcher
+└── matmul_cutlass.cu                # CUTLASS dispatcher
+```
+
+**Path Convention:** `{gemm|gemv}/{input_dtype}/{output_dtype}/{arch}/{compute}_{suffix}.cu`
+
+| Component | Values | Examples |
+|-----------|--------|----------|
+| `input_dtype` | `f32`, `bf16`, `fp8`, `nvf4` | Input tensor dtype |
+| `output_dtype` | `f32`, `bf16`, `fp8` | Output tensor dtype |
+| `arch` | `generic`, `sm80`, `sm90`, `sm100`, `sm120` | Target architecture |
+| `compute` | `naive`, `wmma`, `mma`, `cutlass` | Compute method |
+| `suffix` | `blockwise`, `kernels`, etc. | Variant identifier |
+
+**Examples:**
+```
+gemm/bf16/bf16/sm120/bf16_cutlass.cuh    # BF16->BF16 GEMM, SM120, CUTLASS
+gemm/fp8/f32/sm90/fp8_cutlass.cu         # FP8->F32 GEMM, SM90, CUTLASS
+gemm/nvf4/bf16/sm120/nvf4_cutlass.cu     # NVF4->BF16 GEMM, SM120, CUTLASS
+gemv/bf16/bf16/sm120/nvf4.cu             # NVF4->BF16 GEMV, SM120
+gemm/f32/f32/generic/tf32_mma.cuh        # TF32 GEMM, generic (SM80+)
 ```
 
 ### Module Separation Policy
@@ -221,9 +256,9 @@ cublasLt64_11.dll  // CUDA 11.x
 
 ### Target Architectures
 
-- **Supported:** Ampere (SM 80-86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100, 120)
+- **Supported:** Ampere (SM 80-86), Ada (SM 89), Hopper (SM 90), Blackwell (SM 100, 120a)
 - **Unsupported:** Architectures below SM80
-- **Build default:** SM 80, 86, 89, 90, 100, 120 (CUDA 13.1+)
+- **Build default:** SM 80, 86, 89, 90, 100, 120a (CUDA 13.1+)
 
 ### Design Philosophy
 
@@ -553,22 +588,13 @@ Edit → Build → Validate → Benchmark → Commit
 ```bash
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
-./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh 120a     # SM 120aのみ (RTX 5090)
 ./build.sh          # デフォルト: SM 120a
 ```
 
-**Windows cmd.exeからビルド（代替）：**
-
-```cmd
-cd D:\Projects\m96-chan\PyGPUkit
-scripts\build_cuda13.bat 86      :: SM 86のみ (RTX 3090 Ti)
-scripts\build_cuda13.bat 120     :: SM 120のみ (RTX 5090)
-scripts\build_cuda13.bat         :: 全SM (80, 86, 89, 90, 100, 120)
-```
-
 **注意事項：**
-- RTX 5090 (SM 120) はCUDA 13.1以降が必要
-- サポートSM: 80, 86, 89, 90, 100, 120
+- RTX 5090 (SM 120a) はCUDA 13.1以降が必要
+- サポートSM: 80, 86, 89, 90, 100, 120a
 
 ### Pre-Commit Checks (MANDATORY)
 
@@ -618,7 +644,7 @@ python benchmark.py --quick
 ```
 wip(tf32): <summary of changes>
 
-Benchmark results (RTX 3090 Ti):
+Benchmark results (RTX 5090):
 - 2048x2048: XX.XX TFLOPS
 - 4096x4096: XX.XX TFLOPS
 - 8192x8192: XX.XX TFLOPS
@@ -962,17 +988,17 @@ accepted_tokens = model.jacobi_decode_step(draft_tokens, position)
 ```bash
 cd /d/Projects/m96-chan/PyGPUkit
 ./build.sh 86       # SM 86のみ (RTX 3090 Ti)
-./build.sh 120      # SM 120のみ (RTX 5090)
+./build.sh 120a     # SM 120aのみ (RTX 5090)
 ./build.sh          # デフォルト: SM 120a
 ```
 
-**サポートSM:** 80, 86, 89, 90, 100, 120
+**サポートSM:** 80, 86, 89, 90, 100, 120a
 
 ### Local Development Hardware
 
 | Machine | GPU | SM | CUDA Toolkit | Notes |
 |---------|-----|-----|--------------|-------|
-| Primary | RTX 5090 | 120 | 13.1 | Blackwell GeForce, FP8 testing |
+| Primary | RTX 5090 | 120a | 13.1 | Blackwell GeForce, FP8 testing |
 | Secondary | RTX 3090 Ti | 86 | 12.x | Ampere, TF32 benchmarks |
 
 ### Tokenizer
@@ -988,12 +1014,66 @@ tokenizer = Tokenizer.from_file("/path/to/tokenizer.json")
 # from pygpukit.llm import Tokenizer
 ```
 
-### Test Models (Local)
+### LLM Models Directory
+
+**Primary model storage:** `F:/LLM/`
+
+All LLM models for inference testing are stored in `F:/LLM/`. Use this path when loading models.
 
 ```
-# Qwen3-8B (テスト用)
-/c/Users/y_har/.cache/huggingface/hub/models--Aratako--Qwen3-8B-ERP-v0.1/snapshots/8311aa4482f02c2de93872e4979887def1841faf/
-
-# TinyLlama-1.1B
-/c/Users/y_har/.cache/huggingface/hub/models--TinyLlama--TinyLlama-1.1B-Chat-v1.0/snapshots/*/
+F:/LLM/
+├── Qwen2.5-7B-Instruct/           # Main test model
+├── Qwen3-8B/                       # Qwen3 variant
+├── TinyLlama-1.1B-Chat-v1.0/      # Small model for quick tests
+└── ...
 ```
+
+**Usage example:**
+```python
+from pygpukit.llm import QwenModel
+
+model = QwenModel.from_safetensors("F:/LLM/Qwen2.5-7B-Instruct")
+```
+
+**Note:** HuggingFace cache (`~/.cache/huggingface/`) may also contain models but `F:/LLM/` is the canonical location.
+
+---
+
+## Claude Code Configuration
+
+### Skills (.claude/skills/)
+
+Development workflow automation:
+
+| Skill | Description |
+|-------|-------------|
+| `build` | Build native module with SM selection |
+| `benchmark` | Run matmul performance benchmarks |
+| `lint` | Ruff lint + format |
+| `typecheck` | Mypy type check |
+| `test` | Run pytest |
+| `precommit` | Pre-commit checks (lint + typecheck) |
+| `check-all` | Full validation (lint + typecheck + test) |
+| `chat-test` | LLM inference testing |
+| `kernel-dev` | Kernel development workflow |
+
+### Subagents (.claude/agents/)
+
+Specialized agents for specific tasks:
+
+| Agent | Model | Description |
+|-------|-------|-------------|
+| `kernel-reviewer` | opus | CUDA kernel code review |
+| `perf-analyzer` | opus | Benchmark analysis and optimization |
+| `api-designer` | sonnet | Python API design review |
+| `commit-helper` | haiku | Commit message and PR generation |
+| `doc-generator` | haiku | Documentation updates |
+
+### Usage
+
+Skills and agents are automatically invoked based on task context. Examples:
+
+- "Build for RTX 5090" -> `build` skill
+- "Review the kernel changes" -> `kernel-reviewer` agent
+- "Analyze benchmark results" -> `perf-analyzer` agent
+- "Commit these changes" -> `commit-helper` agent

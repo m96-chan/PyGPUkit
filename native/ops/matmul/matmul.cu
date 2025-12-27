@@ -1,7 +1,7 @@
 /**
  * Matrix multiplication dispatch
  */
-#include "matmul_fp32.cuh"
+#include "gemm/f32/f32/generic/f32_naive.cuh"
 #include "../common/error.cuh"
 #include "../common/device.cuh"
 #include "../../core/memory.hpp"
@@ -9,14 +9,14 @@
 #include "../ops.cuh"  // For transpose()
 
 // Include existing optimized kernels
-#include "../matmul_f32_ampere.cuh"
-#include "../matmul_f32_tf32.cuh"
-#include "../matmul_f32_tf32_v2.cuh"
-#include "../matmul_f16_bf16.cuh"
-#include "../matmul_f16_bf16_tc.cuh"
-#include "../matmul_f16_bf16_tc_generic.cuh"
-#include "../matmul_cublaslt.cuh"
-#include "../matmul_cutlass.cuh"
+#include "gemm/f32/f32/generic/f32_ampere.cuh"
+#include "gemm/f32/f32/generic/tf32_wmma.cuh"
+#include "gemm/f32/f32/generic/tf32_mma.cuh"
+#include "gemm/bf16/bf16/generic/bf16_naive.cuh"
+#include "gemm/bf16/bf16/generic/bf16_wmma.cuh"
+#include "gemm/bf16/bf16/generic/bf16_wmma_generic.cuh"
+#include "cublaslt.cuh"
+#include "gemm/bf16/bf16/sm80/bf16_cutlass.cuh"
 
 #include <cstdlib>
 #include <algorithm>

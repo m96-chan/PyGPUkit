@@ -323,6 +323,27 @@ void init_core_bindings(py::module_& m) {
         py::arg("dst"), py::arg("src"), py::arg("stream"),
         "Async copy between GPUArrays on the same device.");
 
+    // Device-to-device with offset (for stacking arrays)
+    m.def("memcpy_device_to_device_offset",
+        [](const GPUArray& src, GPUArray& dst, size_t src_offset, size_t dst_offset, size_t size_bytes) {
+            if (src_offset + size_bytes > src.nbytes()) {
+                throw std::runtime_error("Source offset + size exceeds source array bounds");
+            }
+            if (dst_offset + size_bytes > dst.nbytes()) {
+                throw std::runtime_error("Destination offset + size exceeds destination array bounds");
+            }
+            CUdeviceptr src_ptr = reinterpret_cast<CUdeviceptr>(src.data()) + src_offset;
+            CUdeviceptr dst_ptr = reinterpret_cast<CUdeviceptr>(dst.data()) + dst_offset;
+            CUresult err = cuMemcpy(dst_ptr, src_ptr, size_bytes);
+            if (err != CUDA_SUCCESS) {
+                const char* error_str = nullptr;
+                cuGetErrorString(err, &error_str);
+                throw std::runtime_error(std::string("cuMemcpy failed: ") + (error_str ? error_str : "unknown"));
+            }
+        },
+        py::arg("src"), py::arg("dst"), py::arg("src_offset"), py::arg("dst_offset"), py::arg("size_bytes"),
+        "Copy from src[src_offset:] to dst[dst_offset:] on device.");
+
     // Synchronize a raw stream handle (using Driver API)
     m.def("stream_synchronize_raw",
         [](uintptr_t stream_handle) {

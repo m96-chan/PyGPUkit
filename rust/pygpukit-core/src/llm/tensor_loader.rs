@@ -50,6 +50,8 @@ pub enum Dtype {
     Float16,
     BFloat16,
     Float64,
+    Float8E4M3,  // FP8 E4M3 (1 sign, 4 exponent, 3 mantissa)
+    Float8E5M2,  // FP8 E5M2 (1 sign, 5 exponent, 2 mantissa)
     Int32,
     Int64,
     Int16,
@@ -65,7 +67,7 @@ impl Dtype {
             Dtype::Float64 | Dtype::Int64 => 8,
             Dtype::Float32 | Dtype::Int32 => 4,
             Dtype::Float16 | Dtype::BFloat16 | Dtype::Int16 => 2,
-            Dtype::Int8 | Dtype::UInt8 | Dtype::Bool => 1,
+            Dtype::Int8 | Dtype::UInt8 | Dtype::Bool | Dtype::Float8E4M3 | Dtype::Float8E5M2 => 1,
         }
     }
 
@@ -76,6 +78,8 @@ impl Dtype {
             safetensors::Dtype::F16 => Ok(Dtype::Float16),
             safetensors::Dtype::BF16 => Ok(Dtype::BFloat16),
             safetensors::Dtype::F64 => Ok(Dtype::Float64),
+            safetensors::Dtype::F8_E4M3 => Ok(Dtype::Float8E4M3),
+            safetensors::Dtype::F8_E5M2 => Ok(Dtype::Float8E5M2),
             safetensors::Dtype::I32 => Ok(Dtype::Int32),
             safetensors::Dtype::I64 => Ok(Dtype::Int64),
             safetensors::Dtype::I16 => Ok(Dtype::Int16),
