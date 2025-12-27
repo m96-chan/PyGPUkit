@@ -59,6 +59,11 @@ extern "C" {
         size_t* sfa_size, size_t* sfb_size
     );
 
+    // SM120 FP8 GEMM tile variants (V2-V4)
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v2(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v3(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v4(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+
     // SM120 (Blackwell GeForce) - NVF4 (4-bit) with BF16 I/O
     cudaError_t pygpukit_gemm_nvf4_bf16_sm120(
         const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* D,
@@ -1562,6 +1567,26 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        "Pure FP8 I/O GEMM for SM120: D = A @ B (FP8 E4M3 input/output)");
+
+    // Tile variant helper
+    auto bind_fp8_tile = [&m](const char* name, auto func, const char* doc) {
+        m.def(name, [func, name](const GPUArray& A, const GPUArray& B, GPUArray& D) {
+            if (A.dtype() != DataType::UInt8 || B.dtype() != DataType::UInt8 || D.dtype() != DataType::UInt8) {
+                throw std::runtime_error("FP8 GEMM: all inputs must be uint8");
+            }
+            int M = A.shape()[0], K = A.shape()[1], N = B.shape()[1];
+            if (B.shape()[0] != static_cast<size_t>(K)) throw std::runtime_error("Shape mismatch");
+            cudaError_t err = func(
+                static_cast<const uint8_t*>(A.data()),
+                static_cast<const uint8_t*>(B.data()),
+                static_cast<uint8_t*>(D.data()),
+                M, N, K, 1.0f, 0.0f, nullptr);
+            if (err != cudaSuccess) throw std::runtime_error(std::string(name) + " failed");
+        }, py::arg("A"), py::arg("B"), py::arg("D"), doc);
+    };
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v2", pygpukit_gemm_fp8_fp8_sm120_v2, "FP8 GEMM 128x256x64");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v3", pygpukit_gemm_fp8_fp8_sm120_v3, "FP8 GEMM 256x128x64");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v4", pygpukit_gemm_fp8_fp8_sm120_v4, "FP8 GEMM 128x128x64");
 
     // Blockwise scaled FP8 GEMM
     m.def("gemm_fp8_fp8_blockwise_sm120", [](
