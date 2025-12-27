@@ -149,3 +149,4 @@ test_gpu/
 # Claude Code MCP data
 .claude/memory.jsonl
 .claude/benchmarks.db
+.claude/logs/
