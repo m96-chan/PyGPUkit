@@ -2,10 +2,21 @@
 """Simple debug test for w8a16_gemm."""
 
 import numpy as np
+import pytest
 
 import pygpukit as gk
 from pygpukit.core import from_numpy
 from pygpukit.core.backend import get_native_module
+
+# Check if native module is available
+try:
+    _native = get_native_module()
+    HAS_NATIVE = _native is not None
+except Exception:
+    HAS_NATIVE = False
+
+pytestmark = pytest.mark.skipif(not HAS_NATIVE, reason="Native module not available")
+
 from pygpukit.ops.matmul import (
     fp8_init_lut,
     gemv_fp8_bf16_batched,
