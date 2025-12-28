@@ -5,6 +5,7 @@ Not optimized for maximum performance - focus on correctness and iteration speed
 """
 
 from typing import TYPE_CHECKING
+
 import triton
 import triton.language as tl
 

@@ -20,9 +20,9 @@ Usage:
     tx = from_numpy(np.random.randn(4, 128).astype(np.float32))
 """
 
-from .wrapper import TritonArray, from_gpuarray, from_numpy
-from .backend import triton_available, triton_version, use_triton_backend
 from . import kernels
+from .backend import triton_available, triton_version, use_triton_backend
+from .wrapper import TritonArray, from_gpuarray, from_numpy
 
 __all__ = [
     "TritonArray",

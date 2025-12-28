@@ -19,7 +19,7 @@ def triton_available() -> bool:
 
     try:
         import triton
-        import triton.language as tl
+
         _triton = triton
         _triton_available = True
         return True

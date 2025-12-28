@@ -6,15 +6,28 @@ Triton expects objects with:
 - dtype attribute returning a string like "float32", "bfloat16", etc.
 """
 
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     import numpy as np
+
     import pygpukit._pygpukit_native as native
 
 
 # Mapping from PyGPUkit DataType to Triton-compatible string
+# Keys can be PascalCase (native) or lowercase (Python wrapper)
 _DTYPE_MAP = {
+    # Lowercase (Python GPUArray wrapper)
+    "float64": "float64",
+    "float32": "float32",
+    "float16": "float16",
+    "bfloat16": "bfloat16",
+    "int64": "int64",
+    "int32": "int32",
+    "int16": "int16",
+    "int8": "int8",
+    "uint8": "uint8",
+    # PascalCase (native DataType enum)
     "Float64": "float64",
     "Float32": "float32",
     "Float16": "float16",
@@ -58,7 +71,7 @@ class TritonArray:
     def data_ptr(self) -> int:
         """Return CUDA device pointer."""
         # Get native GPUArray and call data_ptr()
-        native_arr = self._arr._get_native() if hasattr(self._arr, '_get_native') else self._arr
+        native_arr = self._arr._get_native() if hasattr(self._arr, "_get_native") else self._arr
         return int(native_arr.data_ptr())
 
     @property
@@ -84,7 +97,7 @@ class TritonArray:
             result *= s
         return result
 
-    def stride(self, dim: Optional[int] = None) -> Union[int, Tuple[int, ...]]:
+    def stride(self, dim: Optional[int] = None) -> Union[int, tuple[int, ...]]:
         """Return strides (C-contiguous assumed)."""
         strides: list[int] = []
         acc = 1
@@ -100,9 +113,9 @@ class TritonArray:
         return strides_tuple
 
     @property
-    def __cuda_array_interface__(self) -> Dict[str, object]:
+    def __cuda_array_interface__(self) -> dict[str, object]:
         """Return CUDA Array Interface for compatibility."""
-        cai: Dict[str, object] = self._arr.__cuda_array_interface__
+        cai: dict[str, object] = self._arr.__cuda_array_interface__
         return cai
 
     def __repr__(self) -> str:
@@ -145,5 +158,6 @@ def from_numpy(arr: "np.ndarray") -> TritonArray:
         >>> tx = from_numpy(np.zeros((4, 4), dtype=np.float32))
     """
     import pygpukit._pygpukit_native as native
+
     gpu_arr = native.from_numpy(arr)
     return TritonArray(gpu_arr)

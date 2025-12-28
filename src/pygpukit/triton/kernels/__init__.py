@@ -8,10 +8,10 @@ All kernels use TritonArray wrapper for PyTorch-free operation.
 All kernels use in-place output (pre-allocated `out` parameter).
 """
 
-from .rmsnorm import rmsnorm
 from .layernorm import layernorm
-from .softmax import softmax
+from .rmsnorm import rmsnorm
 from .rotary import rotary
+from .softmax import softmax
 
 __all__ = [
     "rmsnorm",

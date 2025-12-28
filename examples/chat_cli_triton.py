@@ -157,33 +157,51 @@ class StreamingDecoder:
 
 
 class TritonNorm:
-    """Norm layer wrapper demonstrating Triton/Native CUDA mixing.
+    """Norm layer using Triton RMSNorm kernel.
 
-    This class shows the pattern for using Triton kernels for rapid prototyping.
-    Currently falls back to native CUDA due to triton-windows bf16 issues on SM120.
-
-    Once Triton bf16 support is fixed, replace the native calls with:
-        self._triton_rmsnorm(x_triton, w_triton, out_triton, eps)
+    This demonstrates using Triton for rapid kernel prototyping.
+    The Triton kernel can be easily modified in kernels/rmsnorm.py
+    without recompiling C++ code.
     """
 
     def __init__(self, original_norm):
-        """Wrap an existing Norm layer."""
+        """Wrap an existing Norm layer with Triton implementation."""
         self.weight = original_norm.weight
         self.bias = original_norm.bias
         self.norm_type = original_norm.norm_type
         self.eps = original_norm.eps
 
-    def __call__(self, x):
-        """Forward pass - currently uses native CUDA (Triton bf16 has issues on SM120)."""
-        from pygpukit.ops.basic import layernorm as native_layernorm
-        from pygpukit.ops.basic import rmsnorm as native_rmsnorm
+        # Import Triton components
+        from pygpukit.triton import from_gpuarray, kernels
 
+        self._from_gpuarray = from_gpuarray
+        self._triton_rmsnorm = kernels.rmsnorm
+        self._triton_layernorm = kernels.layernorm
+
+        # Pre-wrap weight for Triton
+        self._weight_triton = from_gpuarray(self.weight)
+
+    def __call__(self, x):
+        """Forward pass using Triton kernel."""
+        from pygpukit.core.factory import zeros
+
+        # Create output buffer with same shape/dtype as input
+        out = zeros(list(x.shape), dtype=x.dtype)
+
+        # Wrap for Triton
+        x_triton = self._from_gpuarray(x)
+        out_triton = self._from_gpuarray(out)
+
+        # Call Triton kernel
         if self.norm_type == "rmsnorm":
-            return native_rmsnorm(x, self.weight, self.eps)
+            self._triton_rmsnorm(x_triton, self._weight_triton, out_triton, self.eps)
         else:
             if self.bias is None:
                 raise ValueError("LayerNorm requires bias")
-            return native_layernorm(x, self.weight, self.bias, self.eps)
+            bias_triton = self._from_gpuarray(self.bias)
+            self._triton_layernorm(x_triton, self._weight_triton, bias_triton, out_triton, self.eps)
+
+        return out
 
 
 def patch_model_with_triton(model, verbose: bool = True) -> int:
@@ -298,14 +316,13 @@ def main():
     # HYBRID SETUP: Patch Norm layers with Triton
     # ==========================================================================
     if use_triton:
-        print("\nApplying Triton backend pattern...")
+        print("\nApplying Triton backend...")
         patch_model_with_triton(model)
         print("  Kernel routing:")
-        print("    - RMSNorm: Native CUDA (Triton bf16 has issues on SM120)")
+        print("    - RMSNorm: Triton (kernels/rmsnorm.py)")
         print("    - MatMul:  Native CUDA (cuBLASLt)")
         print("    - SDPA:    Native CUDA (optimized)")
         print("    - KV Cache: Native CUDA")
-        print("  Note: TritonNorm wrapper is in place - swap to Triton kernels when fixed")
     else:
         print("\nUsing native CUDA for all operations")
 
@@ -480,7 +497,7 @@ def main():
     # Chat loop
     print("\n" + "=" * 60)
     print(" PyGPUkit Hybrid Chat (Triton + Native CUDA)")
-    backend_str = "TritonNorm wrapper + Native CUDA" if use_triton else "Native CUDA only"
+    backend_str = "Triton RMSNorm + Native CUDA" if use_triton else "Native CUDA only"
     print(f" Backend: {backend_str}")
     print(" Commands: /clear (reset), /quit (exit)")
     print("=" * 60)
