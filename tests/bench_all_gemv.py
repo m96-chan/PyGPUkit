@@ -9,8 +9,10 @@ Tests:
 - NVF4/NVF4 (W4A4) - 4-bit weight, 4-bit activation (SM120)
 """
 
-import numpy as np
 import time
+
+import numpy as np
+
 from pygpukit import _native as native
 
 # DataType enum
@@ -19,7 +21,9 @@ F32 = native.DataType.Float32
 U8 = native.DataType.UInt8
 
 
-def benchmark_kernel(name: str, setup_fn, run_fn, K: int, N: int, warmup: int = 10, iters: int = 100):
+def benchmark_kernel(
+    name: str, setup_fn, run_fn, K: int, N: int, warmup: int = 10, iters: int = 100
+):
     """Benchmark a kernel and return timing in microseconds."""
     try:
         setup_fn()
@@ -318,13 +322,19 @@ def main():
             weight_size = "?"
             speedup = "N/A"
 
-        print(f"| {name:<20} | {a_dtype:<7} | {b_dtype:<7} | {weight_size:<11} | {time_us:>9.1f} | {speedup:<7} |")
+        print(
+            f"| {name:<20} | {a_dtype:<7} | {b_dtype:<7} | {weight_size:<11} | {time_us:>9.1f} | {speedup:<7} |"
+        )
 
     # Print additional insights
     print("\n### Key Insights\n")
     print("- **FP8/FP8**: Best performance on SM120 (Blackwell). 6-20x faster than BF16.")
-    print("- **NVF4/BF16 (W4A16)**: Good balance of speed and memory. ~10% faster than BF16 for large N.")
-    print("- **NVF4/NVF4 (W4A4)**: Maximum memory efficiency but ~2x slower due to double dequantization.")
+    print(
+        "- **NVF4/BF16 (W4A16)**: Good balance of speed and memory. ~10% faster than BF16 for large N."
+    )
+    print(
+        "- **NVF4/NVF4 (W4A4)**: Maximum memory efficiency but ~2x slower due to double dequantization."
+    )
 
 
 if __name__ == "__main__":
