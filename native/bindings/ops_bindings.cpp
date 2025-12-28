@@ -64,6 +64,13 @@ extern "C" {
     cudaError_t pygpukit_gemm_fp8_fp8_sm120_v3(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
     cudaError_t pygpukit_gemm_fp8_fp8_sm120_v4(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
 
+    // SM120 FP8 GEMM optimized variants (V5-V8) - Cooperative scheduler + explicit stages
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v5(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v6(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v7(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v8(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    void pygpukit_gemm_fp8_fp8_sm120_cleanup();
+
     // SM120 (Blackwell GeForce) - NVF4 (4-bit) with BF16 I/O
     cudaError_t pygpukit_gemm_nvf4_bf16_sm120(
         const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* D,
@@ -1659,6 +1666,12 @@ void init_ops_bindings(py::module_& m) {
     bind_fp8_tile("gemm_fp8_fp8_sm120_v2", pygpukit_gemm_fp8_fp8_sm120_v2, "FP8 GEMM 128x256x64");
     bind_fp8_tile("gemm_fp8_fp8_sm120_v3", pygpukit_gemm_fp8_fp8_sm120_v3, "FP8 GEMM 256x128x64");
     bind_fp8_tile("gemm_fp8_fp8_sm120_v4", pygpukit_gemm_fp8_fp8_sm120_v4, "FP8 GEMM 128x128x64");
+
+    // Optimized FP8 GEMM (V5-V8) - Cached scale buffers
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v5", pygpukit_gemm_fp8_fp8_sm120_v5, "FP8 GEMM 128x128x128 cached");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v6", pygpukit_gemm_fp8_fp8_sm120_v6, "FP8 GEMM 128x256x64 cached");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v7", pygpukit_gemm_fp8_fp8_sm120_v7, "FP8 GEMM 256x128x64 cached");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v8", pygpukit_gemm_fp8_fp8_sm120_v8, "FP8 GEMM 128x128x64 cached");
 
     // Blockwise scaled FP8 GEMM
     m.def("gemm_fp8_fp8_blockwise_sm120", [](
