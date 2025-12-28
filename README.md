@@ -99,6 +99,51 @@ They were all observed in production or real benchmarks.
 
 ---
 
+## What's New in v0.2.17
+
+### Triton Backend MVP
+Optional Triton backend for rapid kernel prototyping without C++ recompilation:
+
+| Component | Description |
+|-----------|-------------|
+| **pygpukit.triton** | Triton wrapper module with GPUArray compatibility |
+| **TritonArray** | Wrapper bridging PyGPUkit GPUArray to Triton |
+| **Triton Kernels** | RMSNorm, LayerNorm, Softmax, Rotary |
+| **Hybrid Execution** | Mix Triton + Native CUDA in same model |
+
+```python
+# Install Triton (Windows)
+pip install triton-windows
+# Or: pip install pygpukit[triton]
+
+# Hybrid chat example
+python examples/chat_cli_triton.py --model /path/to/model --tokenizer /path/to/tokenizer.json
+```
+
+**Kernel Routing Example:**
+```
+RMSNorm  -> Triton (kernels/rmsnorm.py) - easy to modify
+MatMul   -> Native CUDA (cuBLASLt) - production performance
+SDPA     -> Native CUDA (optimized)
+KV Cache -> Native CUDA
+```
+
+### Usage Pattern
+```python
+from pygpukit.triton import from_gpuarray, kernels, triton_available
+
+if triton_available():
+    # Wrap GPUArray for Triton
+    x_triton = from_gpuarray(x_gpu)
+    w_triton = from_gpuarray(weight_gpu)
+    out_triton = from_gpuarray(out_gpu)
+
+    # Call Triton kernel
+    kernels.rmsnorm(x_triton, w_triton, out_triton, eps=1e-5)
+```
+
+---
+
 ## What's New in v0.2.16
 
 ### MoE (Mixture of Experts) Support
@@ -111,25 +156,8 @@ Full support for Mixtral-style MoE models with custom CUDA kernels:
 | **MoELayer** | Python layer with router + expert FFN dispatch |
 | **MIXTRAL_SPEC** | Auto-detection for Mixtral 8x7B models |
 
-```python
-from pygpukit.llm import load_model_from_safetensors, detect_model_spec
-
-# Auto-detect MoE model
-spec = detect_model_spec(tensor_names)  # Returns MIXTRAL_SPEC for MoE
-model = load_model_from_safetensors("mixtral.safetensors", spec=spec)
-```
-
 ### Thinking Model Support
-Qwen3 Thinking model support with `<think>...</think>` block parsing:
-
-```python
-# examples/chat_cli_thinking.py
-python examples/chat_cli_thinking.py --model F:/LLM/Qwen3-4B-Thinking
-```
-
-- Streaming output with thinking/answer separation
-- `/think` command to toggle thinking display
-- CUDA Graph support for faster decode
+Qwen3 Thinking model support with `<think>...</think>` block parsing.
 
 ### New GEMV Kernels (SM120)
 
@@ -148,141 +176,14 @@ python examples/chat_cli_thinking.py --model F:/LLM/Qwen3-4B-Thinking
 | **Int4 via Int8** | 4-bit approximation via TensorCore |
 | **Grouped GEMM v2** | Per-row expert IDs for MoE |
 
-### Kernel Directory Restructure
-Organized matmul kernels by `{gemm|gemv}/{input}/{output}/{arch}/`:
-
-```
-native/ops/matmul/
-├── gemm/fp8/bf16/sm120/w8a16_gemm.cu
-├── gemm/fp8/fp8/sm120/fp8_cutlass.cu
-├── gemv/fp8/fp8/sm120/fp8_gemv.cu
-├── gemv/nvf4/nvf4/sm120/nvf4_gemv.cu
-└── gemv/int4/int4/sm120/int4_gemv.cu
-```
-
 ### Development Tooling
 - **Claude Code Skills**: Build, benchmark, lint, test automation
 - **Subagents**: kernel-reviewer, perf-analyzer, api-designer
 - **CONTRIBUTING.md**: Contribution guidelines
-- **MCP Integration**: Serena, Context7, Memory servers
-
-### Kernel Cleanup
-Removed redundant slow kernels:
-
-| Removed | Kept | Reason |
-|---------|------|--------|
-| FP8 GEMV basic | FP8 GEMV opt | [N,K] layout 3-9x faster |
-| Int8 via FP8 | Int8 native dp4a | Exact results |
 
 ---
 
-## What's New in v0.2.15
-
-
-### Whisper ASR Module
-Full GPU-accelerated Whisper speech recognition:
-
-| Component | Description |
-|-----------|-------------|
-| **WhisperEncoder** | Conv1d stem + transformer with GPU attention |
-| **WhisperDecoder** | Autoregressive decoder with cross-attention |
-| **WhisperModel** | High-level API: `from_pretrained()`, `transcribe()` |
-| **Preprocessing** | GPU mel spectrogram (30s pad/trim, normalization) |
-| **Streaming** | `transcribe_streaming()` for long audio |
-
-### GEMV Kernels (SM120)
-Optimized GEMV for LLM decode (M=1):
-
-| Kernel | Feature | Speedup |
-|--------|---------|---------|
-| **BF16 GEMV** | BF16x2 vectorized loads | 25-40% vs scalar |
-| **NVF4 GEMV** | Pre-scaled LUT | 73% less bandwidth |
-| **Linear layer** | Auto GEMV for M=1 | 1.3-2.4x vs matmul |
-
-### FP8 I/O GEMM (SM120)
-Pure FP8 input/output GEMM for FP8 model inference (Llama 3.1 FP8, Qwen FP8, etc.):
-
-| Function | Description |
-|----------|-------------|
-| `matmul_fp8_fp8_sm120` | FP8 E4M3 input -> FP8 E4M3 output (unity scaling) |
-| `matmul_fp8_fp8_blockwise_sm120` | FP8 with block-wise scale_A / scale_B |
-| `fp8_fp8_get_scale_sizes` | Get required scale factor sizes for (M, N, K) |
-| `fp8_fp8_sm120_available` | Check SM120 FP8 I/O availability |
-
-```python
-import pygpukit as gpk
-import numpy as np
-
-# Check availability
-if gpk.fp8_fp8_sm120_available():
-    # Get scale sizes for blockwise scaling
-    sfa_size, sfb_size = gpk.fp8_fp8_get_scale_sizes(M, N, K)
-
-    # Blockwise scaled FP8 GEMM (for real FP8 models)
-    scale_a = gpk.from_numpy(np.ones(sfa_size, dtype=np.float32))
-    scale_b = gpk.from_numpy(np.ones(sfb_size, dtype=np.float32))
-    C = gpk.matmul_fp8_fp8_blockwise_sm120(A_fp8, B_fp8, scale_a, scale_b)
-```
-
-### Pure NVF4 GEMM (446 TFLOPS)
-GPU-side BF16->NVF4 quantization with 3-stage pipeline for maximum throughput:
-
-| Matrix Size | TFLOPS | Notes |
-|-------------|--------|-------|
-| 8192x8192 | 261 | Branchless vectorized loads |
-| 12288x12288 | 383 | 3-stage async pipeline |
-| 16384x16384 | **446** | Direct write to user buffer |
-
-### New Math Operations
-Extended math operations for GPU computing:
-
-| Category | Operations |
-|----------|------------|
-| **Trigonometric** | `sin`, `cos` |
-| **Power/Root** | `sqrt`, `rsqrt` |
-| **Sign** | `abs`, `neg` |
-| **Comparison** | `clamp`, `where` |
-| **Activation** | `sigmoid`, `tanh` |
-| **Reduction** | `argmax`, `min`, `sum_axis` |
-
-```python
-import pygpukit as gpk
-
-# Trigonometric
-y = gpk.sin(x)
-y = gpk.cos(x)
-
-# Power operations
-y = gpk.sqrt(x)
-y = gpk.rsqrt(x)  # 1/sqrt(x)
-
-# Element-wise comparison
-y = gpk.clamp(x, min_val=-1.0, max_val=1.0)
-y = gpk.where(cond, x, y)  # cond ? x : y
-
-# New activations
-y = gpk.sigmoid(x)
-y = gpk.tanh(x)
-
-# New reductions
-idx = gpk.argmax(x)     # Index of maximum
-val = gpk.min(x)        # Minimum value
-y = gpk.sum_axis(x, 1)  # Sum along axis
-```
-
-### uint8/int8 NumPy Support
-`from_numpy` now supports uint8 and int8 arrays for FP8 data handling:
-
-```python
-# FP8 data stored as uint8
-fp8_data = np.array([...], dtype=np.uint8)
-gpu_fp8 = gpk.from_numpy(fp8_data)
-```
-
----
-
-
-> **Previous versions (v0.2.4 - v0.2.14):** See [CHANGELOG.md](CHANGELOG.md) for complete release history.
+> **Previous versions (v0.2.4 - v0.2.15):** See [CHANGELOG.md](CHANGELOG.md) for complete release history.
 
 
 ## LLM Support
@@ -627,12 +528,13 @@ PyGPUkit/
 | **v0.2.12** | **Advanced audio processing** (ISTFT, Griffin-Lim, HPSS, CQT, pitch detection, time stretch) |
 | **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
 | **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
+| **v0.2.17** | **Triton backend** MVP, hybrid execution (Triton + Native CUDA), TritonArray wrapper |
 
 ### Planned
 
 | Version | Goals |
 |---------|-------|
-| **v0.3** | Triton backend, advanced ops (softmax), MPS/MIG |
+| **v0.3** | Advanced Triton ops (attention), MPS/MIG |
 
 ---
 

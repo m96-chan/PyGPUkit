@@ -4,6 +4,18 @@ All notable changes to PyGPUkit will be documented in this file.
 
 For detailed release notes with code examples, see [README.md](README.md).
 
+## [0.2.17] - 2025-12-28
+
+### Added
+- **Triton Backend MVP**: Optional Triton backend for rapid kernel prototyping
+- **pygpukit.triton module**: TritonArray wrapper, from_gpuarray, triton_available
+- **Triton Kernels**: RMSNorm, LayerNorm, Softmax, Rotary
+- **Hybrid Execution**: Mix Triton + Native CUDA in same model
+- **examples/chat_cli_triton.py**: Hybrid chat example demonstrating Triton + CUDA
+
+### Fixed
+- TritonArray dtype mapping: Support both PascalCase and lowercase dtype strings
+
 ## [0.2.16] - 2025-12-28
 
 ### Added
