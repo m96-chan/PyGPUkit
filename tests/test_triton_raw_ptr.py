@@ -1,30 +1,49 @@
 """Test Triton with raw pointers from PyGPUkit."""
 
 import numpy as np
-import pygpukit._pygpukit_native as native
 import pytest
-import triton
-import triton.language as tl
 
-from pygpukit.triton import from_gpuarray
+# Check if native module and Triton are available
+try:
+    import pygpukit._pygpukit_native as native
+    import triton
+    import triton.language as tl
 
-pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
+    from pygpukit.triton import from_gpuarray, triton_available
+
+    HAS_NATIVE = native is not None
+    HAS_TRITON = triton_available()
+except ImportError:
+    native = None  # type: ignore[assignment]
+    triton = None  # type: ignore[assignment]
+    tl = None  # type: ignore[assignment]
+    HAS_NATIVE = False
+    HAS_TRITON = False
+
+pytestmark = [
+    pytest.mark.skipif(not HAS_NATIVE, reason="Native module not available"),
+    pytest.mark.skipif(not HAS_TRITON, reason="Triton not available"),
+    pytest.mark.gpu,
+]
 
 
-@triton.jit
-def add_kernel(
-    X,  # pointer
-    Y,  # pointer
-    Z,  # pointer
-    N: tl.constexpr,
-):
-    """Simple add kernel."""
-    pid = tl.program_id(0)
-    offsets = pid * 128 + tl.arange(0, 128)
-    mask = offsets < N
-    x = tl.load(X + offsets, mask=mask)
-    y = tl.load(Y + offsets, mask=mask)
-    tl.store(Z + offsets, x + y, mask=mask)
+# Only define kernel if Triton is available
+if HAS_TRITON:
+
+    @triton.jit
+    def add_kernel(
+        X,  # pointer
+        Y,  # pointer
+        Z,  # pointer
+        N: tl.constexpr,
+    ):
+        """Simple add kernel."""
+        pid = tl.program_id(0)
+        offsets = pid * 128 + tl.arange(0, 128)
+        mask = offsets < N
+        x = tl.load(X + offsets, mask=mask)
+        y = tl.load(Y + offsets, mask=mask)
+        tl.store(Z + offsets, x + y, mask=mask)
 
 
 def test_raw_pointer():

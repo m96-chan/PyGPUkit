@@ -1,12 +1,26 @@
 """Test all Triton kernels with PyGPUkit."""
 
 import numpy as np
-import pygpukit._pygpukit_native as native
 import pytest
 
-from pygpukit.triton import from_gpuarray, kernels
+# Check if native module and Triton are available
+try:
+    import pygpukit._pygpukit_native as native
 
-pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
+    from pygpukit.triton import from_gpuarray, kernels, triton_available
+
+    HAS_NATIVE = native is not None
+    HAS_TRITON = triton_available()
+except ImportError:
+    native = None  # type: ignore[assignment]
+    HAS_NATIVE = False
+    HAS_TRITON = False
+
+pytestmark = [
+    pytest.mark.skipif(not HAS_NATIVE, reason="Native module not available"),
+    pytest.mark.skipif(not HAS_TRITON, reason="Triton not available"),
+    pytest.mark.gpu,
+]
 
 
 def rmsnorm_numpy(x: np.ndarray, weight: np.ndarray, eps: float = 1e-6) -> np.ndarray:
