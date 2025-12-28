@@ -103,17 +103,6 @@ extern "C" {
     );
     void pygpukit_nvf4_get_sizes(int K, int N, size_t* data_size, size_t* scale_size);
 
-    // FP8 GEMV (W8A16: FP8 weights, BF16 activation)
-    // Note: FP8 E4M3 LUT is now compile-time initialized (no init function needed)
-    cudaError_t pygpukit_gemv_fp8_bf16(
-        const void* A, const void* B_fp8, const void* B_scale, void* C,
-        int K, int N, int scale_stride_n, cudaStream_t stream
-    );
-    cudaError_t pygpukit_gemv_fp8_bf16_batched(
-        const void* A, const void* B_fp8, const void* B_scale, void* C,
-        int K, int N, int batch_count, int scale_stride_n, cudaStream_t stream
-    );
-    void pygpukit_fp8_get_sizes(int K, int N, size_t* scale_size);
     // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output
     cudaError_t pygpukit_w8a16_gemm_sm120(
         const void* A, const void* B_fp8, const void* B_scale, void* C,
@@ -148,21 +137,6 @@ extern "C" {
         void* C, const int* row_expert_ids,
         int M, int N, int K, cudaStream_t stream
     );
-
-    // Int8 GEMM via FP8 approximation (SM120 has no native Int8 TensorCore)
-    cudaError_t pygpukit_gemm_int8_int8_int32_sm120(
-        const int8_t* A, const int8_t* B, int32_t* D,
-        int M, int N, int K,
-        float scale_A, float scale_B, float descale_D,
-        cudaStream_t stream
-    );
-    cudaError_t pygpukit_gemm_int8_int8_int8_sm120(
-        const int8_t* A, const int8_t* B, int8_t* D,
-        int M, int N, int K,
-        float scale_A, float scale_B, float descale_D,
-        cudaStream_t stream
-    );
-    bool pygpukit_int8_gemm_sm120_available();
 
     // Native Int8 GEMM using dp4a CUDA cores (exact, no FP8 approximation)
     cudaError_t pygpukit_gemm_int8_native_sm120(
@@ -1919,94 +1893,8 @@ void init_ops_bindings(py::module_& m) {
        "Get buffer sizes for NVF4 quantization: returns (data_size, scale_size)");
 
     // ========================================================================
-    // FP8 GEMV for W8A16 inference (FP8 weights, BF16 activation)
-    // Note: FP8 E4M3 LUT is now compile-time initialized (no init needed)
-    // ========================================================================
-
-    m.def("gemv_fp8_bf16", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
-        // A: [K] BF16 activation
-        // B_fp8: [K, N] uint8 FP8 weights
-        // B_scale: [K/128, N/128] BF16 scale factors
-        // C: [N] BF16 output
-        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("gemv_fp8_bf16: A and C must be bfloat16");
-        }
-        if (B_fp8.dtype() != DataType::UInt8) {
-            throw std::runtime_error("gemv_fp8_bf16: B_fp8 must be uint8 (FP8 E4M3)");
-        }
-        if (B_scale.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("gemv_fp8_bf16: B_scale must be bfloat16");
-        }
-        if (A.ndim() != 1 || B_fp8.ndim() != 2 || C.ndim() != 1) {
-            throw std::runtime_error("gemv_fp8_bf16: A[K], B_fp8[K,N], C[N] dimensions required");
-        }
-
-        int K = A.shape()[0];
-        int N = B_fp8.shape()[1];
-        int scale_stride_n = (N + 127) / 128;  // 128x128 block quantization
-
-        if (B_fp8.shape()[0] != static_cast<size_t>(K)) {
-            throw std::runtime_error("gemv_fp8_bf16: K dimension mismatch");
-        }
-        if (C.shape()[0] != static_cast<size_t>(N)) {
-            throw std::runtime_error("gemv_fp8_bf16: N dimension mismatch");
-        }
-
-        cudaError_t err = pygpukit_gemv_fp8_bf16(
-            A.data(), B_fp8.data(), B_scale.data(), C.data(),
-            K, N, scale_stride_n, nullptr
-        );
-
-        if (err != cudaSuccess) {
-            throw std::runtime_error("gemv_fp8_bf16 failed: " + std::string(cudaGetErrorString(err)));
-        }
-    }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
-       "FP8 GEMV: C[N] = A[K] @ B_fp8[K,N] (online dequantization with block-wise scale)");
-
-    m.def("gemv_fp8_bf16_batched", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
-        // A: [M, K] BF16 activation (M rows)
-        // B_fp8: [K, N] uint8 FP8 weights
-        // B_scale: [K/128, N/128] BF16 scale factors
-        // C: [M, N] BF16 output
-        if (A.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("gemv_fp8_bf16_batched: A and C must be bfloat16");
-        }
-        if (B_fp8.dtype() != DataType::UInt8) {
-            throw std::runtime_error("gemv_fp8_bf16_batched: B_fp8 must be uint8 (FP8 E4M3)");
-        }
-        if (B_scale.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("gemv_fp8_bf16_batched: B_scale must be bfloat16");
-        }
-        if (A.ndim() != 2 || B_fp8.ndim() != 2 || C.ndim() != 2) {
-            throw std::runtime_error("gemv_fp8_bf16_batched: A[M,K], B_fp8[K,N], C[M,N] dimensions required");
-        }
-
-        int M = A.shape()[0];
-        int K = A.shape()[1];
-        int N = B_fp8.shape()[1];
-        int scale_stride_n = (N + 127) / 128;  // 128x128 block quantization
-
-        if (B_fp8.shape()[0] != static_cast<size_t>(K)) {
-            throw std::runtime_error("gemv_fp8_bf16_batched: K dimension mismatch");
-        }
-        if (C.shape()[0] != static_cast<size_t>(M) || C.shape()[1] != static_cast<size_t>(N)) {
-            throw std::runtime_error("gemv_fp8_bf16_batched: output shape mismatch");
-        }
-
-        cudaError_t err = pygpukit_gemv_fp8_bf16_batched(
-            A.data(), B_fp8.data(), B_scale.data(), C.data(),
-            K, N, M, scale_stride_n, nullptr
-        );
-
-        if (err != cudaSuccess) {
-            throw std::runtime_error("gemv_fp8_bf16_batched failed: " + std::string(cudaGetErrorString(err)));
-        }
-    }, py::arg("A"), py::arg("B_fp8"), py::arg("B_scale"), py::arg("C"),
-       "Batched FP8 GEMV: C[M,N] = A[M,K] @ B_fp8[K,N] (online dequantization with block-wise scale)");
-
-    // ========================================================================
     // Optimized FP8 GEMV (warp-level reduction, smem, vectorized)
-    // NOTE: Uses [N, K] weight layout (NOT transposed like the old kernel)
+    // NOTE: Uses [N, K] weight layout for coalesced access
     // ========================================================================
 
     m.def("gemv_fp8_bf16_opt", [](const GPUArray& A, const GPUArray& B_nk, const GPUArray& B_scale, GPUArray& C) {
@@ -2093,15 +1981,6 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B_nk"), py::arg("B_scale"), py::arg("C"),
        "Optimized batched FP8 GEMV: C[M,N] = A[M,K] @ B_nk[N,K]^T (warp-reduce, smem, vec4)");
-
-    m.def("fp8_get_sizes", [](int K, int N) {
-        size_t scale_size;
-        pygpukit_fp8_get_sizes(K, N, &scale_size);
-        int scale_k = (K + 127) / 128;
-        int scale_n = (N + 127) / 128;
-        return py::make_tuple(scale_k, scale_n, scale_size);
-    }, py::arg("K"), py::arg("N"),
-       "Get scale tensor dimensions for FP8: returns (scale_K, scale_N, scale_size_bytes)");
 
     // ========================================================================
     // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output (SM120)
@@ -2348,108 +2227,6 @@ void init_ops_bindings(py::module_& m) {
     // ========================================================================
     // Int8 GEMM via FP8 approximation (SM120)
     // SM120 has no native Int8 TensorCore, so we use FP8 as approximation
-    // ========================================================================
-
-    m.def("int8_gemm_available", []() {
-        return pygpukit_int8_gemm_sm120_available();
-    }, "Check if Int8 GEMM is available (SM120 via FP8 approximation)");
-
-    // Int8 GEMM with Int32 output (for full precision accumulation)
-    m.def("int8_gemm_int32_sm120", [](
-        const GPUArray& A, const GPUArray& B, GPUArray& D,
-        float scale_A, float scale_B, float descale_D
-    ) {
-        // A: [M, K] Int8 (RowMajor)
-        // B: [N, K] Int8 (stored as transposed for ColumnMajor)
-        // D: [M, N] Int32
-        if (A.dtype() != DataType::Int8) {
-            throw std::runtime_error("int8_gemm_int32_sm120: A must be int8");
-        }
-        if (B.dtype() != DataType::Int8) {
-            throw std::runtime_error("int8_gemm_int32_sm120: B must be int8");
-        }
-        if (D.dtype() != DataType::Int32) {
-            throw std::runtime_error("int8_gemm_int32_sm120: D must be int32");
-        }
-        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
-            throw std::runtime_error("int8_gemm_int32_sm120: A[M,K], B[N,K], D[M,N] required");
-        }
-
-        int M = A.shape()[0];
-        int K = A.shape()[1];
-        int N = B.shape()[0];  // B is [N, K] transposed
-
-        if (B.shape()[1] != static_cast<size_t>(K)) {
-            throw std::runtime_error("int8_gemm_int32_sm120: K dimension mismatch");
-        }
-        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
-            throw std::runtime_error("int8_gemm_int32_sm120: output shape mismatch");
-        }
-
-        cudaError_t err = pygpukit_gemm_int8_int8_int32_sm120(
-            reinterpret_cast<const int8_t*>(A.data()),
-            reinterpret_cast<const int8_t*>(B.data()),
-            reinterpret_cast<int32_t*>(D.data()),
-            M, N, K,
-            scale_A, scale_B, descale_D,
-            nullptr
-        );
-
-        if (err != cudaSuccess) {
-            throw std::runtime_error("int8_gemm_int32_sm120 failed: " + std::string(cudaGetErrorString(err)));
-        }
-    }, py::arg("A"), py::arg("B"), py::arg("D"),
-       py::arg("scale_A") = 1.0f, py::arg("scale_B") = 1.0f, py::arg("descale_D") = 1.0f,
-       "Int8 GEMM via FP8: D[M,N] = A[M,K] @ B[N,K]^T with Int32 output");
-
-    // Int8 GEMM with Int8 output (for quantized inference)
-    m.def("int8_gemm_int8_sm120", [](
-        const GPUArray& A, const GPUArray& B, GPUArray& D,
-        float scale_A, float scale_B, float descale_D
-    ) {
-        // A: [M, K] Int8 (RowMajor)
-        // B: [N, K] Int8 (stored as transposed for ColumnMajor)
-        // D: [M, N] Int8
-        if (A.dtype() != DataType::Int8) {
-            throw std::runtime_error("int8_gemm_int8_sm120: A must be int8");
-        }
-        if (B.dtype() != DataType::Int8) {
-            throw std::runtime_error("int8_gemm_int8_sm120: B must be int8");
-        }
-        if (D.dtype() != DataType::Int8) {
-            throw std::runtime_error("int8_gemm_int8_sm120: D must be int8");
-        }
-        if (A.ndim() != 2 || B.ndim() != 2 || D.ndim() != 2) {
-            throw std::runtime_error("int8_gemm_int8_sm120: A[M,K], B[N,K], D[M,N] required");
-        }
-
-        int M = A.shape()[0];
-        int K = A.shape()[1];
-        int N = B.shape()[0];  // B is [N, K] transposed
-
-        if (B.shape()[1] != static_cast<size_t>(K)) {
-            throw std::runtime_error("int8_gemm_int8_sm120: K dimension mismatch");
-        }
-        if (D.shape()[0] != static_cast<size_t>(M) || D.shape()[1] != static_cast<size_t>(N)) {
-            throw std::runtime_error("int8_gemm_int8_sm120: output shape mismatch");
-        }
-
-        cudaError_t err = pygpukit_gemm_int8_int8_int8_sm120(
-            reinterpret_cast<const int8_t*>(A.data()),
-            reinterpret_cast<const int8_t*>(B.data()),
-            reinterpret_cast<int8_t*>(D.data()),
-            M, N, K,
-            scale_A, scale_B, descale_D,
-            nullptr
-        );
-
-        if (err != cudaSuccess) {
-            throw std::runtime_error("int8_gemm_int8_sm120 failed: " + std::string(cudaGetErrorString(err)));
-        }
-    }, py::arg("A"), py::arg("B"), py::arg("D"),
-       py::arg("scale_A") = 1.0f, py::arg("scale_B") = 1.0f, py::arg("descale_D") = 1.0f,
-       "Int8 GEMM via FP8: D[M,N] = A[M,K] @ B[N,K]^T with Int8 output");
-
     // ========================================================================
     // Native Int8 GEMM using dp4a CUDA cores (exact computation)
     // Uses CUDA dp4a instruction for 4xInt8 dot product with Int32 accumulation

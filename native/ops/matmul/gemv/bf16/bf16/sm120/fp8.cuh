@@ -156,53 +156,6 @@ __device__ __forceinline__ float fp8_e4m3_to_f32_lut(uint8_t val) {
     return FP8_E4M3_LUT[val];
 }
 
-// ============================================================================
-// FP8 GEMV Configuration
-// ============================================================================
-
-struct GemvFP8Config {
-    static constexpr int BLOCK_SIZE = 256;  // 8 warps
-    static constexpr int TILE_N = 256;
-    static constexpr int UNROLL_K = 8;
-    static constexpr int BLOCK_QUANT_SIZE = 128;  // 128x128 block quantization
-};
-
-// ============================================================================
-// Launch Function Declarations
-// ============================================================================
-
-cudaError_t launch_gemv_fp8(
-    const __nv_bfloat16* A,
-    const uint8_t* B_fp8,
-    const __nv_bfloat16* B_scale,
-    __nv_bfloat16* C,
-    int K,
-    int N,
-    cudaStream_t stream = nullptr
-);
-
-bool dispatch_gemv_fp8(
-    const __nv_bfloat16* A,
-    const uint8_t* B_fp8,
-    const __nv_bfloat16* B_scale,
-    __nv_bfloat16* C,
-    int M,
-    int N,
-    int K,
-    cudaStream_t stream = nullptr
-);
-
-cudaError_t launch_gemv_fp8_batched(
-    const __nv_bfloat16* A,
-    const uint8_t* B_fp8,
-    const __nv_bfloat16* B_scale,
-    __nv_bfloat16* C,
-    int K,
-    int N,
-    int batch_count,
-    cudaStream_t stream = nullptr
-);
-
 }  // namespace gemv
 }  // namespace ops
 }  // namespace pygpukit
