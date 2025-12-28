@@ -369,21 +369,21 @@ For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 
 | Layer | K | N | BF16 | W8A8 | W4A16 | Int4 |
 |-------|------|-------|------|------|-------|------|
-| Qwen-7B hidden | 4096 | 4096 | 98 us | **32 us** | 140 us | 31 us |
-| Qwen-7B MLP up | 4096 | 14336 | 154 us | **44 us** | 141 us | 47 us |
-| Qwen-7B MLP down | 14336 | 4096 | 432 us | **47 us** | 404 us | 58 us |
-| Qwen-72B hidden | 8192 | 8192 | 262 us | **49 us** | 252 us | 51 us |
-| Qwen-72B MLP up | 8192 | 29568 | 356 us | 179 us | 436 us | **112 us** |
-| Qwen-72B MLP down | 29568 | 8192 | 863 us | — | 1393 us | **129 us** |
+| Qwen-7B hidden | 4096 | 4096 | 65 us | **10 us** | 140 us | 31 us |
+| Qwen-7B MLP up | 4096 | 14336 | 125 us | **17 us** | 141 us | 47 us |
+| Qwen-7B MLP down | 14336 | 4096 | 399 us | **22 us** | 404 us | 58 us |
+| Qwen-72B hidden | 8192 | 8192 | 232 us | **21 us** | 252 us | 51 us |
+| Qwen-72B MLP up | 8192 | 29568 | 324 us | 146 us | 436 us | **112 us** |
+| Qwen-72B MLP down | 29568 | 8192 | 839 us | 170 us | 1393 us | **129 us** |
 
 | Kernel | Format | Memory vs BF16 | Best For |
 |--------|--------|----------------|----------|
 | **BF16 GEMV** | A:BF16, B:BF16 | 100% | Baseline |
-| **W8A8 GEMV** | A:FP8, B:FP8 | 50% | Speed priority (3-9x faster) |
+| **W8A8 GEMV** | A:FP8, B:FP8 | 50% | Speed priority (6-18x faster) |
 | **W4A16 GEMV** | A:BF16, B:NVF4 | 25% | Memory priority |
 | **Int4 GEMV** | A:BF16, B:Int4 | 25% | Large K dimensions |
 
-> **Note:** W8A8 (FP8/FP8) GEMV is fastest for typical LLM sizes on SM120. Int4 GEMV excels at very large K (29568+) where FP8 has limitations.
+> **Note:** W8A8 (FP8/FP8) GEMV is 6-18x faster than BF16 for typical sizes on SM120. Int4 GEMV excels at very large K (29568+) where it matches or beats W8A8.
 
 ### GEMV Quantization Trade-offs (Explicit)
 
