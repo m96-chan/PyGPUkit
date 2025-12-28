@@ -41,6 +41,9 @@ dev = [
     "psutil>=5.0.0",
     "pre-commit>=3.0.0",
 ]
+triton = [
+    "triton>=3.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/m96-chan/PyGPUkit"
