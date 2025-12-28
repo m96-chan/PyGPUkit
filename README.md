@@ -99,6 +99,22 @@ They were all observed in production or real benchmarks.
 
 ---
 
+## What's New in v0.2.16
+
+### Kernel Code Cleanup
+Removed redundant low-speed GEMV/GEMM kernels to reduce binary size and maintenance burden:
+
+| Removed | Kept | Reason |
+|---------|------|--------|
+| FP8 GEMV basic (`fp8_kernels.cu`) | FP8 GEMV optimized (`fp8_opt_kernels.cu`) | [N,K] layout 3-9x faster |
+| Int8 GEMM via FP8 (`int8_via_fp8.cu`) | Int8 GEMM native dp4a (`int8_native.cu`) | Exact results, no approximation |
+
+### Build & CI Fixes
+- Fixed missing `<cstdint>` include for Linux builds
+- Added pytest skip markers for GPU-only tests in CI
+
+---
+
 ## What's New in v0.2.15
 
 ### FP8 I/O GEMM (SM120)
@@ -193,10 +209,10 @@ v0.2.13 and v0.2.14 fix wheel RECORD file issues that caused PyPI deprecation wa
 | v0.2.14 | Windows wheel missing `licenses/LICENSE` in RECORD | Added `-Recurse` to scan dist-info subdirectories |
 | v0.2.13 | Hardcoded version in release workflow | Dynamic dist-info folder detection |
 
-**Recommended:** Use v0.2.15 or later.
+**Recommended:** Use v0.2.16 or later.
 
 ```bash
-pip install pygpukit>=0.2.15
+pip install pygpukit>=0.2.16
 ```
 
 ---
@@ -706,8 +722,8 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 
 For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 
-| Layer | K | N | BF16 | FP8 | NVF4 | Int4 |
-|-------|------|-------|------|-----|------|------|
+| Layer | K | N | BF16 | W8A8 | W4A16 | Int4 |
+|-------|------|-------|------|------|-------|------|
 | Qwen-7B hidden | 4096 | 4096 | 98 us | **32 us** | 140 us | 31 us |
 | Qwen-7B MLP up | 4096 | 14336 | 154 us | **44 us** | 141 us | 47 us |
 | Qwen-7B MLP down | 14336 | 4096 | 432 us | **47 us** | 404 us | 58 us |
@@ -715,14 +731,14 @@ For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 | Qwen-72B MLP up | 8192 | 29568 | 356 us | 179 us | 436 us | **112 us** |
 | Qwen-72B MLP down | 29568 | 8192 | 863 us | — | 1393 us | **129 us** |
 
-| Kernel | Memory vs BF16 | Best For |
-|--------|----------------|----------|
-| **BF16 GEMV** | 100% | Baseline |
-| **FP8 GEMV** | 50% | Speed priority (3-9x faster) |
-| **NVF4 GEMV** | 25% | Memory priority |
-| **Int4 GEMV** | 25% | Large K dimensions |
+| Kernel | Format | Memory vs BF16 | Best For |
+|--------|--------|----------------|----------|
+| **BF16 GEMV** | A:BF16, B:BF16 | 100% | Baseline |
+| **W8A8 GEMV** | A:FP8, B:FP8 | 50% | Speed priority (3-9x faster) |
+| **W4A16 GEMV** | A:BF16, B:NVF4 | 25% | Memory priority |
+| **Int4 GEMV** | A:BF16, B:Int4 | 25% | Large K dimensions |
 
-> **Note:** FP8 GEMV is fastest for typical LLM sizes. Int4 GEMV excels at very large K (29568+) where FP8 has limitations.
+> **Note:** W8A8 (FP8/FP8) GEMV is fastest for typical LLM sizes on SM120. Int4 GEMV excels at very large K (29568+) where FP8 has limitations.
 
 ### GEMV Quantization Trade-offs (Explicit)
 
@@ -963,6 +979,7 @@ PyGPUkit/
 | **v0.2.11** | **Batch decode** (6.8x speedup), Decode Strategy framework, Driver API async, Dual CUDA builds, RTX 5090 (SM120) |
 | **v0.2.12** | **Advanced audio processing** (ISTFT, Griffin-Lim, HPSS, CQT, pitch detection, time stretch) |
 | **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
+| **v0.2.16** | **Kernel cleanup** (removed redundant slow kernels), Build/CI fixes |
 
 ### Planned
 
