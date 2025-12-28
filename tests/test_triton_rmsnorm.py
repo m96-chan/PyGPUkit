@@ -1,8 +1,9 @@
 """Test Triton RMSNorm kernel with PyGPUkit."""
 
 import numpy as np
-import pytest
 import pygpukit._pygpukit_native as native
+import pytest
+
 from pygpukit.triton import from_gpuarray, kernels
 
 pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
@@ -10,7 +11,7 @@ pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
 
 def rmsnorm_numpy(x: np.ndarray, weight: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     """Reference RMSNorm implementation in NumPy."""
-    rms = np.sqrt(np.mean(x ** 2, axis=-1, keepdims=True) + eps)
+    rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + eps)
     return x / rms * weight
 
 
@@ -57,8 +58,8 @@ def test_rmsnorm():
         print("Result: PASS")
     else:
         print("Result: FAIL")
-        print(f"Expected[:2,:2,:4]:\n{expected[:2,:2,:4]}")
-        print(f"Got[:2,:2,:4]:\n{y_np[:2,:2,:4]}")
+        print(f"Expected[:2,:2,:4]:\n{expected[:2, :2, :4]}")
+        print(f"Got[:2,:2,:4]:\n{y_np[:2, :2, :4]}")
 
 
 if __name__ == "__main__":

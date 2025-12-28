@@ -1,8 +1,9 @@
 """Test all Triton kernels with PyGPUkit."""
 
 import numpy as np
-import pytest
 import pygpukit._pygpukit_native as native
+import pytest
+
 from pygpukit.triton import from_gpuarray, kernels
 
 pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
@@ -10,11 +11,13 @@ pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
 
 def rmsnorm_numpy(x: np.ndarray, weight: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     """Reference RMSNorm implementation in NumPy."""
-    rms = np.sqrt(np.mean(x ** 2, axis=-1, keepdims=True) + eps)
+    rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + eps)
     return x / rms * weight
 
 
-def layernorm_numpy(x: np.ndarray, weight: np.ndarray, bias: np.ndarray | None = None, eps: float = 1e-5) -> np.ndarray:
+def layernorm_numpy(
+    x: np.ndarray, weight: np.ndarray, bias: np.ndarray | None = None, eps: float = 1e-5
+) -> np.ndarray:
     """Reference LayerNorm implementation in NumPy."""
     mean = np.mean(x, axis=-1, keepdims=True)
     var = np.var(x, axis=-1, keepdims=True)
@@ -137,7 +140,12 @@ def test_rotary():
     sin = native.from_numpy(sin_np)
     y = native.empty([batch, seq, num_heads, head_dim], native.Float32)
 
-    tx, tcos, tsin, tout = from_gpuarray(x), from_gpuarray(cos), from_gpuarray(sin), from_gpuarray(y)
+    tx, tcos, tsin, tout = (
+        from_gpuarray(x),
+        from_gpuarray(cos),
+        from_gpuarray(sin),
+        from_gpuarray(y),
+    )
     kernels.rotary(tx, tcos, tsin, tout)
     native.device_synchronize()
 

@@ -1,10 +1,11 @@
 """Test Triton with raw pointers from PyGPUkit."""
 
 import numpy as np
+import pygpukit._pygpukit_native as native
 import pytest
 import triton
 import triton.language as tl
-import pygpukit._pygpukit_native as native
+
 from pygpukit.triton import from_gpuarray
 
 pytestmark = pytest.mark.gpu  # Requires GPU backend, not CPU simulation
@@ -68,6 +69,7 @@ def test_raw_pointer():
     except Exception as e:
         print(f"\nTritonArray wrapper failed: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
 
 
