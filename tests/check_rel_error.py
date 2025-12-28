@@ -5,8 +5,10 @@ Formula: Rel.Err = ||C_test - C_fp32|| / ||C_fp32||
 """
 
 import argparse
+
 import numpy as np
-from pygpukit.core import zeros, from_numpy
+
+from pygpukit.core import from_numpy, zeros
 from pygpukit.core.backend import get_native_module
 
 
@@ -75,12 +77,12 @@ def quantize_blockwise(data: np.ndarray, block_size: int):
 
 
 def check_bf16(native, A_f32, B_f32, C_fp32):
-    K, N = len(A_f32), len(C_fp32)
+    _, N = len(A_f32), len(C_fp32)
     A_bf16 = f32_to_bf16(A_f32)
     B_bf16 = f32_to_bf16(B_f32.T.copy())  # gemv_bf16 uses B[K,N]
     A_gpu = from_numpy(A_bf16)
     B_gpu = from_numpy(B_bf16)
-    C_gpu = zeros((N,), dtype='bfloat16')
+    C_gpu = zeros((N,), dtype="bfloat16")
     native.gemv_bf16(A_gpu._get_native(), B_gpu._get_native(), C_gpu._get_native())
     native.device_synchronize()
     return rel_error(bf16_to_f32(C_gpu.to_numpy()), C_fp32)
@@ -95,11 +97,13 @@ def check_w8a8(native, A_f32, B_f32, C_fp32):
     B_gpu = from_numpy(B_fp8)
     sA_gpu = from_numpy(sA)
     sB_gpu = from_numpy(sB.flatten())
-    C_gpu = zeros((N,), dtype='bfloat16')
+    C_gpu = zeros((N,), dtype="bfloat16")
     native.gemv_fp8_fp8_bf16_sm120(
-        A_gpu._get_native(), B_gpu._get_native(),
-        sA_gpu._get_native(), sB_gpu._get_native(),
-        C_gpu._get_native()
+        A_gpu._get_native(),
+        B_gpu._get_native(),
+        sA_gpu._get_native(),
+        sB_gpu._get_native(),
+        C_gpu._get_native(),
     )
     native.device_synchronize()
     return rel_error(bf16_to_f32(C_gpu.to_numpy()), C_fp32)
@@ -131,10 +135,9 @@ def check_w8a16(native, A_f32, B_f32, C_fp32):
     A_gpu = from_numpy(A_bf16)
     B_gpu = from_numpy(B_fp8)
     sB_gpu = from_numpy(sB_bf16)
-    C_gpu = zeros((N,), dtype='bfloat16')
+    C_gpu = zeros((N,), dtype="bfloat16")
     native.gemv_fp8_bf16_opt(
-        A_gpu._get_native(), B_gpu._get_native(),
-        sB_gpu._get_native(), C_gpu._get_native()
+        A_gpu._get_native(), B_gpu._get_native(), sB_gpu._get_native(), C_gpu._get_native()
     )
     native.device_synchronize()
     return rel_error(bf16_to_f32(C_gpu.to_numpy()), C_fp32)
@@ -180,7 +183,7 @@ def main():
         name, fn = kernels[k]
         try:
             err = fn(native, A_f32, B_f32, C_fp32)
-            print(f"{name:<10} {err*100:.2f}%")
+            print(f"{name:<10} {err * 100:.2f}%")
         except Exception as e:
             print(f"{name:<10} ERROR: {e}")
 
