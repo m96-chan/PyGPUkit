@@ -152,14 +152,21 @@ def transpose(a: GPUArray) -> GPUArray:
         A new GPUArray of shape [cols, rows] containing a.T.
 
     Raises:
-        ValueError: If input is not 2D or dtype is not a float type.
+        ValueError: If input is not 2D.
     """
-    _validate_float_dtype(a, "transpose")
-
     if a.ndim != 2:
         raise ValueError(f"transpose expects 2D input [rows, cols], got {a.ndim}D")
 
+    from pygpukit.core.dtypes import uint8
+
     backend = get_backend()
+
+    # For uint8 (FP8 weights), use CPU fallback since native transpose
+    # doesn't support integer types
+    if a.dtype == uint8:
+        return _transpose_cpu(a)
+
+    _validate_float_dtype(a, "transpose")
 
     if isinstance(backend, NativeBackend) and backend.is_available():
         return _transpose_native(a)
@@ -1459,6 +1466,406 @@ def gemv_bf16(
         if out is not None:
             result = result + beta * out.to_numpy().astype(np.float32)
         return from_numpy(result.astype(np.float16).view(np.uint16).astype(np.uint16))
+
+
+# Flag to track if FP8 LUT has been initialized
+_FP8_LUT_INITIALIZED = False
+
+
+def fp8_init_lut() -> None:
+    """Initialize FP8 E4M3 lookup table for dequantization.
+
+    Note: LUT is defined as __device__ __constant__ in C++ and initialized
+    at compile time, so this function is a no-op. Kept for API compatibility.
+    """
+    global _FP8_LUT_INITIALIZED
+    if _FP8_LUT_INITIALIZED:
+        return
+    # LUT is already initialized in constant memory at compile time
+    _FP8_LUT_INITIALIZED = True
+
+
+def gemv_fp8_bf16(
+    a: GPUArray,
+    b_nk: GPUArray,
+    b_scale: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Optimized FP8 GEMV: C[N] = A[K] @ B[N,K]^T.
+
+    W8A16 GEMV: FP8 weights with BF16 activation and output.
+    Uses warp-level reduction, shared memory, and vectorized loads.
+
+    Args:
+        a: Activation vector [K], BF16.
+        b_nk: FP8 E4M3 weight matrix [N, K], stored as uint8.
+        b_scale: Block-wise scale factors [N/128, K/128], BF16.
+        out: Optional output vector [N], BF16.
+
+    Returns:
+        Output vector [N], BF16.
+
+    Note:
+        Weight layout is [N, K] (row = output dimension).
+        Use original weight tensor directly (no transpose needed).
+    """
+    from pygpukit.core.dtypes import bfloat16, uint8
+
+    if a.ndim != 1:
+        raise ValueError(f"gemv_fp8_bf16 requires 1D input vector, got {a.ndim}D")
+
+    if b_nk.ndim != 2:
+        raise ValueError(f"gemv_fp8_bf16 requires 2D weight matrix, got {b_nk.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"gemv_fp8_bf16 requires bfloat16 activation, got {a.dtype}")
+
+    if b_nk.dtype != uint8:
+        raise ValueError(f"gemv_fp8_bf16 requires uint8 (FP8) weights, got {b_nk.dtype}")
+
+    if b_scale.dtype != bfloat16:
+        raise ValueError(f"gemv_fp8_bf16 requires bfloat16 scale, got {b_scale.dtype}")
+
+    K = a.shape[0]
+    N = b_nk.shape[0]  # [N, K] layout
+
+    if b_nk.shape[1] != K:
+        raise ValueError(f"gemv_fp8_bf16 dimension mismatch: A[{K}] vs B[{N}, {b_nk.shape[1]}]")
+
+    # Validate output
+    if out is not None:
+        if out.shape != (N,):
+            raise ValueError(f"out shape {out.shape} does not match expected ({N},)")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_nk_native = b_nk._get_native()
+        b_scale_native = b_scale._get_native()
+
+        if out is None:
+            out_native = native.empty([N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.gemv_fp8_bf16_opt(a_native, b_nk_native, b_scale_native, out_native)
+
+        return out
+    else:
+        raise NotImplementedError("FP8 GEMV requires native GPU backend")
+
+
+def gemv_fp8_bf16_batched(
+    a: GPUArray,
+    b_nk: GPUArray,
+    b_scale: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Optimized batched FP8 GEMV: C[M,N] = A[M,K] @ B[N,K]^T.
+
+    W8A16 GEMM for M>1: FP8 weights with BF16 activation and output.
+    Uses warp-level reduction, shared memory, and vectorized loads.
+
+    Args:
+        a: Activation matrix [M, K], BF16.
+        b_nk: FP8 E4M3 weight matrix [N, K], stored as uint8.
+        b_scale: Block-wise scale factors [N/128, K/128], BF16.
+        out: Optional output matrix [M, N], BF16.
+
+    Returns:
+        Output matrix [M, N], BF16.
+
+    Note:
+        Weight layout is [N, K] (row = output dimension).
+        Use original weight tensor directly (no transpose needed).
+    """
+    from pygpukit.core.dtypes import bfloat16, uint8
+
+    if a.ndim != 2:
+        raise ValueError(f"gemv_fp8_bf16_batched requires 2D input matrix, got {a.ndim}D")
+
+    if b_nk.ndim != 2:
+        raise ValueError(f"gemv_fp8_bf16_batched requires 2D weight matrix, got {b_nk.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"gemv_fp8_bf16_batched requires bfloat16 activation, got {a.dtype}")
+
+    if b_nk.dtype != uint8:
+        raise ValueError(f"gemv_fp8_bf16_batched requires uint8 (FP8) weights, got {b_nk.dtype}")
+
+    if b_scale.dtype != bfloat16:
+        raise ValueError(f"gemv_fp8_bf16_batched requires bfloat16 scale, got {b_scale.dtype}")
+
+    M = a.shape[0]
+    K = a.shape[1]
+    N = b_nk.shape[0]  # [N, K] layout
+
+    if b_nk.shape[1] != K:
+        raise ValueError(
+            f"gemv_fp8_bf16_batched dimension mismatch: A[{M},{K}] vs B[{N},{b_nk.shape[1]}]"
+        )
+
+    # Validate output
+    if out is not None:
+        if out.shape != (M, N):
+            raise ValueError(f"out shape {out.shape} does not match expected ({M}, {N})")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_nk_native = b_nk._get_native()
+        b_scale_native = b_scale._get_native()
+
+        if out is None:
+            out_native = native.empty([M, N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.gemv_fp8_bf16_opt_batched(a_native, b_nk_native, b_scale_native, out_native)
+
+        return out
+    else:
+        raise NotImplementedError("FP8 batched GEMV requires native GPU backend")
+
+
+def w8a16_gemm_sm120(
+    a: GPUArray,
+    b_fp8: GPUArray,
+    b_scale: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """W8A16 GEMM for SM120: C[M,N] = A[M,K] @ dequant(B_fp8[K,N]).
+
+    FP8 weight x BF16 activation -> BF16 output.
+    Uses TensorCore GEMM with online FP8 dequantization.
+    More efficient than batched GEMV for M > 1.
+
+    Args:
+        a: Activation matrix [M, K], BF16.
+        b_fp8: FP8 E4M3 weight matrix [K, N], stored as uint8.
+        b_scale: Block-wise scale factors [K/128, N/128], BF16.
+        out: Optional output matrix [M, N], BF16.
+
+    Returns:
+        Output matrix [M, N], BF16.
+    """
+    from pygpukit.core.dtypes import bfloat16, uint8
+
+    if a.ndim != 2:
+        raise ValueError(f"w8a16_gemm_sm120 requires 2D input matrix, got {a.ndim}D")
+
+    if b_fp8.ndim != 2:
+        raise ValueError(f"w8a16_gemm_sm120 requires 2D weight matrix, got {b_fp8.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"w8a16_gemm_sm120 requires bfloat16 activation, got {a.dtype}")
+
+    if b_fp8.dtype != uint8:
+        raise ValueError(f"w8a16_gemm_sm120 requires uint8 (FP8) weights, got {b_fp8.dtype}")
+
+    if b_scale.dtype != bfloat16:
+        raise ValueError(f"w8a16_gemm_sm120 requires bfloat16 scale, got {b_scale.dtype}")
+
+    M = a.shape[0]
+    K = a.shape[1]
+    if b_fp8.shape[0] != K:
+        raise ValueError(
+            f"w8a16_gemm_sm120 dimension mismatch: A[{M},{K}] vs B[{b_fp8.shape[0]}, {b_fp8.shape[1]}]"
+        )
+
+    N = b_fp8.shape[1]
+
+    # Validate output
+    if out is not None:
+        if out.shape != (M, N):
+            raise ValueError(f"out shape {out.shape} does not match expected ({M}, {N})")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    # Initialize LUT if not already done
+    fp8_init_lut()
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_fp8_native = b_fp8._get_native()
+        b_scale_native = b_scale._get_native()
+
+        if out is None:
+            out_native = native.empty([M, N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.w8a16_gemm_sm120(a_native, b_fp8_native, b_scale_native, out_native)
+
+        return out
+    else:
+        raise NotImplementedError("W8A16 GEMM requires native GPU backend with SM120")
+
+
+# Track if grouped GEMM LUT is initialized
+_grouped_gemm_lut_initialized = False
+
+
+def grouped_gemm_init_lut() -> None:
+    """Initialize FP8->BF16 LUT for grouped GEMM.
+
+    This must be called once before using grouped_gemm_fp8_bf16.
+    """
+    global _grouped_gemm_lut_initialized
+    if _grouped_gemm_lut_initialized:
+        return
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        native.grouped_gemm_init_lut()
+        _grouped_gemm_lut_initialized = True
+    else:
+        raise NotImplementedError("Grouped GEMM requires native GPU backend")
+
+
+def grouped_gemm_fp8_bf16(
+    a: GPUArray,
+    b_stacked: GPUArray,
+    b_scale: GPUArray,
+    row_expert_ids: GPUArray,
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Grouped GEMM for MoE: C = A @ B_stacked with per-row expert IDs.
+
+    Each row has an associated expert ID, and the kernel dispatches to the
+    correct expert's weights for each row.
+
+    Args:
+        a: Input tokens [M, K], BF16.
+        b_stacked: Stacked expert weights [num_experts, N, K], FP8 (uint8).
+        b_scale: Block-wise scales [num_experts, N/128, K/128], BF16.
+        row_expert_ids: Expert ID for each row [M], int32.
+        out: Optional output tensor [M, N], BF16.
+
+    Returns:
+        Output tensor [M, N], BF16.
+    """
+    from pygpukit.core.dtypes import bfloat16, int32, uint8
+
+    if a.ndim != 2:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires 2D input, got {a.ndim}D")
+
+    if b_stacked.ndim != 3:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires 3D weight, got {b_stacked.ndim}D")
+
+    if a.dtype != bfloat16:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires bfloat16 input, got {a.dtype}")
+
+    if b_stacked.dtype != uint8:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16 requires uint8 (FP8) weights, got {b_stacked.dtype}"
+        )
+
+    if b_scale.dtype != bfloat16:
+        raise ValueError(f"grouped_gemm_fp8_bf16 requires bfloat16 scale, got {b_scale.dtype}")
+
+    if row_expert_ids.dtype != int32:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16 requires int32 row_expert_ids, got {row_expert_ids.dtype}"
+        )
+
+    M = a.shape[0]
+    K = a.shape[1]
+    N = b_stacked.shape[1]
+
+    if b_stacked.shape[2] != K:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16: K mismatch A[{M},{K}] vs B[...{N},{b_stacked.shape[2]}]"
+        )
+
+    if row_expert_ids.shape[0] != M:
+        raise ValueError(
+            f"grouped_gemm_fp8_bf16: row_expert_ids size {row_expert_ids.shape[0]} != M ({M})"
+        )
+
+    # Validate output
+    if out is not None:
+        if out.shape != (M, N):
+            raise ValueError(f"out shape {out.shape} does not match expected ({M}, {N})")
+        if out.dtype != bfloat16:
+            raise ValueError(f"out dtype {out.dtype} must be bfloat16")
+
+    # Initialize LUT if not already done
+    grouped_gemm_init_lut()
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+
+        a_native = a._get_native()
+        b_stacked_native = b_stacked._get_native()
+        b_scale_native = b_scale._get_native()
+        row_expert_ids_native = row_expert_ids._get_native()
+
+        if out is None:
+            out_native = native.empty([M, N], native.DataType.BFloat16)
+            out = GPUArray._wrap_native(out_native)
+        else:
+            out_native = out._get_native()
+
+        native.grouped_gemm_fp8_bf16(
+            a_native, b_stacked_native, b_scale_native, out_native, row_expert_ids_native
+        )
+
+        return out
+    else:
+        raise NotImplementedError("Grouped GEMM requires native GPU backend")
+
+
+def fp8_get_sizes(K: int, N: int) -> tuple[int, int, int]:
+    """Get scale tensor dimensions for FP8 block quantization.
+
+    Args:
+        K: Input dimension.
+        N: Output dimension.
+
+    Returns:
+        (scale_K, scale_N, scale_size_bytes): Scale tensor dimensions
+        for 128x128 block quantization.
+    """
+    scale_k = (K + 127) // 128
+    scale_n = (N + 127) // 128
+    scale_size = scale_k * scale_n * 2  # BF16 = 2 bytes
+    return scale_k, scale_n, scale_size
 
 
 # ============================================================================

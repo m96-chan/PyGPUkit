@@ -6,10 +6,12 @@ Provides:
 - load_llama_from_safetensors: LLaMA specific loader
 - load_qwen3_from_safetensors: Qwen3 specific loader
 - repack_model_weights: Optimize GPU memory placement
+- FP8 dequantization: Block-wise FP8 E4M3 to BF16/FP16 conversion
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -22,15 +24,185 @@ from pygpukit.core.factory import empty, from_numpy
 from pygpukit.llm.config import (
     GPT2_SPEC,
     LLAMA_SPEC,
+    MIXTRAL_SPEC,
     QWEN3_SPEC,
     ModelSpec,
     TransformerConfig,
     detect_model_spec,
 )
-from pygpukit.llm.layers import MLP, Attention, Norm, TransformerBlock
+from pygpukit.llm.layers import (
+    MLP,
+    Attention,
+    LinearBF16,
+    LinearFP8,
+    MoELayer,
+    Norm,
+    TransformerBlock,
+)
 
 if TYPE_CHECKING:
+    from pygpukit.llm import SafeTensorsFile, ShardedSafeTensorsFile
     from pygpukit.llm.model import CausalTransformerModel
+
+
+# =============================================================================
+# FP8 Quantization Support
+# =============================================================================
+
+
+@dataclass
+class FP8QuantConfig:
+    """FP8 quantization configuration from HuggingFace config.json."""
+
+    quant_method: str  # "fp8"
+    fmt: str  # "e4m3" or "e5m2"
+    weight_block_size: tuple[int, int]  # e.g., (128, 128)
+    modules_to_not_convert: list[str]  # List of module name patterns to skip
+
+    @classmethod
+    def from_config(cls, config: dict) -> FP8QuantConfig | None:
+        """Parse quantization config from HF config.json."""
+        qc = config.get("quantization_config")
+        if qc is None or qc.get("quant_method") != "fp8":
+            return None
+
+        block_size = qc.get("weight_block_size", [128, 128])
+        return cls(
+            quant_method="fp8",
+            fmt=qc.get("fmt", "e4m3"),
+            weight_block_size=(block_size[0], block_size[1]),
+            modules_to_not_convert=qc.get("modules_to_not_convert", []),
+        )
+
+
+# FP8 E4M3 to float32 lookup table (256 entries)
+# Format: 1 sign bit, 4 exponent bits, 3 mantissa bits
+# Special values: NaN (0x7F/0xFF), no infinity
+_FP8_E4M3_TO_F32_TABLE: np.ndarray | None = None
+
+
+def _get_fp8_e4m3_table() -> np.ndarray:
+    """Build FP8 E4M3 to float32 conversion lookup table."""
+    global _FP8_E4M3_TO_F32_TABLE
+    if _FP8_E4M3_TO_F32_TABLE is not None:
+        return _FP8_E4M3_TO_F32_TABLE
+
+    table = np.zeros(256, dtype=np.float32)
+    for i in range(256):
+        # Extract components
+        sign = (i >> 7) & 1
+        exp = (i >> 3) & 0xF  # 4 exponent bits
+        mant = i & 0x7  # 3 mantissa bits
+
+        if exp == 0xF and mant == 0x7:
+            # NaN (0x7F and 0xFF)
+            table[i] = np.nan
+        elif exp == 0:
+            # Subnormal (exponent = 0)
+            # Value = (-1)^sign * 2^(-6) * (0.mantissa)
+            value = (mant / 8.0) * (2.0**-6)
+            table[i] = -value if sign else value
+        else:
+            # Normal
+            # Value = (-1)^sign * 2^(exp-7) * (1.mantissa)
+            value = (1.0 + mant / 8.0) * (2.0 ** (exp - 7))
+            table[i] = -value if sign else value
+
+    _FP8_E4M3_TO_F32_TABLE = table
+    return table
+
+
+def dequantize_fp8_e4m3_block(
+    fp8_bytes: np.ndarray,
+    scale_inv: np.ndarray,
+    block_size: tuple[int, int] = (128, 128),
+) -> np.ndarray:
+    """Dequantize FP8 E4M3 weight with block-wise scaling.
+
+    Args:
+        fp8_bytes: Raw FP8 data as uint8 array, shape [H, W]
+        scale_inv: Inverse scale factors, shape [H//block_h, W//block_w]
+        block_size: Block size for quantization (default 128x128)
+
+    Returns:
+        Dequantized float32 array, shape [H, W]
+    """
+    # Convert FP8 bytes to float32 using lookup table
+    table = _get_fp8_e4m3_table()
+    f32 = table[fp8_bytes.ravel()].reshape(fp8_bytes.shape)
+
+    # Apply block-wise scaling
+    H, W = f32.shape
+    block_h, block_w = block_size
+
+    # Ensure scale_inv is float32 for computation
+    if scale_inv.dtype != np.float32:
+        # BF16 stored as uint16 -> convert to float32
+        if scale_inv.dtype == np.uint16:
+            scale_f32 = np.empty(scale_inv.shape, dtype=np.float32)
+            scale_f32.view(np.uint32)[:] = scale_inv.astype(np.uint32) << 16
+        else:
+            scale_f32 = scale_inv.astype(np.float32)
+    else:
+        scale_f32 = scale_inv
+
+    # Apply scaling per block using broadcasting
+    num_blocks_h = H // block_h
+    num_blocks_w = W // block_w
+
+    # Reshape for vectorized block scaling
+    f32_reshaped = f32.reshape(num_blocks_h, block_h, num_blocks_w, block_w)
+    scale_expanded = scale_f32[:, np.newaxis, :, np.newaxis]
+    f32_scaled = f32_reshaped * scale_expanded
+    result = f32_scaled.reshape(H, W)
+
+    return result
+
+
+def is_fp8_weight(tensor_name: str, tensor_names: list[str]) -> bool:
+    """Check if a weight tensor has an FP8 scale tensor."""
+    scale_name = tensor_name + "_scale_inv"
+    return scale_name in tensor_names
+
+
+def load_fp8_weight_direct(
+    st: SafeTensorsFile | ShardedSafeTensorsFile,
+    weight_name: str,
+    block_size: tuple[int, int] = (128, 128),
+) -> tuple[GPUArray, GPUArray]:
+    """Load FP8 weight directly without dequantization.
+
+    Returns:
+        (weight_fp8, scale_inv) tuple:
+        - weight_fp8: [out_features, in_features] as uint8
+        - scale_inv: [out/block_h, in/block_w] as bf16
+    """
+    from pygpukit.core.factory import from_numpy
+    from pygpukit.llm import Dtype
+
+    # Load FP8 weight as uint8
+    info = st.tensor_info(weight_name)
+    data = st.tensor_bytes(weight_name)
+    fp8_bytes = np.frombuffer(data, dtype=np.uint8).reshape(info.shape).copy()
+    weight_fp8 = from_numpy(fp8_bytes)
+
+    # Load scale_inv tensor
+    scale_name = weight_name + "_scale_inv"
+    scale_info = st.tensor_info(scale_name)
+    scale_data = st.tensor_bytes(scale_name)
+
+    # scale_inv is typically bfloat16
+    if scale_info.dtype == Dtype.BFloat16:
+        scale_inv = np.frombuffer(scale_data, dtype=np.uint16).reshape(scale_info.shape).copy()
+    else:
+        # Convert float32 to bfloat16
+        scale_f32 = np.frombuffer(scale_data, dtype=np.float32).reshape(scale_info.shape)
+        uint32_view = scale_f32.view(np.uint32)
+        scale_inv = ((uint32_view + 0x7FFF + ((uint32_view >> 16) & 1)) >> 16).astype(np.uint16)
+
+    scale_inv_gpu = from_numpy(scale_inv)
+
+    return weight_fp8, scale_inv_gpu
 
 
 # =============================================================================
@@ -86,6 +258,22 @@ def load_qwen3_from_safetensors(
     return load_model_from_safetensors(model_path, dtype=dtype, spec=QWEN3_SPEC)
 
 
+def load_mixtral_from_safetensors(
+    model_path: str,
+    dtype: str = "bfloat16",
+) -> CausalTransformerModel:
+    """Load Mixtral MoE model from safetensors file.
+
+    Args:
+        model_path: Path to model.safetensors or model.safetensors.index.json
+        dtype: Weight dtype ("float32", "float16", or "bfloat16")
+
+    Returns:
+        CausalTransformerModel instance with MoELayer blocks
+    """
+    return load_model_from_safetensors(model_path, dtype=dtype, spec=MIXTRAL_SPEC)
+
+
 # =============================================================================
 # Model Weight Repacking
 # =============================================================================
@@ -104,8 +292,16 @@ def repack_model_weights(model: CausalTransformerModel) -> None:
 
     Args:
         model: CausalTransformerModel to repack in-place
+
+    Note:
+        MoE models are currently skipped (not repacked) due to different
+        weight structure. This will be addressed in a future update.
     """
     import gc
+
+    # Skip repacking for MoE models (different weight structure)
+    if model.blocks and isinstance(model.blocks[0].mlp, MoELayer):
+        return
 
     # Phase 1: Collect all weights as numpy arrays
     numpy_cache: dict[int, dict] = {}
@@ -421,7 +617,62 @@ def load_model_from_safetensors(
     if spec is None:
         spec = detect_model_spec(st.tensor_names)
 
-    # Helper to load tensor with dtype conversion
+    # Detect FP8 quantization from config.json
+    fp8_config: FP8QuantConfig | None = None
+    try:
+        import json
+        from pathlib import Path
+
+        model_path_obj = Path(model_path)
+        if model_path_obj.name.endswith(".index.json"):
+            config_path = model_path_obj.parent / "config.json"
+        else:
+            config_path = model_path_obj.parent / "config.json"
+
+        if config_path.exists():
+            with open(config_path, encoding="utf-8") as f:
+                hf_config = json.load(f)
+            fp8_config = FP8QuantConfig.from_config(hf_config)
+            if fp8_config is not None:
+                print(
+                    f"[FP8] Detected FP8 quantization: {fp8_config.fmt}, block_size={fp8_config.weight_block_size}"
+                )
+    except Exception:
+        pass
+
+    # Helper to check if a weight is FP8 quantized
+    def is_fp8_weight(name: str) -> bool:
+        scale_inv_name = name + "_scale_inv"
+        return fp8_config is not None and scale_inv_name in st.tensor_names
+
+    # Helper to load linear layer (returns LinearBF16 or LinearFP8)
+    def load_linear(
+        weight_name: str,
+        bias_name: str | None = None,
+        do_transpose: bool = False,
+    ) -> LinearBF16 | LinearFP8:
+        """Load a linear layer, using LinearFP8 for FP8 weights."""
+        if is_fp8_weight(weight_name):
+            # FP8 path: load as LinearFP8 without dequantization
+            weight_fp8, scale_inv = load_fp8_weight_direct(
+                st,
+                weight_name,
+                fp8_config.weight_block_size,  # type: ignore
+            )
+            # Load bias if specified (bias is not quantized)
+            bias = None
+            if bias_name and bias_name in st.tensor_names:
+                bias = load_tensor(bias_name)
+            return LinearFP8(weight_fp8, scale_inv, bias, fp8_config.weight_block_size)  # type: ignore
+        else:
+            # Standard path: load as LinearBF16
+            weight = load_tensor(weight_name, do_transpose)
+            bias = None
+            if bias_name and bias_name in st.tensor_names:
+                bias = load_tensor(bias_name)
+            return LinearBF16(weight, bias)
+
+    # Helper to load tensor with dtype conversion (no FP8 dequant - use load_linear for weights)
     def load_tensor(name: str, do_transpose: bool = False) -> GPUArray:
         info = st.tensor_info(name)
 
@@ -429,7 +680,7 @@ def load_model_from_safetensors(
         if use_direct_transfer and not do_transpose and info.dtype == target_dtype_id:
             ptr, size_bytes = st.tensor_data_ptr(name)
             gpu_arr = empty(info.shape, target_dt)
-            memcpy_ptr_to_device(gpu_arr._array, ptr, size_bytes)
+            memcpy_ptr_to_device(gpu_arr._native, ptr, size_bytes)
             return gpu_arr
 
         # Fallback: load via numpy with dtype conversion
@@ -531,9 +782,12 @@ def load_model_from_safetensors(
     if head_dim != hidden_size // num_heads:
         explicit_head_dim = head_dim
 
-    # Try to read rope_theta and norm_eps from config.json
+    # Try to read rope_theta, norm_eps, and MoE params from config.json
     rope_theta = spec.default_rope_theta
     norm_eps = spec.default_norm_eps
+    num_experts: int | None = None
+    num_experts_per_tok = 2
+    moe_intermediate_size: int | None = None
     try:
         import json
         from pathlib import Path
@@ -551,6 +805,15 @@ def load_model_from_safetensors(
                 rope_theta = float(hf_config["rope_theta"])
             if "rms_norm_eps" in hf_config:
                 norm_eps = float(hf_config["rms_norm_eps"])
+            # MoE parameters (Mixtral uses num_local_experts, Qwen3-MoE uses num_experts)
+            if "num_local_experts" in hf_config:
+                num_experts = int(hf_config["num_local_experts"])
+            elif "num_experts" in hf_config:
+                num_experts = int(hf_config["num_experts"])
+            if "num_experts_per_tok" in hf_config:
+                num_experts_per_tok = int(hf_config["num_experts_per_tok"])
+            if "moe_intermediate_size" in hf_config:
+                moe_intermediate_size = int(hf_config["moe_intermediate_size"])
     except Exception:
         pass  # Use defaults
 
@@ -568,6 +831,9 @@ def load_model_from_safetensors(
         causal=True,
         norm_eps=norm_eps,
         rope_theta=rope_theta,
+        num_experts=num_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        moe_intermediate_size=moe_intermediate_size,
     )
 
     # Load embeddings
@@ -640,28 +906,32 @@ def load_model_from_safetensors(
             )
         else:
             # Separate Q, K, V projections (LLaMA/Qwen3 style)
-            q_weight = load_tensor(required_name(spec.q_proj, layer_idx))
-            k_weight = load_tensor(required_name(spec.k_proj, layer_idx))
-            v_weight = load_tensor(required_name(spec.v_proj, layer_idx))
-            o_weight = load_tensor(required_name(spec.o_proj, layer_idx))
-
-            q_bias = try_load(layer_name(spec.q_bias, layer_idx))
-            k_bias = try_load(layer_name(spec.k_bias, layer_idx))
-            v_bias = try_load(layer_name(spec.v_bias, layer_idx))
-            o_bias = try_load(layer_name(spec.o_bias, layer_idx))
+            # Use load_linear to get LinearBF16 or LinearFP8 depending on quantization
+            q_proj = load_linear(
+                required_name(spec.q_proj, layer_idx),
+                layer_name(spec.q_bias, layer_idx),
+            )
+            k_proj = load_linear(
+                required_name(spec.k_proj, layer_idx),
+                layer_name(spec.k_bias, layer_idx),
+            )
+            v_proj = load_linear(
+                required_name(spec.v_proj, layer_idx),
+                layer_name(spec.v_bias, layer_idx),
+            )
+            o_proj = load_linear(
+                required_name(spec.o_proj, layer_idx),
+                layer_name(spec.o_bias, layer_idx),
+            )
 
             attn = Attention(
-                q_weight,
-                k_weight,
-                v_weight,
-                o_weight,
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
                 transformer_config,
-                q_bias,
-                k_bias,
-                v_bias,
-                o_bias,
-                q_norm_layer,
-                k_norm_layer,
+                q_norm=q_norm_layer,
+                k_norm=k_norm_layer,
             )
 
         # MLP norm (required)
@@ -669,8 +939,26 @@ def load_model_from_safetensors(
         mlp_norm_bias = try_load(layer_name(spec.mlp_norm_bias, layer_idx))
         mlp_norm = Norm(mlp_norm_weight, mlp_norm_bias, spec.norm_type, spec.default_norm_eps)
 
-        # MLP
-        if spec.activation == "gelu" and spec.fc1 is not None and spec.fc2 is not None:
+        # MLP or MoE
+        mlp: MLP | MoELayer
+        if spec.is_moe and num_experts is not None:
+            # MoE: Load router gate and all experts
+            def expert_name(pattern: str, layer: int, expert: int) -> str:
+                return pattern.format(layer=layer, expert=expert)
+
+            # Router gate: [hidden_size, num_experts]
+            gate_weight = load_tensor(required_name(spec.moe_gate, layer_idx))
+
+            # Load all expert weights (using load_linear for FP8 support)
+            expert_weights: list = []
+            for expert_idx in range(num_experts):
+                exp_gate = load_linear(expert_name(spec.expert_gate_proj, layer_idx, expert_idx))
+                exp_up = load_linear(expert_name(spec.expert_up_proj, layer_idx, expert_idx))
+                exp_down = load_linear(expert_name(spec.expert_down_proj, layer_idx, expert_idx))
+                expert_weights.append((exp_gate, exp_up, exp_down))
+
+            mlp = MoELayer(transformer_config, gate_weight, expert_weights)
+        elif spec.activation == "gelu" and spec.fc1 is not None and spec.fc2 is not None:
             fc1_weight = load_tensor(
                 required_name(spec.fc1, layer_idx), do_transpose=spec.weight_transpose
             )
@@ -687,15 +975,15 @@ def load_model_from_safetensors(
                 fc2_bias=fc2_bias,
             )
         elif spec.gate_proj is not None and spec.up_proj is not None and spec.down_proj is not None:
-            # SwiGLU
-            gate_proj = load_tensor(required_name(spec.gate_proj, layer_idx))
-            up_proj = load_tensor(required_name(spec.up_proj, layer_idx))
-            down_proj = load_tensor(required_name(spec.down_proj, layer_idx))
+            # SwiGLU - use load_linear for FP8 support
+            gate_proj_linear = load_linear(required_name(spec.gate_proj, layer_idx))
+            up_proj_linear = load_linear(required_name(spec.up_proj, layer_idx))
+            down_proj_linear = load_linear(required_name(spec.down_proj, layer_idx))
             mlp = MLP(
                 transformer_config,
-                gate_proj=gate_proj,
-                up_proj=up_proj,
-                down_proj=down_proj,
+                gate_proj=gate_proj_linear,
+                up_proj=up_proj_linear,
+                down_proj=down_proj_linear,
             )
         else:
             raise ValueError(f"ModelSpec {spec.name} has invalid MLP configuration")

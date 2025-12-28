@@ -1363,8 +1363,8 @@ GPUArray concat_axis0(const GPUArray& a, const GPUArray& b) {
         throw std::runtime_error("concat: dtype mismatch");
     }
     if (a.dtype() != DataType::Float32 && a.dtype() != DataType::Float16 &&
-        a.dtype() != DataType::BFloat16) {
-        throw std::runtime_error("concat: only float32/float16/bfloat16 supported");
+        a.dtype() != DataType::BFloat16 && a.dtype() != DataType::UInt8) {
+        throw std::runtime_error("concat: only float32/float16/bfloat16/uint8 supported");
     }
     if (a.ndim() < 1 || b.ndim() < 1 || a.ndim() != b.ndim()) {
         throw std::runtime_error("concat: dimension mismatch");
@@ -1413,6 +1413,13 @@ GPUArray concat_axis0(const GPUArray& a, const GPUArray& b) {
                 static_cast<const __nv_bfloat16*>(a.data()),
                 static_cast<const __nv_bfloat16*>(b.data()),
                 static_cast<__nv_bfloat16*>(result.data()),
+                a.shape()[0], b.shape()[0], stride);
+            break;
+        case DataType::UInt8:
+            nn::concat_axis0_u8_kernel<<<grid_size, block_size>>>(
+                static_cast<const uint8_t*>(a.data()),
+                static_cast<const uint8_t*>(b.data()),
+                static_cast<uint8_t*>(result.data()),
                 a.shape()[0], b.shape()[0], stride);
             break;
         default:

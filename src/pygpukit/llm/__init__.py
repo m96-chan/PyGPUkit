@@ -27,24 +27,28 @@ class Dtype:
     Float16 = 1
     BFloat16 = 2
     Float64 = 3
-    Int32 = 4
-    Int64 = 5
-    Int16 = 6
-    Int8 = 7
-    UInt8 = 8
-    Bool = 9
+    Float8E4M3 = 4  # FP8 E4M3 (1 sign, 4 exponent, 3 mantissa)
+    Float8E5M2 = 5  # FP8 E5M2 (1 sign, 5 exponent, 2 mantissa)
+    Int32 = 6
+    Int64 = 7
+    Int16 = 8
+    Int8 = 9
+    UInt8 = 10
+    Bool = 11
 
     _NAMES = {
         0: "float32",
         1: "float16",
         2: "bfloat16",
         3: "float64",
-        4: "int32",
-        5: "int64",
-        6: "int16",
-        7: "int8",
-        8: "uint8",
-        9: "bool",
+        4: "float8_e4m3",
+        5: "float8_e5m2",
+        6: "int32",
+        7: "int64",
+        8: "int16",
+        9: "int8",
+        10: "uint8",
+        11: "bool",
     }
 
     _SIZES = {
@@ -52,12 +56,14 @@ class Dtype:
         1: 2,  # float16
         2: 2,  # bfloat16
         3: 8,  # float64
-        4: 4,  # int32
-        5: 8,  # int64
-        6: 2,  # int16
-        7: 1,  # int8
-        8: 1,  # uint8
-        9: 1,  # bool
+        4: 1,  # float8_e4m3
+        5: 1,  # float8_e5m2
+        6: 4,  # int32
+        7: 8,  # int64
+        8: 2,  # int16
+        9: 1,  # int8
+        10: 1,  # uint8
+        11: 1,  # bool
     }
 
     @classmethod
@@ -538,8 +544,10 @@ from pygpukit.llm.chat import (  # noqa: E402
 from pygpukit.llm.config import (  # noqa: E402
     GPT2_SPEC,
     LLAMA_SPEC,
+    MIXTRAL_SPEC,
     MODEL_SPECS,
     QWEN2_SPEC,
+    QWEN3_MOE_SPEC,
     QWEN3_SPEC,
     GPT2Config,
     LlamaConfig,
@@ -563,7 +571,10 @@ from pygpukit.llm.decode import (  # noqa: E402
 from pygpukit.llm.layers import (  # noqa: E402
     MLP,
     Attention,
-    Linear,
+    Linear,  # Backward compatibility alias
+    LinearBF16,
+    LinearFP8,
+    MoELayer,
     Norm,
     TransformerBlock,
     apply_rotary_pos_emb_numpy,
@@ -577,6 +588,7 @@ from pygpukit.llm.layers import (  # noqa: E402
 from pygpukit.llm.loader import (  # noqa: E402
     load_gpt2_from_safetensors,
     load_llama_from_safetensors,
+    load_mixtral_from_safetensors,
     load_model_from_safetensors,
     load_qwen3_from_safetensors,
     repack_model_weights,
@@ -613,14 +625,19 @@ __all__ = [
     "TransformerConfig",
     "Attention",
     "MLP",
+    "MoELayer",
     "Norm",
     "TransformerBlock",
-    "Linear",
+    "Linear",  # Backward compatibility alias
+    "LinearBF16",
+    "LinearFP8",
     # ModelSpec (v0.2.9)
     "ModelSpec",
     "GPT2_SPEC",
     "LLAMA_SPEC",
+    "MIXTRAL_SPEC",
     "QWEN2_SPEC",
+    "QWEN3_MOE_SPEC",
     "QWEN3_SPEC",
     "MODEL_SPECS",
     "detect_model_spec",
@@ -628,6 +645,7 @@ __all__ = [
     "load_model_from_safetensors",
     "load_gpt2_from_safetensors",
     "load_llama_from_safetensors",
+    "load_mixtral_from_safetensors",
     "load_qwen3_from_safetensors",
     # Legacy config classes
     "GPT2Config",

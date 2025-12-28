@@ -112,6 +112,33 @@ class DecodeBuffers:
     context_len_buf: GPUArray | None = None  # [1] int32 - context length
 
     # =========================================================================
+    # MoE Decode Buffers (for zero-allocation MoE decode)
+    # =========================================================================
+    moe_num_experts: int = 0  # 0 means MoE buffers not allocated
+    moe_num_experts_per_tok: int = 0  # k (top-k experts per token)
+    moe_intermediate_size: int = 0  # MoE intermediate size
+
+    # Router outputs
+    moe_router_logits: GPUArray | None = None  # [1, num_experts]
+    moe_router_weights: GPUArray | None = None  # [1, k]
+    moe_expert_indices: GPUArray | None = None  # [1, k] int32
+
+    # Permutation buffers
+    moe_expert_counts: GPUArray | None = None  # [num_experts] int32
+    moe_expert_offsets: GPUArray | None = None  # [num_experts + 1] int32
+    moe_permute_indices: GPUArray | None = None  # [k] int32
+    moe_reverse_perm: GPUArray | None = None  # [k] int32
+    moe_row_expert_ids: GPUArray | None = None  # [k] int32
+
+    # Expert computation buffers
+    moe_gathered: GPUArray | None = None  # [k, hidden_size]
+    moe_gate_out: GPUArray | None = None  # [k, moe_intermediate_size]
+    moe_up_out: GPUArray | None = None  # [k, moe_intermediate_size]
+    moe_intermediate: GPUArray | None = None  # [k, moe_intermediate_size]
+    moe_expert_outputs: GPUArray | None = None  # [k, hidden_size]
+    moe_output: GPUArray | None = None  # [1, hidden_size]
+
+    # =========================================================================
     # Batch Decode Buffers (for zero-allocation batch verify, max_batch tokens)
     # =========================================================================
     max_batch_size: int = 0  # 0 means batch buffers not allocated
@@ -166,6 +193,7 @@ class DecodeBuffers:
         use_qk_norm: bool = False,
         vocab_size: int | None = None,
         max_batch_size: int = 0,
+        moe_config: dict | None = None,
     ) -> DecodeBuffers:
         """Allocate all decode buffers.
 
@@ -175,6 +203,10 @@ class DecodeBuffers:
             use_qk_norm: Whether to allocate QK norm buffers (Qwen3)
             vocab_size: Vocabulary size for logits buffer (optional, for CUDA Graph)
             max_batch_size: Maximum batch size for batch decode (0 = no batch buffers)
+            moe_config: MoE configuration dict with keys:
+                - num_experts: Number of experts (e.g., 128)
+                - num_experts_per_tok: Top-k experts per token (e.g., 8)
+                - moe_intermediate_size: MoE intermediate size (e.g., 768)
         """
         assert config.num_kv_heads is not None
         assert config.intermediate_size is not None
@@ -302,6 +334,51 @@ class DecodeBuffers:
             token_ids_batch_buf = zeros((max_batch_size,), dtype="int32")
             start_position_batch_buf = zeros((1,), dtype="int32")
 
+        # MoE buffers (allocated if moe_config is provided)
+        moe_num_experts = 0
+        moe_num_experts_per_tok = 0
+        moe_intermediate_size = 0
+        moe_router_logits = None
+        moe_router_weights = None
+        moe_expert_indices = None
+        moe_expert_counts = None
+        moe_expert_offsets = None
+        moe_permute_indices = None
+        moe_reverse_perm = None
+        moe_row_expert_ids = None
+        moe_gathered = None
+        moe_gate_out = None
+        moe_up_out = None
+        moe_intermediate = None
+        moe_expert_outputs = None
+        moe_output = None
+
+        if moe_config is not None:
+            moe_num_experts = moe_config["num_experts"]
+            moe_num_experts_per_tok = moe_config["num_experts_per_tok"]
+            moe_intermediate_size = moe_config["moe_intermediate_size"]
+            moe_k = moe_num_experts_per_tok
+
+            # Router outputs
+            moe_router_logits = zeros((1, moe_num_experts), dtype=dtype)
+            moe_router_weights = zeros((1, moe_k), dtype=dtype)
+            moe_expert_indices = zeros((1, moe_k), dtype="int32")
+
+            # Permutation buffers
+            moe_expert_counts = zeros((moe_num_experts,), dtype="int32")
+            moe_expert_offsets = zeros((moe_num_experts + 1,), dtype="int32")
+            moe_permute_indices = zeros((moe_k,), dtype="int32")
+            moe_reverse_perm = zeros((moe_k,), dtype="int32")
+            moe_row_expert_ids = zeros((moe_k,), dtype="int32")
+
+            # Expert computation buffers
+            moe_gathered = zeros((moe_k, config.hidden_size), dtype=dtype)
+            moe_gate_out = zeros((moe_k, moe_intermediate_size), dtype=dtype)
+            moe_up_out = zeros((moe_k, moe_intermediate_size), dtype=dtype)
+            moe_intermediate = zeros((moe_k, moe_intermediate_size), dtype=dtype)
+            moe_expert_outputs = zeros((moe_k, config.hidden_size), dtype=dtype)
+            moe_output = zeros((1, config.hidden_size), dtype=dtype)
+
         return cls(
             hidden=hidden,
             q=q,
@@ -360,6 +437,24 @@ class DecodeBuffers:
             k_flat_batch=k_flat_batch,
             token_ids_batch_buf=token_ids_batch_buf,
             start_position_batch_buf=start_position_batch_buf,
+            # MoE buffers
+            moe_num_experts=moe_num_experts,
+            moe_num_experts_per_tok=moe_num_experts_per_tok,
+            moe_intermediate_size=moe_intermediate_size,
+            moe_router_logits=moe_router_logits,
+            moe_router_weights=moe_router_weights,
+            moe_expert_indices=moe_expert_indices,
+            moe_expert_counts=moe_expert_counts,
+            moe_expert_offsets=moe_expert_offsets,
+            moe_permute_indices=moe_permute_indices,
+            moe_reverse_perm=moe_reverse_perm,
+            moe_row_expert_ids=moe_row_expert_ids,
+            moe_gathered=moe_gathered,
+            moe_gate_out=moe_gate_out,
+            moe_up_out=moe_up_out,
+            moe_intermediate=moe_intermediate,
+            moe_expert_outputs=moe_expert_outputs,
+            moe_output=moe_output,
         )
 
 
