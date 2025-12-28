@@ -277,7 +277,7 @@ For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 | Qwen-72B MLP up | 8192 | 29568 | 324 us | 947 us | 146 us | 436 us | 509 us | **112 us** |
 | Qwen-72B MLP down | 29568 | 8192 | 839 us | — | 170 us | 1393 us | 1294 us | **129 us** |
 
-| Kernel | Format | Memory | Rel. Error | Best For |
+| Kernel | Format | Memory | Rel. Err (vs FP32) | Best For |
 |--------|--------|--------|------------|----------|
 | **BF16** | A:BF16, B:BF16 | 100% | ~0.6% | Baseline (highest accuracy) |
 | **W8A16** | A:BF16, B:FP8 | 50% | ~12% | Balanced speed/memory |
