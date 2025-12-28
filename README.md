@@ -280,7 +280,7 @@ For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 | Kernel | Format | Memory | Rel. Err (vs FP32) | Best For |
 |--------|--------|--------|------------|----------|
 | **BF16** | A:BF16, B:BF16 | 100% | ~0.6% | Baseline (highest accuracy) |
-| **W8A16** | A:BF16, B:FP8 | 50% | ~12% | Balanced speed/memory |
+| **W8A16** | A:BF16, B:FP8 | 50% | ~6% | Balanced speed/memory |
 | **W8A8** | A:FP8, B:FP8 | 50% | ~9% | Speed priority (6-18x faster) |
 | **W4A16** | A:BF16, B:NVF4 | 25% | ~15% | Memory priority |
 | **W4A4** | A:NVF4, B:NVF4 | 12.5% | ~20% | Maximum compression |
