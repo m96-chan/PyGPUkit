@@ -178,6 +178,27 @@ Removed redundant slow kernels:
 
 ## What's New in v0.2.15
 
+
+### Whisper ASR Module
+Full GPU-accelerated Whisper speech recognition:
+
+| Component | Description |
+|-----------|-------------|
+| **WhisperEncoder** | Conv1d stem + transformer with GPU attention |
+| **WhisperDecoder** | Autoregressive decoder with cross-attention |
+| **WhisperModel** | High-level API: `from_pretrained()`, `transcribe()` |
+| **Preprocessing** | GPU mel spectrogram (30s pad/trim, normalization) |
+| **Streaming** | `transcribe_streaming()` for long audio |
+
+### GEMV Kernels (SM120)
+Optimized GEMV for LLM decode (M=1):
+
+| Kernel | Feature | Speedup |
+|--------|---------|---------|
+| **BF16 GEMV** | BF16x2 vectorized loads | 25-40% vs scalar |
+| **NVF4 GEMV** | Pre-scaled LUT | 73% less bandwidth |
+| **Linear layer** | Auto GEMV for M=1 | 1.3-2.4x vs matmul |
+
 ### FP8 I/O GEMM (SM120)
 Pure FP8 input/output GEMM for FP8 model inference (Llama 3.1 FP8, Qwen FP8, etc.):
 
@@ -203,14 +224,14 @@ if gpk.fp8_fp8_sm120_available():
     C = gpk.matmul_fp8_fp8_blockwise_sm120(A_fp8, B_fp8, scale_a, scale_b)
 ```
 
-### Pure NVF4 GEMM (398 TFLOPS)
+### Pure NVF4 GEMM (446 TFLOPS)
 GPU-side BF16->NVF4 quantization with 3-stage pipeline for maximum throughput:
 
 | Matrix Size | TFLOPS | Notes |
 |-------------|--------|-------|
 | 8192x8192 | 261 | Branchless vectorized loads |
 | 12288x12288 | 383 | 3-stage async pipeline |
-| 16384x16384 | **398** | Direct write to user buffer |
+| 16384x16384 | **446** | Direct write to user buffer |
 
 ### New Math Operations
 Extended math operations for GPU computing:
@@ -260,288 +281,9 @@ gpu_fp8 = gpk.from_numpy(fp8_data)
 
 ---
 
-## What's New in v0.2.14
 
-### Packaging Fixes
-v0.2.13 and v0.2.14 fix wheel RECORD file issues that caused PyPI deprecation warnings.
+> **Previous versions (v0.2.4 - v0.2.14):** See [CHANGELOG.md](CHANGELOG.md) for complete release history.
 
-| Version | Issue | Fix |
-|---------|-------|-----|
-| v0.2.14 | Windows wheel missing `licenses/LICENSE` in RECORD | Added `-Recurse` to scan dist-info subdirectories |
-| v0.2.13 | Hardcoded version in release workflow | Dynamic dist-info folder detection |
-
-**Recommended:** Use v0.2.16 or later.
-
-```bash
-pip install pygpukit>=0.2.16
-```
-
----
-
-## What's New in v0.2.12
-
-### GPU Audio Processing (Driver-Only)
-Comprehensive audio processing operations with custom Radix-2 FFT - no cuFFT dependency.
-
-| Category | Operations |
-|----------|------------|
-| **Time-Frequency** | `stft`, `istft`, `griffin_lim` |
-| **Spectral Features** | `spectral_centroid`, `spectral_bandwidth`, `spectral_rolloff`, `spectral_flatness`, `spectral_contrast` |
-| **Pitch Detection** | `detect_pitch_yin`, `detect_pitch_yin_frames`, `autocorrelation` |
-| **Music Analysis** | `cqt`, `chroma_stft`, `chroma_cqt`, `zero_crossing_rate` |
-| **Source Separation** | `hpss`, `harmonic`, `percussive` |
-| **Time/Pitch** | `time_stretch`, `pitch_shift` |
-
-```python
-from pygpukit.ops import audio
-import numpy as np
-
-# Load audio
-samples = np.random.randn(16000).astype(np.float32)  # 1 sec @ 16kHz
-buf = audio.from_pcm(samples, sample_rate=16000)
-
-# STFT -> Magnitude -> ISTFT roundtrip
-stft_out = audio.stft(buf, n_fft=512, hop_length=160)
-mag = audio.magnitude_spectrum(stft_out)
-reconstructed = audio.griffin_lim(mag, n_iter=32)
-
-# Spectral features
-centroid = audio.spectral_centroid(mag, sample_rate=16000)
-flatness = audio.spectral_flatness(mag)
-
-# HPSS (Harmonic-Percussive Separation)
-harmonic, percussive = audio.hpss(mag, kernel_size=17)
-
-# Time stretch (slow down to half speed)
-slow = audio.time_stretch(buf, rate=0.5)
-
-# Pitch shift (+12 semitones = 1 octave up)
-higher = audio.pitch_shift(buf, sample_rate=16000, n_steps=12)
-```
-
-### Previous Audio Features (v0.2.11)
-| Feature | Description |
-|---------|-------------|
-| **STFT** | Custom Radix-2 FFT (no cuFFT) |
-| **Mel Filterbank** | Whisper-compatible preprocessing |
-| **MFCC** | DCT-II based extraction |
-| **VAD** | Voice Activity Detection |
-| **Streaming** | Ring buffer, windowing |
-
----
-
-## What's New in v0.2.11
-
-### Batch Decode Support
-Batch decoding enables processing multiple tokens in parallel, achieving near-linear speedup with TensorCore utilization.
-
-| Batch Size | Per Token (us) | Throughput | Speedup |
-|------------|---------------|------------|---------|
-| 1 | 381,303 | 2.6 tok/s | 1.00x |
-| 2 | 205,030 | 4.9 tok/s | 1.86x |
-| 4 | 108,521 | 9.2 tok/s | 3.51x |
-| 8 | 55,845 | 17.9 tok/s | **6.83x** |
-
-### Decode Strategy Framework
-Modular decode strategies for different use cases:
-
-```python
-from pygpukit.llm import DecodeM1, DecodeM1Graph, DecodeBatch, DecodeJacobi
-
-# Standard single-token decode
-m1 = DecodeM1()
-m1.bind(model)
-
-# CUDA Graph accelerated decode
-m1_graph = DecodeM1Graph()
-m1_graph.bind(model)
-m1_graph.init_graph(max_seq_len=512)
-
-# Batch decode for high throughput
-batch = DecodeBatch(batch_size=8)
-batch.bind(model)
-```
-
-| Strategy | Throughput | Use Case |
-|----------|-----------|----------|
-| DecodeM1 | 3.2 tok/s | Simple, low memory |
-| DecodeM1Graph | 2.2 tok/s | Reduced kernel launch overhead |
-| DecodeBatch (batch=8) | **19.6 tok/s** | High throughput |
-
-### CUDA Graph Improvements
-- Volatile reads for proper graph replay (attention, embedding, KV cache kernels)
-- Separate `DecodeM1Graph` strategy for cleaner architecture
-- Fixed stream handling for RoPE and SDPA operations
-
-### Driver API Async Memory Operations
-New async memory transfer functions using CUDA Driver API:
-
-```python
-from pygpukit.core import memcpy_host_to_device_async, pinned_malloc, pinned_free
-
-# Pinned memory for faster transfers
-pinned_ptr = pinned_malloc(size_bytes)
-memcpy_host_to_device_async(device_ptr, pinned_ptr, size_bytes, stream)
-```
-
-### CUDA 13.x Required
-Starting from v0.2.15, PyGPUkit requires **CUDA 13.0+** for SM120 (Blackwell) support:
-
-| Module | CUDA Version | SM Support |
-|--------|-------------|------------|
-| `_pygpukit_native_cu131` | CUDA 13.1 | SM 80-120 (Blackwell) |
-
-> **Note:** CUDA 12.x builds have been discontinued. SM120 features (FP8 I/O GEMM, NVF4 GEMM) require CUDA 13.0+.
-
-### RTX 5090 Support
-Full support for NVIDIA Blackwell consumer GPUs (SM120) via CUDA 13.x build.
-
-### Qwen2 Architecture Support
-Added `QWEN2_SPEC` for Qwen2/Qwen2.5 model family:
-
-```python
-from pygpukit.llm import detect_model_spec, QWEN2_SPEC
-
-spec = detect_model_spec(tensor_names)  # Auto-detects Qwen2
-# Or explicitly: spec = QWEN2_SPEC
-```
-
----
-
-## What's New in v0.2.10
-
-### Dynamic cuBLASLt Loading
-cuBLASLt is now loaded dynamically at runtime, enabling true **driver-only deployment**. No CUDA Toolkit installation required on target machines.
-
-| Feature | Description |
-|---------|-------------|
-| **Dynamic Loading** | `LoadLibrary`/`dlopen` for cuBLASLt DLL |
-| **Descriptor Caching** | GEMM descriptors cached per (M, N, K, dtype) |
-| **2.67x Faster** | 224 matmuls: 395ms → 148ms |
-
-```python
-# Works with just GPU drivers - no CUDA Toolkit needed
-import pygpukit as gk
-C = A @ B  # Uses dynamically-loaded cuBLASLt for small batch sizes
-```
-
-### CUDA Graph Optimizations
-- Eliminated GPU allocations in position/random buffer updates
-- Direct `copy_from_numpy` for H2D transfers during graph replay
-
-### Performance (Qwen3-8B, RTX 3090 Ti)
-| Mode | Throughput |
-|------|------------|
-| Standard decode | 1.85 tok/s |
-| CUDA Graph | 2.12 tok/s |
-
----
-
-## What's New in v0.2.9
-
-### Unified LLM Interface
-A single `CausalTransformerModel` now supports multiple architectures through the `ModelSpec` abstraction.
-
-| Architecture | Features | Status |
-|--------------|----------|--------|
-| **GPT-2** | LayerNorm, GELU, Position Embedding | ✅ Tested |
-| **LLaMA 2/3** | RMSNorm, SiLU, RoPE, GQA | ✅ Tested |
-| **Qwen2/2.5** | RMSNorm, SiLU, RoPE, GQA | ✅ Tested |
-| **Qwen3** | RMSNorm, SiLU, RoPE, GQA, QK-Norm | ✅ Tested |
-
-```python
-from pygpukit.llm import load_model_from_safetensors, detect_model_spec, load_safetensors
-
-# Auto-detect and load any supported model
-st = load_safetensors("model.safetensors")
-spec = detect_model_spec(st.tensor_names)  # Returns GPT2_SPEC, LLAMA_SPEC, or QWEN3_SPEC
-model = load_model_from_safetensors("model.safetensors", dtype="float16", spec=spec)
-
-# Generate with KV-cache
-output_ids = model.generate(
-    input_ids,
-    max_new_tokens=64,
-    temperature=0.7,
-    top_k=50,
-    top_p=0.9,
-    use_cache=True,  # KV-cache for efficient generation
-)
-```
-
-### Hybrid Attention Execution
-Automatic CPU/GPU switching for optimal performance:
-
-| Phase | Backend | Reason |
-|-------|---------|--------|
-| **Prefill** (seq_len > 1) | GPU SDPA | Parallelizable |
-| **Decode** (seq_len = 1) | CPU | Avoids kernel launch overhead |
-
-### New LLM Operations
-| Operation | Description |
-|-----------|-------------|
-| `gpk.sdpa_causal(q, k, v)` | Scaled Dot-Product Attention with causal mask |
-| `gpk.rope_inplace(x, freqs)` | Rotary Position Embedding (in-place) |
-| `gpk.silu(x)` | SiLU/Swish activation |
-| `gpk.rmsnorm(x, weight, eps)` | RMS Layer Normalization |
-
-### Sharded Model Support
-Load large models split across multiple safetensors files:
-
-```python
-from pygpukit.llm import load_safetensors
-
-# Automatically handles sharded models
-st = load_safetensors("model.safetensors.index.json")  # Returns ShardedSafeTensorsFile
-print(f"Shards: {len(st._shard_files)}, Tensors: {st.num_tensors}")
-```
-
----
-
-## What's New in v0.2.7
-
-### CUTLASS Epilogue Fusion
-Fused Linear + Bias + GELU operations using CUTLASS epilogue fusion for improved performance in transformer workloads.
-
-```python
-import pygpukit as gpk
-import numpy as np
-
-# Create tensors
-batch, in_feat, out_feat = 512, 768, 3072
-input = gpk.from_numpy(np.random.randn(batch, in_feat).astype(np.float32))
-weight = gpk.from_numpy(np.random.randn(out_feat, in_feat).astype(np.float32))
-bias = gpk.from_numpy(np.random.randn(out_feat).astype(np.float32))
-
-# Fused linear + bias + GELU (single kernel, no intermediate memory)
-output = gpk.linear_bias_gelu(input, weight, bias)
-```
-
-### Multi-SM CUTLASS Kernels
-Runtime SM detection with architecture-optimized kernel variants:
-
-| Architecture | GPU Examples | Pipeline | Features |
-|-------------|--------------|----------|----------|
-| **SM80** | A100 | 4-stage | 48KB shared memory |
-| **SM86** | RTX 3090, RTX 3080 | 5-stage | 100KB shared memory |
-| **SM89** | RTX 4090, RTX 4080 | 6-stage | Ada Lovelace optimizations |
-| **SM90** | H100 | CUTLASS 3.x | WGMMA/TMA instructions |
-| **SM100/120** | Blackwell (B100, B200) | CUTLASS 3.x | Next-gen TensorCore |
-
-> **Note:** SM100+ (Blackwell) requires CUDA 13.x. Windows wheels include SM100/120 support.
-
-### New Operations
-| Operation | Description |
-|-----------|-------------|
-| `gpk.transpose(a)` | GPU-native matrix transpose |
-| `gpk.bias_add_inplace(out, bias)` | In-place bias addition |
-| `gpk.linear_bias_gelu(x, w, b)` | Fused linear + bias + GELU |
-
-### API Improvements
-- Complete public API exports (all operations accessible via `gpk.*`)
-- Consistent snake_case naming convention
-- Full docstrings for all public functions
-
----
 
 ## LLM Support
 
@@ -578,164 +320,6 @@ output_ids = model.generate(input_ids, max_new_tokens=32)
 | `Tokenizer` | **Experimental** BPE tokenizer (demos only) |
 
 ---
-
-## What's New in v0.2.6
-
-### CUTLASS Backend (Default)
-NVIDIA CUTLASS v4.3.0 is now the default GEMM backend, delivering optimized TensorCore performance out of the box.
-
-| Feature | Description |
-|---------|-------------|
-| **TF32 TensorCore** | 31+ TFLOPS for FP32 inputs (automatic) |
-| **FP16 TensorCore** | 63 TFLOPS |
-| **BF16 TensorCore** | 63 TFLOPS |
-| **Zero Config** | No environment variables needed |
-
-```python
-import pygpukit as gpk
-import numpy as np
-
-# CUTLASS TF32 is automatic for FP32 (31+ TFLOPS)
-a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float32))
-b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float32))
-c = a @ b  # Uses CUTLASS TF32 TensorCore
-
-# For full FP32 precision (no TF32), set:
-# PYGPUKIT_NO_TF32=1
-```
-
-### Multi-LLM Concurrent Execution
-Run multiple AI models (LLM, TTS, Vision) concurrently on a single GPU with independent CUDA streams and VRAM budgets.
-
-| Feature | Description |
-|---------|-------------|
-| **Execution Control** | User controls execution order |
-| **Stream Isolation** | No implicit sync between streams |
-| **VRAM Budgeting** | Safe memory sharing per model |
-| **Concurrent Safety** | "Running simultaneously doesn't break" |
-| **asyncio Integration** | Native Python async/await support |
-
-> **Note:** On a single GPU, Multi-LLM scheduling enables **concurrent execution, not faster execution**, for compute-bound workloads. Speedup benefits apply to I/O-bound workloads or multi-GPU setups.
-
-```python
-import asyncio
-from pygpukit.scheduler import (
-    create_context, context_session, GB, initialize
-)
-
-# Create execution contexts with VRAM budgets
-initialize(device_id=0)
-llm_ctx = create_context("llm", max_vram=4 * GB)
-tts_ctx = create_context("tts", max_vram=2 * GB)
-
-async def run_parallel():
-    async with context_session(llm_ctx), context_session(tts_ctx):
-        # Run models concurrently with asyncio.gather
-        llm_task = asyncio.create_task(run_llm_inference())
-        tts_task = asyncio.create_task(run_tts_synthesis())
-
-        text, audio = await asyncio.gather(llm_task, tts_task)
-        return text, audio
-
-result = asyncio.run(run_parallel())
-```
-
-### FP16/BF16 TensorCore (via CUTLASS)
-| Feature | Description |
-|---------|-------------|
-| **FP16 TensorCore** | 63 TFLOPS (automatic via CUTLASS) |
-| **BF16 TensorCore** | 63 TFLOPS (automatic via CUTLASS) |
-| **FP32 Accumulation** | Numerical stability maintained |
-
-```python
-import pygpukit as gpk
-import numpy as np
-
-# FP16 TensorCore matmul (63 TFLOPS on RTX 3090 Ti)
-# No environment variable needed - CUTLASS is automatic
-a = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
-b = gpk.from_numpy(np.random.randn(8192, 8192).astype(np.float16))
-c = a @ b  # Uses CUTLASS TensorCore
-```
-
-> **Note:** CUTLASS requires matrix dimensions divisible by 16.
-
----
-
-## What's New in v0.2.5
-
-### FP16 / BF16 Support
-| Feature | Description |
-|---------|-------------|
-| **FP16 (float16)** | Half-precision floating point |
-| **BF16 (bfloat16)** | Brain floating point (better dynamic range) |
-| **FP32 Accumulation** | Numerical stability via FP32 intermediate |
-| **Type Conversion** | `astype()` for seamless dtype conversion |
-
-```python
-import pygpukit as gpk
-import numpy as np
-
-# FP16 operations
-a = gpk.from_numpy(np.random.randn(1024, 1024).astype(np.float16))
-b = gpk.from_numpy(np.random.randn(1024, 1024).astype(np.float16))
-c = a @ b  # FP16 matmul
-
-# BF16 operations
-arr = np.random.randn(1024, 1024).astype(np.float32)
-a_bf16 = gpk.from_numpy(arr).astype(gpk.bfloat16)
-b_bf16 = gpk.from_numpy(arr).astype(gpk.bfloat16)
-c_bf16 = a_bf16 @ b_bf16  # BF16 matmul
-result = c_bf16.astype(gpk.float32)  # Convert back to FP32
-```
-
-### Reduction Operations
-| Operation | Description |
-|-----------|-------------|
-| `gpk.sum(a)` | Sum of all elements |
-| `gpk.mean(a)` | Mean of all elements |
-| `gpk.max(a)` | Maximum element |
-
-### Operator Overloads
-```python
-c = a + b   # Element-wise add
-c = a - b   # Element-wise subtract
-c = a * b   # Element-wise multiply
-c = a / b   # Element-wise divide
-c = a @ b   # Matrix multiplication
-```
-
----
-
-## What's New in v0.2.4
-
-### Single-Binary Distribution
-| Feature | Description |
-|---------|-------------|
-| **Driver-only mode** | Only `nvcuda.dll` (GPU driver) required |
-| **Dynamic NVRTC** | JIT loaded at runtime, optional |
-| **No cudart dependency** | Eliminated CUDA Runtime dependency |
-| **Smaller wheel** | No bundled DLLs |
-
-```python
-import pygpukit as gp
-
-# Works with just GPU drivers!
-print(f"CUDA: {gp.is_cuda_available()}")      # True (if GPU driver installed)
-print(f"NVRTC: {gp.is_nvrtc_available()}")    # True (if CUDA Toolkit installed)
-print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
-```
-
-### TF32 TensorCore GEMM
-| Feature | Description |
-|---------|-------------|
-| **PTX mma.sync** | Direct TensorCore access via inline PTX assembly |
-| **cp.async Pipeline** | Double-buffered async memory transfers |
-| **TF32 Precision** | 19-bit mantissa (vs FP32's 23-bit), ~0.1% per-op error |
-| **SM 80+ Required** | Ampere architecture (RTX 30XX+) required |
-
----
-
 ## Performance
 
 ### RTX 5090 Benchmark (SM120a, CUDA 13.1)
@@ -765,7 +349,7 @@ print(f"NVRTC Path: {gp.get_nvrtc_path()}")   # Path to NVRTC DLL (if available)
 |-------------|--------|-------|
 | 8192x8192 | 261 | Pre-quantized |
 | 12288x12288 | 383 | 3-stage pipeline |
-| 16384x16384 | **398** | Peak performance |
+| 16384x16384 | **446** | Peak performance |
 
 > **Note:** NVF4xNVF4 achieves 4x memory bandwidth reduction vs BF16 with minimal accuracy loss.
 
@@ -860,7 +444,7 @@ All GEMV kernels compared on Qwen2.5-7B gate_proj (K=3584, N=18944):
 |-------------|-----------|-----------|-------|
 | 4096×4096 | 64 TFLOPS | 87 TFLOPS | GPU-side quantization |
 | 8192×8192 | 168 TFLOPS | 261 TFLOPS | 3-stage async pipeline |
-| 16384×16384 | — | **398 TFLOPS** | Peak performance |
+| 16384×16384 | — | **446 TFLOPS** | Peak performance |
 
 > **Note:** GPU-side BF16->NVF4 quantization with unit scaling. No host-device copies. Ideal for memory-bound LLM inference with 4x bandwidth reduction vs BF16.
 
