@@ -101,17 +101,78 @@ They were all observed in production or real benchmarks.
 
 ## What's New in v0.2.16
 
-### Kernel Code Cleanup
-Removed redundant low-speed GEMV/GEMM kernels to reduce binary size and maintenance burden:
+### MoE (Mixture of Experts) Support
+Full support for Mixtral-style MoE models with custom CUDA kernels:
+
+| Component | Description |
+|-----------|-------------|
+| **MoE Kernels** | TopK routing, softmax, token permutation, gather/scatter |
+| **Grouped GEMM** | Batched expert dispatch with per-row expert IDs |
+| **MoELayer** | Python layer with router + expert FFN dispatch |
+| **MIXTRAL_SPEC** | Auto-detection for Mixtral 8x7B models |
+
+```python
+from pygpukit.llm import load_model_from_safetensors, detect_model_spec
+
+# Auto-detect MoE model
+spec = detect_model_spec(tensor_names)  # Returns MIXTRAL_SPEC for MoE
+model = load_model_from_safetensors("mixtral.safetensors", spec=spec)
+```
+
+### Thinking Model Support
+Qwen3 Thinking model support with `<think>...</think>` block parsing:
+
+```python
+# examples/chat_cli_thinking.py
+python examples/chat_cli_thinking.py --model F:/LLM/Qwen3-4B-Thinking
+```
+
+- Streaming output with thinking/answer separation
+- `/think` command to toggle thinking display
+- CUDA Graph support for faster decode
+
+### New GEMV Kernels (SM120)
+
+| Kernel | A dtype | B dtype | Speedup vs BF16 |
+|--------|---------|---------|-----------------|
+| **FP8/FP8 (W8A8)** | FP8 E4M3 | FP8 E4M3 | **6-22x** |
+| **NVF4/NVF4 (W4A4)** | NVF4 | NVF4 | Memory priority |
+| **Int4 GEMV** | BF16 | Int4 | Large K dimensions |
+
+### New GEMM Kernels (SM120)
+
+| Kernel | Description |
+|--------|-------------|
+| **W8A16 GEMM** | FP8 weight + BF16 activation (CUTLASS) |
+| **Int8 Native** | Exact int8 via dp4a (CUDA cores) |
+| **Int4 via Int8** | 4-bit approximation via TensorCore |
+| **Grouped GEMM v2** | Per-row expert IDs for MoE |
+
+### Kernel Directory Restructure
+Organized matmul kernels by `{gemm|gemv}/{input}/{output}/{arch}/`:
+
+```
+native/ops/matmul/
+├── gemm/fp8/bf16/sm120/w8a16_gemm.cu
+├── gemm/fp8/fp8/sm120/fp8_cutlass.cu
+├── gemv/fp8/fp8/sm120/fp8_gemv.cu
+├── gemv/nvf4/nvf4/sm120/nvf4_gemv.cu
+└── gemv/int4/int4/sm120/int4_gemv.cu
+```
+
+### Development Tooling
+- **Claude Code Skills**: Build, benchmark, lint, test automation
+- **Subagents**: kernel-reviewer, perf-analyzer, api-designer
+- **CONTRIBUTING.md**: Contribution guidelines
+- **MCP Integration**: Serena, Context7, Memory servers
+
+### Kernel Cleanup
+Removed redundant slow kernels:
 
 | Removed | Kept | Reason |
 |---------|------|--------|
-| FP8 GEMV basic (`fp8_kernels.cu`) | FP8 GEMV optimized (`fp8_opt_kernels.cu`) | [N,K] layout 3-9x faster |
-| Int8 GEMM via FP8 (`int8_via_fp8.cu`) | Int8 GEMM native dp4a (`int8_native.cu`) | Exact results, no approximation |
-
-### Build & CI Fixes
-- Fixed missing `<cstdint>` include for Linux builds
-- Added pytest skip markers for GPU-only tests in CI
+| FP8 GEMV basic | FP8 GEMV opt | [N,K] layout 3-9x faster |
+| Int8 via FP8 | Int8 native dp4a | Exact results |
 
 ---
 
@@ -979,7 +1040,7 @@ PyGPUkit/
 | **v0.2.11** | **Batch decode** (6.8x speedup), Decode Strategy framework, Driver API async, Dual CUDA builds, RTX 5090 (SM120) |
 | **v0.2.12** | **Advanced audio processing** (ISTFT, Griffin-Lim, HPSS, CQT, pitch detection, time stretch) |
 | **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
-| **v0.2.16** | **Kernel cleanup** (removed redundant slow kernels), Build/CI fixes |
+| **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
 
 ### Planned
 
