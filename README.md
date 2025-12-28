@@ -277,14 +277,14 @@ For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 | Qwen-72B MLP up | 8192 | 29568 | 324 us | 947 us | 146 us | 436 us | 509 us | **112 us** |
 | Qwen-72B MLP down | 29568 | 8192 | 839 us | — | 170 us | 1393 us | 1294 us | **129 us** |
 
-| Kernel | Format | Memory | Rel. Error | Best For |
+| Kernel | Format | Memory | Rel. Err (vs FP32) | Best For |
 |--------|--------|--------|------------|----------|
-| **BF16** | A:BF16, B:BF16 | 100% | ~0.3% | Baseline (highest accuracy) |
-| **W8A16** | A:BF16, B:FP8 | 50% | ~1% | Balanced speed/accuracy |
-| **W8A8** | A:FP8, B:FP8 | 50% | ~1-2% | Speed priority (6-18x faster) |
-| **W4A16** | A:BF16, B:NVF4 | 25% | ~2-5% | Memory priority |
-| **W4A4** | A:NVF4, B:NVF4 | 12.5% | ~5-10% | Maximum compression |
-| **Int4** | A:BF16, B:Int4 | 25% | ~2-5% | Large K dimensions |
+| **BF16** | A:BF16, B:BF16 | 100% | ~0.6% | Baseline (highest accuracy) |
+| **W8A16** | A:BF16, B:FP8 | 50% | ~12% | Balanced speed/memory |
+| **W8A8** | A:FP8, B:FP8 | 50% | ~9% | Speed priority (6-18x faster) |
+| **W4A16** | A:BF16, B:NVF4 | 25% | ~15% | Memory priority |
+| **W4A4** | A:NVF4, B:NVF4 | 12.5% | ~20% | Maximum compression |
+| **Int4** | A:BF16, B:Int4 | 25% | ~15% | Large K dimensions |
 
 > **Note:** W8A8 (FP8/FP8) is fastest for typical sizes. W4A4 has 2x dequant overhead (both A and B). Int4 excels at very large K (29568+). W8A16 has K size limit (~16K).
 
