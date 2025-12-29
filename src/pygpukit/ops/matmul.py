@@ -1485,6 +1485,30 @@ def fp8_init_lut() -> None:
     _FP8_LUT_INITIALIZED = True
 
 
+# Flag to track if W8A16 GEMM LUT has been initialized
+_W8A16_GEMM_LUT_INITIALIZED = False
+
+
+def w8a16_gemm_init_lut() -> None:
+    """Initialize FP8->F32 LUT for W8A16 GEMM.
+
+    This uses runtime initialization to avoid symbol conflicts with the GEMV LUT.
+    Must be called before using w8a16_gemm_sm120.
+    """
+    global _W8A16_GEMM_LUT_INITIALIZED
+    if _W8A16_GEMM_LUT_INITIALIZED:
+        return
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        native.w8a16_gemm_init_lut()
+        _W8A16_GEMM_LUT_INITIALIZED = True
+
+
 def gemv_fp8_bf16(
     a: GPUArray,
     b_nk: GPUArray,
@@ -1701,8 +1725,8 @@ def w8a16_gemm_sm120(
         if out.dtype != bfloat16:
             raise ValueError(f"out dtype {out.dtype} must be bfloat16")
 
-    # Initialize LUT if not already done
-    fp8_init_lut()
+    # Initialize W8A16 GEMM LUT (runtime initialization to avoid symbol conflicts)
+    w8a16_gemm_init_lut()
 
     backend = get_backend()
 

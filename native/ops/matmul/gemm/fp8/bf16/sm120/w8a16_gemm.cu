@@ -13,12 +13,18 @@
 #include <cuda_bf16.h>
 #include <cstdint>
 
-// Include FP8 LUT from GEMV
-#include "../../../../gemv/bf16/bf16/sm120/fp8.cuh"
-
 namespace pygpukit {
 namespace ops {
 namespace w8a16_gemm {
+
+// ============================================================================
+// FP8 E4M3 LUT - Local copy to avoid symbol conflicts with GEMV
+// ============================================================================
+// Using runtime initialization like grouped_gemm to ensure proper initialization
+__device__ __constant__ float g_fp8_lut[256];
+
+// Flag to track if LUT is initialized
+static bool g_lut_initialized = false;
 
 // Block tile dimensions
 constexpr int BM = 128;
@@ -44,10 +50,10 @@ constexpr int B_PAD = 8;
 constexpr int SCALE_BLOCK = 128;
 
 // ============================================================================
-// FP8 to Float Dequantization (using shared LUT from gemv)
+// FP8 to Float Dequantization using local LUT
 // ============================================================================
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t fp8) {
-    return pygpukit::ops::gemv::FP8_E4M3_LUT[fp8];
+    return g_fp8_lut[fp8];
 }
 
 // ============================================================================
@@ -320,9 +326,81 @@ w8a16_gemm_kernel_bf16tc(
     }
 }
 
+// ============================================================================
+// Scalar Fallback Kernel for Small M (workaround for MMA issue with sparse A)
+// ============================================================================
+
+__global__ void __launch_bounds__(256, 4)
+w8a16_gemm_scalar_kernel(
+    const __nv_bfloat16* __restrict__ A,  // [M, K] BF16 activation
+    const uint8_t* __restrict__ B_fp8,     // [K, N] FP8 weight
+    const __nv_bfloat16* __restrict__ B_scale,  // [K/128, N/128] BF16 scale
+    __nv_bfloat16* __restrict__ C,         // [M, N] BF16 output
+    int M, int N, int K,
+    int scale_stride_n  // N/128
+) {
+    const int m = blockIdx.y;
+    const int n = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (m >= M || n >= N) return;
+
+    float acc = 0.0f;
+
+    for (int k = 0; k < K; ++k) {
+        float a_val = __bfloat162float(A[m * K + k]);
+        int scale_k = k / SCALE_BLOCK;
+        int scale_n = n / SCALE_BLOCK;
+        float scale = __bfloat162float(B_scale[scale_k * scale_stride_n + scale_n]);
+        float b_val = fp8_e4m3_to_float(B_fp8[k * N + n]) * scale;
+        acc += a_val * b_val;
+    }
+
+    C[m * N + n] = __float2bfloat16(acc);
+}
+
 }  // namespace w8a16_gemm
 }  // namespace ops
 }  // namespace pygpukit
+
+// ============================================================================
+// LUT Initialization
+// ============================================================================
+
+extern "C" cudaError_t pygpukit_w8a16_gemm_init_lut() {
+    using namespace pygpukit::ops::w8a16_gemm;
+
+    if (g_lut_initialized) {
+        return cudaSuccess;
+    }
+
+    float h_lut[256];
+    for (int i = 0; i < 256; ++i) {
+        // FP8 E4M3: 1 sign, 4 exp (bias=7), 3 mantissa
+        int sign = (i >> 7) & 1;
+        int exp = (i >> 3) & 0xF;
+        int mant = i & 0x7;
+
+        float val;
+        if (exp == 0) {
+            // Subnormal: (mant/8) * 2^(-6)
+            val = (mant / 8.0f) * (1.0f / 64.0f);
+        } else {
+            // Normal: (1 + mant/8) * 2^(exp-7)
+            val = (1.0f + mant / 8.0f) * ldexpf(1.0f, exp - 7);
+        }
+        h_lut[i] = sign ? -val : val;
+    }
+
+    cudaError_t err = cudaMemcpyToSymbol(
+        g_fp8_lut, h_lut, 256 * sizeof(float)
+    );
+
+    if (err == cudaSuccess) {
+        g_lut_initialized = true;
+    }
+
+    return err;
+}
 
 // ============================================================================
 // C API
@@ -339,16 +417,32 @@ extern "C" cudaError_t pygpukit_w8a16_gemm_sm120(
 ) {
     using namespace pygpukit::ops::w8a16_gemm;
 
-    dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
-    dim3 block(256);
+    // Use scalar fallback for:
+    // 1. Small M (<16): MMA sparse-A issue on SM120
+    // 2. Small K (<32): num_k_tiles would be 0 with BK=32
+    if (M < 16 || K < 32) {
+        dim3 grid((N + 255) / 256, M);
+        dim3 block(256);
 
-    w8a16_gemm_kernel_bf16tc<<<grid, block, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(A),
-        reinterpret_cast<const uint8_t*>(B_fp8),
-        reinterpret_cast<const __nv_bfloat16*>(B_scale),
-        reinterpret_cast<__nv_bfloat16*>(C),
-        M, N, K, scale_stride_n
-    );
+        w8a16_gemm_scalar_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(A),
+            reinterpret_cast<const uint8_t*>(B_fp8),
+            reinterpret_cast<const __nv_bfloat16*>(B_scale),
+            reinterpret_cast<__nv_bfloat16*>(C),
+            M, N, K, scale_stride_n
+        );
+    } else {
+        dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+        dim3 block(256);
+
+        w8a16_gemm_kernel_bf16tc<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(A),
+            reinterpret_cast<const uint8_t*>(B_fp8),
+            reinterpret_cast<const __nv_bfloat16*>(B_scale),
+            reinterpret_cast<__nv_bfloat16*>(C),
+            M, N, K, scale_stride_n
+        );
+    }
 
     return cudaGetLastError();
 }

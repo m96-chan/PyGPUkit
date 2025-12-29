@@ -117,6 +117,7 @@ extern "C" {
     void pygpukit_nvf4_get_sizes(int K, int N, size_t* data_size, size_t* scale_size);
 
     // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output
+    cudaError_t pygpukit_w8a16_gemm_init_lut();
     cudaError_t pygpukit_w8a16_gemm_sm120(
         const void* A, const void* B_fp8, const void* B_scale, void* C,
         int M, int N, int K, int scale_stride_n, cudaStream_t stream
@@ -2055,6 +2056,13 @@ void init_ops_bindings(py::module_& m) {
     // ========================================================================
     // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output (SM120)
     // ========================================================================
+
+    m.def("w8a16_gemm_init_lut", []() {
+        cudaError_t err = pygpukit_w8a16_gemm_init_lut();
+        if (err != cudaSuccess) {
+            throw std::runtime_error("w8a16_gemm_init_lut failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, "Initialize FP8->F32 LUT for W8A16 GEMM");
 
     m.def("w8a16_gemm_sm120", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
         // A: [M, K] BF16 activation
