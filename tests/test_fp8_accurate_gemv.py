@@ -8,7 +8,7 @@ Compares accuracy of:
 
 import numpy as np
 
-from pygpukit.core import zeros, from_numpy
+from pygpukit.core import from_numpy, zeros
 from pygpukit.core.backend import get_native_module
 
 
@@ -115,7 +115,7 @@ def test_accurate_kernel_basic():
     B_gpu = from_numpy(B_fp8)
     scale_A_gpu = from_numpy(scale_A)
     scale_B_gpu = from_numpy(scale_B)
-    C_gpu = zeros((N,), dtype='bfloat16')
+    C_gpu = zeros((N,), dtype="bfloat16")
 
     # Run accurate kernel
     try:
@@ -147,7 +147,7 @@ def test_accurate_kernel_basic():
         rel_err = np.linalg.norm(abs_err) / (np.linalg.norm(C_ref) + 1e-8) * 100
 
         print(f"Relative error: {rel_err:.2f}%")
-        print(f"Target: <0.5%")
+        print("Target: <0.5%")
 
         if rel_err < 0.5:
             print("PASS: Error within target!")
@@ -159,6 +159,7 @@ def test_accurate_kernel_basic():
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback
+
         traceback.print_exc()
 
 
@@ -212,9 +213,9 @@ def test_compare_fast_vs_accurate():
         B_gpu = from_numpy(B_fp8)
         scale_A_gpu_fast = from_numpy(scale_A_fast)
         scale_B_gpu_fast = from_numpy(scale_B_fast)
-        C_gpu_fast = zeros((N,), dtype='bfloat16')
+        C_gpu_fast = zeros((N,), dtype="bfloat16")
 
-        fast_error = float('nan')
+        fast_error = float("nan")
         try:
             native.gemv_fp8_fp8_bf16_sm120(
                 A_gpu._get_native(),
@@ -230,7 +231,9 @@ def test_compare_fast_vs_accurate():
             C_fast = C_bf16.view(np.float32)
 
             if not np.isnan(C_fast).any():
-                fast_error = np.linalg.norm(np.abs(C_fast - C_ref)) / (np.linalg.norm(C_ref) + 1e-8) * 100
+                fast_error = (
+                    np.linalg.norm(np.abs(C_fast - C_ref)) / (np.linalg.norm(C_ref) + 1e-8) * 100
+                )
         except Exception as e:
             print(f"  Fast error: {e}")
 
@@ -244,9 +247,9 @@ def test_compare_fast_vs_accurate():
 
         scale_A_gpu_acc = from_numpy(scale_A_acc)
         scale_B_gpu_acc = from_numpy(scale_B_acc)
-        C_gpu_acc = zeros((N,), dtype='bfloat16')
+        C_gpu_acc = zeros((N,), dtype="bfloat16")
 
-        acc_error = float('nan')
+        acc_error = float("nan")
         try:
             native.gemv_fp8_fp8_bf16_accurate_sm120(
                 A_gpu._get_native(),
@@ -262,7 +265,9 @@ def test_compare_fast_vs_accurate():
             C_acc = C_bf16.view(np.float32)
 
             if not np.isnan(C_acc).any():
-                acc_error = np.linalg.norm(np.abs(C_acc - C_ref)) / (np.linalg.norm(C_ref) + 1e-8) * 100
+                acc_error = (
+                    np.linalg.norm(np.abs(C_acc - C_ref)) / (np.linalg.norm(C_ref) + 1e-8) * 100
+                )
         except Exception as e:
             print(f"  Accurate error: {e}")
 

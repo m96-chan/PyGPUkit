@@ -441,6 +441,7 @@ def main():
         # Prefill
         t_prefill_start = time.perf_counter()
         hidden, past_key_values = model(input_ids, use_cache=True)
+
         for i, block in enumerate(model.blocks):
             past_k, past_v = past_key_values[i]
             kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)

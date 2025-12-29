@@ -641,7 +641,6 @@ class Attention:
         v_t = transpose_3d_021(v_expanded)
 
         attn_output = sdpa_causal(q_t, k_t, v_t)
-
         attn_output = transpose_3d_021(attn_output)
         attn_output = reshape_copy(attn_output, (seq_len, self.num_heads * self.head_dim))
 
@@ -1060,8 +1059,12 @@ class MoELayer:
         self._stacked_down_scale: GPUArray | None = None
 
         # Check if first expert uses FP8 - use grouped GEMM v2 for optimization
-        if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
-            self._stack_fp8_weights()
+        # TEMP: Disabled for debugging
+        import os
+
+        if os.environ.get("PYGPUKIT_DISABLE_GROUPED_GEMM") != "1":
+            if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
+                self._stack_fp8_weights()
 
     # Profiling flag (set to True to enable timing)
     _profile: bool = True
