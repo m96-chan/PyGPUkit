@@ -303,17 +303,17 @@ Optimized BF16 GEMV achieves near-peak memory bandwidth for large matrices:
 
 | Layer | K | N | BF16 | W8A16 | W8A8 | W4A16 | W4A4 | Int4 |
 |-------|------|-------|------|-------|------|-------|------|------|
-| Qwen-7B hidden | 4096 | 4096 | 73 us | **10 us** | **10 us** | 110 us | 268 us | 12 us |
-| Qwen-7B MLP up | 4096 | 14336 | 125 us | **18 us** | **18 us** | 113 us | 246 us | 22 us |
-| Qwen-7B MLP down | 14336 | 4096 | 443 us | **22 us** | **22 us** | 384 us | 865 us | 27 us |
-| Qwen-72B hidden | 8192 | 8192 | 241 us | **20 us** | **20 us** | 226 us | 511 us | 26 us |
-| Qwen-72B MLP up | 8192 | 29568 | 341 us | 156 us | 149 us | 418 us | 526 us | **89 us** |
-| Qwen-72B MLP down | 29568 | 8192 | 874 us | — | 171 us | 1408 us | 1226 us | **100 us** |
+| Qwen-7B hidden | 4096 | 4096 | **31 us** | 108 us | **31 us** | 142 us | 252 us | 33 us |
+| Qwen-7B MLP up | 4096 | 14336 | 100 us | 272 us | **43 us** | 140 us | 253 us | 49 us |
+| Qwen-7B MLP down | 14336 | 4096 | 102 us | 330 us | **46 us** | 403 us | 873 us | 59 us |
+| Qwen-72B hidden | 8192 | 8192 | 112 us | 326 us | **46 us** | 246 us | 497 us | 51 us |
+| Qwen-72B MLP up | 8192 | 29568 | 324 us | 976 us | 180 us | 448 us | 509 us | **111 us** |
+| Qwen-72B MLP down | 29568 | 8192 | 839 us | — | 204 us | 1395 us | 1294 us | **125 us** |
 
 | Kernel | Format | Memory | Rel. Err (vs FP32) | Best For |
 |--------|--------|--------|------------|----------|
 | **BF16** | A:BF16, B:BF16 | 100% | ~0.6% | Baseline (highest accuracy) |
-| **W8A16** | A:BF16, B:FP8 | 50% | ~6% | Balanced speed/memory |
+| **W8A16** | A:BF16, B:FP8 | 50% | ~12% | Balanced speed/memory |
 | **W8A8** | A:FP8, B:FP8 | 50% | ~9% | Speed priority (6-18x faster) |
 | **W4A16** | A:BF16, B:NVF4 | 25% | ~15% | Memory priority |
 | **W4A4** | A:NVF4, B:NVF4 | 12.5% | ~20% | Maximum compression |
@@ -355,20 +355,20 @@ All GEMV kernels compared on Qwen2.5-7B gate_proj (K=3584, N=18944):
 
 | Kernel | A dtype | B dtype | Weight Size | Time (us) | vs BF16 |
 |--------|---------|---------|-------------|-----------|---------|
-| BF16 | BF16 | BF16 | 129.5 MB | 134 | 1.00x |
-| FP8/BF16 (W8A16) | BF16 | FP8 | 64.8 MB | 282 | 0.48x |
-| **FP8/FP8 (W8A8)** | FP8 | FP8 | 64.8 MB | **20** | **6.9x** |
-| NVF4/BF16 (W4A16) | BF16 | NVF4 | 32.4 MB | 114 | 1.17x |
-| NVF4/NVF4 (W4A4) | NVF4 | NVF4 | 32.4 MB | 225 | 0.60x |
+| BF16 | BF16 | BF16 | 129.5 MB | 121 | 1.00x |
+| FP8/BF16 (W8A16) | BF16 | FP8 | 64.8 MB | 275 | 0.44x |
+| **FP8/FP8 (W8A8)** | FP8 | FP8 | 64.8 MB | **19** | **6.2x** |
+| NVF4/BF16 (W4A16) | BF16 | NVF4 | 32.4 MB | 125 | 0.97x |
+| NVF4/NVF4 (W4A4) | NVF4 | NVF4 | 32.4 MB | 241 | 0.50x |
 
 **Performance by Layer Type:**
 
 | Layer | K | N | Best Kernel | Speedup |
 |-------|---|---|-------------|---------|
-| gate_proj | 3584 | 18944 | FP8/FP8 | 6.0x |
-| down_proj | 18944 | 3584 | FP8/FP8 | 23.8x |
+| gate_proj | 3584 | 18944 | FP8/FP8 | 6.2x |
+| down_proj | 18944 | 3584 | FP8/FP8 | 21.6x |
 | o_proj | 3584 | 3584 | FP8/FP8 | 6.8x |
-| qkv_proj | 3584 | 512 | FP8/FP8 | 9.2x |
+| qkv_proj | 3584 | 512 | FP8/FP8 | 8.7x |
 
 > **Recommendation:** FP8/FP8 is optimal for SM120 (Blackwell). NVF4/BF16 (W4A16) provides the best balance when FP8 compute is unavailable.
 
