@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Test MoE inference with various prompt lengths."""
+"""Test MoE inference with various prompt lengths.
+
+This is a local integration test that requires:
+- tokenizers package
+- MoE model files at MODEL_PATH
+"""
 
 import os
 import sys
+
+import pytest
 
 # Fix Windows console encoding
 if sys.platform == "win32":
@@ -12,9 +19,18 @@ if sys.platform == "win32":
 os.environ.setdefault("PYGPUKIT_CUBLASLT_DEBUG", "0")
 
 import numpy as np
-from tokenizers import Tokenizer
+
+# Skip if tokenizers not installed
+tokenizers = pytest.importorskip("tokenizers")
+Tokenizer = tokenizers.Tokenizer
 
 MODEL_PATH = "F:/LLM/Qwen3-30B-A3B-Instruct-2507-FP8"
+
+# Skip if model not available
+pytestmark = pytest.mark.skipif(
+    not os.path.exists(MODEL_PATH),
+    reason=f"MoE model not found at {MODEL_PATH}",
+)
 
 
 def logits_to_f32(logits_gpu) -> np.ndarray:
