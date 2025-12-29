@@ -244,13 +244,21 @@ w8a16_gemm_kernel_bf16tc(
 
                 // Load A fragment for m16n8k16 BF16
                 // A: 16x16, each thread holds 8 BF16 values (4 registers)
+                // Fragment mapping (l=0..7 packed into 4 registers):
+                //   row = groupID + 8 * ((l / 2) % 2)
+                //   col = 2 * tid_in_group + (l % 2) + 8 * (l / 4)
+                // Register layout:
+                //   reg[0] = (l=0,1): row=groupID,   col=tid*2+0,1
+                //   reg[1] = (l=2,3): row=groupID+8, col=tid*2+0,1
+                //   reg[2] = (l=4,5): row=groupID,   col=tid*2+8,9
+                //   reg[3] = (l=6,7): row=groupID+8, col=tid*2+8,9
                 uint32_t a_frag[4];
                 #pragma unroll
                 for (int p = 0; p < 4; ++p) {
-                    // Row: groupID + 8 * (p / 2)
-                    // Col: tid_in_group * 2 + (p % 2) * 8
-                    int row = groupID + 8 * (p >> 1);
-                    int col = (tid_in_group << 1) + ((p & 1) << 3);
+                    // Row: alternates groupID/groupID+8 based on (p % 2)
+                    // Col: 0-1 for p<2, 8-9 for p>=2
+                    int row = groupID + 8 * (p & 1);
+                    int col = (tid_in_group << 1) + ((p >> 1) << 3);
 
                     // Load 2 consecutive BF16 as uint32
                     a_frag[p] = *reinterpret_cast<const uint32_t*>(&smA[curr][tile_m + row][kk + col]);
@@ -417,9 +425,9 @@ extern "C" cudaError_t pygpukit_w8a16_gemm_sm120(
 ) {
     using namespace pygpukit::ops::w8a16_gemm;
 
-    // Use scalar fallback for:
-    // 1. Small M (<16): MMA sparse-A issue on SM120
-    // 2. Small K (<32): num_k_tiles would be 0 with BK=32
+    // Use scalar fallback for small dimensions:
+    // - M < 16: TensorCore overhead not worth it
+    // - K < 32: num_k_tiles would be 0 with BK=32
     if (M < 16 || K < 32) {
         dim3 grid((N + 255) / 256, M);
         dim3 block(256);
