@@ -99,6 +99,24 @@ They were all observed in production or real benchmarks.
 
 ---
 
+## What's New in v0.2.18
+
+### Optimized BF16 GEMV
+New optimized BF16 GEMV kernel with B[N,K] layout achieves **98-101% peak bandwidth** for typical LLM dimensions:
+
+| Matrix | Bandwidth | % of Peak |
+|--------|-----------|-----------|
+| 2048 x 8192 | 1763 GB/s | **98%** |
+| 4096 x 14336 | 1810 GB/s | **101%** |
+
+### W8A16 GEMM Fix
+Fixed MMA A-fragment register mapping for m16n8k16 instruction. MoE models now produce correct output.
+
+### MoE Inference Test
+Added comprehensive MoE inference test for various prompt lengths.
+
+---
+
 ## What's New in v0.2.17
 
 ### Triton Backend MVP
@@ -267,6 +285,21 @@ output_ids = model.generate(input_ids, max_new_tokens=32)
 ### GEMV Performance (RTX 5090, SM120a)
 
 For LLM decode (M=1), custom GEMV kernels for different quantization formats:
+
+#### GEMV Bandwidth Utilization (v0.2.18)
+
+Optimized BF16 GEMV achieves near-peak memory bandwidth for large matrices:
+
+| K | N | BF16 BW | BF16 % | W8A16 BW | W8A16 % |
+|------|-------|---------|--------|----------|---------|
+| 2048 | 2048 | 434 GB/s | 24% | 278 GB/s | 16% |
+| 2048 | 8192 | **1763 GB/s** | **98%** | 434 GB/s | 24% |
+| 8192 | 2048 | 543 GB/s | 30% | 363 GB/s | 20% |
+| 4096 | 14336 | **1810 GB/s** | **101%** | 467 GB/s | 26% |
+
+> **Note:** BF16 GEMV with optimized B[N,K] layout achieves 98-101% peak bandwidth for typical LLM FFN dimensions. W8A16 (FP8 weight) includes dequantization overhead.
+
+#### GEMV Latency by Layer
 
 | Layer | K | N | BF16 | W8A16 | W8A8 | W4A16 | W4A4 | Int4 |
 |-------|------|-------|------|-------|------|-------|------|------|
@@ -529,6 +562,7 @@ PyGPUkit/
 | **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
 | **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
 | **v0.2.17** | **Triton backend** MVP, hybrid execution (Triton + Native CUDA), TritonArray wrapper |
+| **v0.2.18** | **Optimized BF16 GEMV** (98% BW), W8A16 GEMM fix (MoE), MoE inference test |
 
 ### Planned
 
