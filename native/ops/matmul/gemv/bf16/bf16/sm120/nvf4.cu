@@ -11,8 +11,7 @@
 #include <cuda_bf16.h>
 #include <cstdio>
 
-// Include BF16 and NVF4 GEMV kernels
-#include "../generic/bf16_cutlass.cuh"
+// Include NVF4 GEMV kernels
 #include "nvf4.cuh"
 
 namespace pygpukit {
@@ -178,55 +177,6 @@ cudaError_t pygpukit_gemv_nvf4_bf16(
     );
 }
 
-/**
- * BF16 GEMV (standard, no quantization)
- */
-cudaError_t pygpukit_gemv_bf16(
-    const void* A,
-    const void* B,
-    void* C,
-    int K,
-    int N,
-    float alpha,
-    float beta,
-    cudaStream_t stream
-) {
-    return pygpukit::ops::gemv::launch_gemv_bf16(
-        static_cast<const __nv_bfloat16*>(A),
-        static_cast<const __nv_bfloat16*>(B),
-        static_cast<__nv_bfloat16*>(C),
-        K, N, alpha, beta, stream
-    );
-}
-
-/**
- * Auto-dispatch GEMV: Uses NVF4 on SM120 if weights are pre-quantized
- * Falls back to BF16 GEMV otherwise
- */
-cudaError_t pygpukit_gemv_bf16_auto(
-    const void* A,
-    const void* B,
-    void* C,
-    int M,
-    int N,
-    int K,
-    float alpha,
-    float beta,
-    cudaStream_t stream
-) {
-    // Only dispatch GEMV for M=1
-    if (M != 1) {
-        return cudaErrorInvalidValue;  // Use GEMM instead
-    }
-
-    // Use standard BF16 GEMV (NVF4 requires pre-quantized weights)
-    return pygpukit::ops::gemv::launch_gemv_bf16(
-        static_cast<const __nv_bfloat16*>(A),
-        static_cast<const __nv_bfloat16*>(B),
-        static_cast<__nv_bfloat16*>(C),
-        K, N, alpha, beta, stream
-    );
-}
 
 /**
  * Get memory sizes for NVF4 quantization

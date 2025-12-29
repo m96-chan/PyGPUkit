@@ -104,10 +104,6 @@ extern "C" {
         const void* A, const void* B_data, const void* B_scale, void* C,
         int K, int N, float alpha, cudaStream_t stream
     );
-    cudaError_t pygpukit_gemv_bf16(
-        const void* A, const void* B, void* C,
-        int K, int N, float alpha, float beta, cudaStream_t stream
-    );
     // Optimized BF16 GEMV with B[N,K] layout
     cudaError_t pygpukit_gemv_bf16_opt_sm120(
         const __nv_bfloat16* A, const __nv_bfloat16* B_nk, __nv_bfloat16* C,
@@ -1884,35 +1880,6 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B_data"), py::arg("B_scale"), py::arg("C"), py::arg("alpha") = 1.0f,
        "NVF4 GEMV for SM120: C[N] = alpha * A[K] @ B[K,N] (NVF4 quantized weights)");
-
-    m.def("gemv_bf16", [](const GPUArray& A, const GPUArray& B, GPUArray& C, float alpha, float beta) {
-        if (A.dtype() != DataType::BFloat16 || B.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("gemv_bf16: all inputs must be bfloat16");
-        }
-        if (A.ndim() != 1 || B.ndim() != 2 || C.ndim() != 1) {
-            throw std::runtime_error("gemv_bf16: A[K], B[K,N], C[N] dimensions required");
-        }
-
-        int K = A.shape()[0];
-        int N = B.shape()[1];
-
-        if (B.shape()[0] != static_cast<size_t>(K)) {
-            throw std::runtime_error("gemv_bf16: K dimension mismatch");
-        }
-        if (C.shape()[0] != static_cast<size_t>(N)) {
-            throw std::runtime_error("gemv_bf16: N dimension mismatch");
-        }
-
-        cudaError_t err = pygpukit_gemv_bf16(
-            A.data(), B.data(), C.data(),
-            K, N, alpha, beta, nullptr
-        );
-
-        if (err != cudaSuccess) {
-            throw std::runtime_error("gemv_bf16 failed: " + std::string(cudaGetErrorString(err)));
-        }
-    }, py::arg("A"), py::arg("B"), py::arg("C"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
-       "BF16 GEMV: C[N] = alpha * A[K] @ B[K,N] + beta * C[N]");
 
     // ========================================================================
     // Optimized BF16 GEMV (warp-level reduction, B[N,K] layout)
