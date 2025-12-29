@@ -4,12 +4,21 @@
 Compares accuracy of:
 - Fast version (128-element scale blocks): ~1-2% error
 - Accurate version (32-element scale blocks): <0.5% error target
+
+Requires CUDA native module to run.
 """
 
 import numpy as np
+import pytest
 
 from pygpukit.core import from_numpy, zeros
-from pygpukit.core.backend import get_native_module
+from pygpukit.core.backend import get_native_module, is_native_available
+
+# Skip all tests if native module not available (CI without CUDA)
+pytestmark = pytest.mark.skipif(
+    not is_native_available(),
+    reason="Native CUDA module not available",
+)
 
 
 def fp8_e4m3_to_float(fp8: np.ndarray) -> np.ndarray:
