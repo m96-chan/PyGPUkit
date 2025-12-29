@@ -37,7 +37,7 @@ def sample_top_k(logits: np.ndarray, k: int = 50, temperature: float = 0.7) -> i
 
 def test_prompt_lengths():
     """Test inference with various prompt lengths."""
-    from pygpukit.llm import load_safetensors, detect_model_spec, MIXTRAL_SPEC
+    from pygpukit.llm import MIXTRAL_SPEC, detect_model_spec, load_safetensors
     from pygpukit.llm.loader import load_model_from_safetensors
 
     print(f"Loading model from {MODEL_PATH}...")
@@ -63,8 +63,14 @@ def test_prompt_lengths():
         ("Hi", "short (9)"),
         ("What is 2+2?", "medium (15)"),
         ("What is two plus two? Please answer briefly.", "longer (18)"),
-        ("The quick brown fox jumps over the lazy dog. This is a test of the emergency broadcast system.", "long (28)"),
-        ("Please write a haiku about programming in Python. Make sure to include references to debugging, testing, and code review.", "very long (35)"),
+        (
+            "The quick brown fox jumps over the lazy dog. This is a test of the emergency broadcast system.",
+            "long (28)",
+        ),
+        (
+            "Please write a haiku about programming in Python. Make sure to include references to debugging, testing, and code review.",
+            "very long (35)",
+        ),
     ]
 
     for prompt, label in test_cases:
@@ -86,6 +92,7 @@ def test_prompt_lengths():
 
         # Store KV cache
         from pygpukit.ops.basic import kv_cache_prefill_gqa
+
         for i, block in enumerate(model.blocks):
             past_k, past_v = past_key_values[i]
             kv_cache_prefill_gqa(past_k, block.attn._k_cache, block.attn.num_heads, start_pos=0)
@@ -100,7 +107,9 @@ def test_prompt_lengths():
             last_logits = logits_np[0, -1, :]
         else:
             last_logits = logits_np[-1, :]
-        print(f"Logits stats: min={last_logits.min():.2f}, max={last_logits.max():.2f}, mean={last_logits.mean():.4f}")
+        print(
+            f"Logits stats: min={last_logits.min():.2f}, max={last_logits.max():.2f}, mean={last_logits.mean():.4f}"
+        )
 
         # Get top tokens
         top_indices = np.argsort(last_logits)[-5:][::-1]
@@ -111,6 +120,7 @@ def test_prompt_lengths():
 
         # Generate a few tokens using decode step
         from pygpukit.core import default_stream
+
         generated = []
         current_token = sample_top_k(last_logits)
         generated.append(current_token)
@@ -133,12 +143,16 @@ def test_prompt_lengths():
         print(f"Generated (10 tokens): {output_text!r}")
 
         # Check for garbage
-        is_garbage = any([
-            output_text.count(output_text[0]) > 8 if output_text else False,  # Repetitive single char
-            "{{{{" in output_text,
-            "}}}}}" in output_text,
-            all(c in "0123456789" for c in output_text.strip()),
-        ])
+        is_garbage = any(
+            [
+                output_text.count(output_text[0]) > 8
+                if output_text
+                else False,  # Repetitive single char
+                "{{{{" in output_text,
+                "}}}}}" in output_text,
+                all(c in "0123456789" for c in output_text.strip()),
+            ]
+        )
 
         if is_garbage:
             print("WARNING: Output looks like garbage!")
