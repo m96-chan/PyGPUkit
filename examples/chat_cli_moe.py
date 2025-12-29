@@ -541,8 +541,8 @@ def main():
         # Add user message
         conversation.append({"role": "user", "content": user_input})
 
-        # Build full message list with system prompt
-        messages = [system_msg] + conversation
+        # Build full message list (without system prompt for now)
+        messages = conversation
 
         # Generate response
         print("\nAssistant: ", end="", flush=True)
