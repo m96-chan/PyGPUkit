@@ -12,11 +12,11 @@ import numpy as np
 import pytest
 
 from pygpukit.core import from_numpy, zeros
-from pygpukit.core.backend import get_native_module, is_native_available
+from pygpukit.core.backend import get_native_module, has_native_module
 
 # Skip all tests if native module not available (CI without CUDA)
 pytestmark = pytest.mark.skipif(
-    not is_native_available(),
+    not has_native_module(),
     reason="Native CUDA module not available",
 )
 
