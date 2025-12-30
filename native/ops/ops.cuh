@@ -11,6 +11,7 @@
 
 #include "../core/memory.hpp"
 #include <tuple>
+#include <utility>
 
 namespace pygpukit {
 namespace ops {
@@ -167,6 +168,10 @@ void sigmoid(const GPUArray& input, GPUArray& out);
 GPUArray tanh(const GPUArray& input);
 void tanh(const GPUArray& input, GPUArray& out);
 
+// ReLU squared activation: y = (max(0, x))^2
+GPUArray relu2(const GPUArray& input);
+void relu2(const GPUArray& input, GPUArray& out);
+
 // RoPE (Rotary Position Embedding) - In-place
 // q: [seq_len, n_heads_q, head_dim]
 // k: [seq_len, n_heads_k, head_dim]
@@ -178,6 +183,45 @@ void rope_inplace(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray&
 // k: [seq_len, n_heads_k, head_dim] (bf16 or f16)
 // cos, sin: [seq_len, head_dim] (f32)
 void rope_inplace_f32table(GPUArray& q, GPUArray& k, const GPUArray& cos, const GPUArray& sin);
+
+// RoPE context extension: NTK-aware scaling
+// Returns (cos_table, sin_table) each [max_seq_len, head_dim]
+std::pair<GPUArray, GPUArray> rope_init_ntk_aware(
+    int max_seq_len, int head_dim, float base = 10000.0f, float scale = 1.0f);
+
+// RoPE context extension: YaRN dimension-wise interpolation
+// Returns (cos_table, sin_table) each [max_seq_len, head_dim]
+std::pair<GPUArray, GPUArray> rope_init_yarn(
+    int max_seq_len, int head_dim, float base = 10000.0f, float scale = 1.0f,
+    int original_max_len = 4096, float beta_fast = 32.0f, float beta_slow = 1.0f, float mscale = 0.1f);
+
+// RoPE context extension: Linear position interpolation
+// Returns (cos_table, sin_table) each [max_seq_len, head_dim]
+std::pair<GPUArray, GPUArray> rope_init_linear(
+    int max_seq_len, int head_dim, float base = 10000.0f, float scale = 1.0f);
+
+// PoPE (Positional Encoding) - additive positional encoding
+// Returns encoding tensor [max_seq_len, head_dim]
+GPUArray pope_init_encoding(int max_seq_len, int head_dim, float base = 10000.0f);
+
+// PoPE in-place application
+// q: [seq_len, n_heads_q, head_dim]
+// k: [seq_len, n_heads_k, head_dim]
+// encoding: [max_seq_len, head_dim] (f32)
+void pope_inplace(GPUArray& q, GPUArray& k, const GPUArray& encoding, int start_pos = 0);
+
+// ALiBi (Attention with Linear Biases) - head-specific slopes
+// Returns slopes tensor [num_heads]
+GPUArray alibi_init_slopes(int num_heads);
+
+// ALiBi bias matrix computation
+// Returns bias tensor [num_heads, seq_len, seq_len]
+GPUArray alibi_compute_bias(int seq_len, int num_heads, const GPUArray& slopes, bool causal = true);
+
+// ALiBi in-place bias addition to attention scores
+// scores: [batch, num_heads, q_len, kv_len]
+// slopes: [num_heads]
+void alibi_add_bias(GPUArray& scores, const GPUArray& slopes, int start_pos = 0);
 
 // Split fused QKV projection output into separate Q, K, V tensors
 // qkv: [seq_len, q_dim + k_dim + v_dim]
