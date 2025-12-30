@@ -39,9 +39,16 @@ extern "C" {
 }
 
 void init_gemm_fp8xfp8_fp8(py::module_& m) {
+    // ============================================================
+    // Pure FP8 I/O GEMM for SM120
+    // New name: gemm_fp8_fp8_sm120_available, alias: fp8_fp8_sm120_available
+    // ============================================================
+    m.def("gemm_fp8_fp8_sm120_available", []() {
+        return pygpukit_fp8_fp8_sm120_available();
+    }, "Check if Pure FP8 I/O GEMM is available on SM120 (Blackwell GeForce)");
     m.def("fp8_fp8_sm120_available", []() {
         return pygpukit_fp8_fp8_sm120_available();
-    }, "Check if Pure FP8 I/O GEMM is available on SM120");
+    }, "[Alias for gemm_fp8_fp8_sm120_available] Check if Pure FP8 I/O GEMM is available on SM120");
 
     m.def("gemm_fp8_fp8_sm120", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
         if (A.dtype() != DataType::UInt8 || B.dtype() != DataType::UInt8 || D.dtype() != DataType::UInt8) {
@@ -147,11 +154,20 @@ void init_gemm_fp8xfp8_fp8(py::module_& m) {
     }, py::arg("A"), py::arg("B"), py::arg("D"), py::arg("scale_A"), py::arg("scale_B"),
        "Blockwise scaled FP8 I/O GEMM for SM120: D = (A * scale_A) @ (B * scale_B)");
 
-    // Get scale factor sizes for FP8 blockwise GEMM
-    m.def("fp8_fp8_get_scale_sizes", [](int M, int N, int K) {
+    // ============================================================
+    // Helper: Get scale factor sizes for FP8 blockwise GEMM
+    // New name: gemm_fp8_fp8_get_scale_sizes, alias: fp8_fp8_get_scale_sizes
+    // ============================================================
+    m.def("gemm_fp8_fp8_get_scale_sizes", [](int M, int N, int K) {
         size_t sfa_size, sfb_size;
         pygpukit_fp8_fp8_get_scale_sizes(M, N, K, &sfa_size, &sfb_size);
         return py::make_tuple(sfa_size, sfb_size);
     }, py::arg("M"), py::arg("N"), py::arg("K"),
        "Get scale factor sizes for FP8 blockwise GEMM (returns (sfa_size, sfb_size))");
+    m.def("fp8_fp8_get_scale_sizes", [](int M, int N, int K) {
+        size_t sfa_size, sfb_size;
+        pygpukit_fp8_fp8_get_scale_sizes(M, N, K, &sfa_size, &sfb_size);
+        return py::make_tuple(sfa_size, sfb_size);
+    }, py::arg("M"), py::arg("N"), py::arg("K"),
+       "[Alias for gemm_fp8_fp8_get_scale_sizes] Get scale factor sizes for FP8 blockwise GEMM");
 }
