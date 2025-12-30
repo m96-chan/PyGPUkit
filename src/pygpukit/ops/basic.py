@@ -46,7 +46,7 @@ from pygpukit.ops.embedding import (
     kv_cache_update_gqa_ptr,
 )
 
-# Re-export matmul operations
+# Re-export matmul operations (both old and new standardized names)
 from pygpukit.ops.matmul import (
     batched_matmul,
     fp8_available,
@@ -57,14 +57,37 @@ from pygpukit.ops.matmul import (
     fp8_sm90_available,
     fp8_sm100_available,
     fp8_sm120_available,
+    # New standardized GEMM names
+    gemm_fp8_available,
+    gemm_fp8_f32_sm90,
+    gemm_fp8_f32_sm90_available,
+    gemm_fp8_f32_sm100,
+    gemm_fp8_f32_sm100_available,
+    gemm_fp8_f32_sm120,
+    gemm_fp8_f32_sm120_available,
+    gemm_fp8_fp8_blockwise_sm120,
+    gemm_fp8_fp8_get_scale_sizes,
+    gemm_fp8_fp8_sm120,
+    gemm_fp8_fp8_sm120_available,
+    gemm_nvf4_bf16_sm120,
+    gemm_nvf4_bf16_sm120_available,
+    gemm_w8a16_bf16_sm120,
+    gemm_w8a16_init_lut,
     # GEMV operations
     gemv_bf16,
+    gemv_bf16_bf16_sm120,  # New standardized name
     gemv_fp8_bf16,
     gemv_fp8_bf16_batched,
+    gemv_fp8_bf16_batched_sm120,  # New standardized name
+    gemv_fp8_bf16_sm120,  # New standardized name
     gemv_nvf4_available,
     gemv_nvf4_bf16,
+    gemv_nvf4_bf16_sm120,  # New standardized name
+    gemv_nvf4_bf16_sm120_available,  # New standardized name
+    gemv_nvf4_get_sizes,  # New standardized name
     # Grouped GEMM for MoE
     grouped_gemm_fp8_bf16,
+    grouped_gemm_fp8_bf16_sm120,  # New standardized name
     grouped_gemm_init_lut,
     linear_bias_gelu,
     matmul,
@@ -201,17 +224,45 @@ __all__ = [
     "matmul_fp8_fp8_blockwise_sm120",
     "matmul_fp8_fp8_sm120",
     "nvf4_bf16_sm120_available",
-    # GEMV
+    # GEMV (old names)
     "gemv_bf16",
     "gemv_fp8_bf16",
     "gemv_fp8_bf16_batched",
     "gemv_nvf4_bf16",
     "gemv_nvf4_available",
-    # W8A16 GEMM
+    # GEMV (new standardized names)
+    "gemv_bf16_bf16_sm120",
+    "gemv_fp8_bf16_sm120",
+    "gemv_fp8_bf16_batched_sm120",
+    "gemv_nvf4_bf16_sm120",
+    "gemv_nvf4_bf16_sm120_available",
+    "gemv_nvf4_get_sizes",
+    # W8A16 GEMM (old name)
     "w8a16_gemm_sm120",
-    # Grouped GEMM for MoE
+    # W8A16 GEMM (new standardized names)
+    "gemm_w8a16_bf16_sm120",
+    "gemm_w8a16_init_lut",
+    # Grouped GEMM for MoE (old names)
     "grouped_gemm_fp8_bf16",
     "grouped_gemm_init_lut",
+    # Grouped GEMM (new standardized name)
+    "grouped_gemm_fp8_bf16_sm120",
+    # New standardized GEMM availability functions
+    "gemm_fp8_available",
+    "gemm_fp8_f32_sm90_available",
+    "gemm_fp8_f32_sm100_available",
+    "gemm_fp8_f32_sm120_available",
+    "gemm_fp8_fp8_sm120_available",
+    "gemm_fp8_fp8_get_scale_sizes",
+    "gemm_nvf4_bf16_sm120_available",
+    # New standardized GEMM functions
+    "gemm_fp8_f32_sm90",
+    "gemm_fp8_f32_sm100",
+    "gemm_fp8_f32_sm120",
+    "gemm_fp8_fp8_sm120",
+    "gemm_fp8_fp8_blockwise_sm120",
+    "gemm_nvf4_bf16_sm120",
+    # Utility functions
     "fp8_init_lut",
     "fp8_get_sizes",
     "nvf4_get_sizes",

@@ -518,9 +518,18 @@ def fp8_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.fp8_available()
+        # Check all FP8 backends - return True if any is available
+        return (
+            native.gemm_fp8_f32_sm90_available()
+            or native.gemm_fp8_f32_sm100_available()
+            or native.gemm_fp8_f32_sm120_available()
+        )
     else:
         return False
+
+
+# Alias for standardized naming
+gemm_fp8_available = fp8_available
 
 
 def fp8_sm90_available() -> bool:
@@ -535,9 +544,14 @@ def fp8_sm90_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.fp8_sm90_available()
+        # Use new standardized name
+        return native.gemm_fp8_f32_sm90_available()
     else:
         return False
+
+
+# Alias for standardized naming
+gemm_fp8_f32_sm90_available = fp8_sm90_available
 
 
 def fp8_sm100_available() -> bool:
@@ -555,9 +569,14 @@ def fp8_sm100_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.fp8_sm100_available()
+        # Use new standardized name
+        return native.gemm_fp8_f32_sm100_available()
     else:
         return False
+
+
+# Alias for standardized naming
+gemm_fp8_f32_sm100_available = fp8_sm100_available
 
 
 def fp8_sm120_available() -> bool:
@@ -574,9 +593,14 @@ def fp8_sm120_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.fp8_sm120_available()
+        # Use new standardized name
+        return native.gemm_fp8_f32_sm120_available()
     else:
         return False
+
+
+# Alias for standardized naming
+gemm_fp8_f32_sm120_available = fp8_sm120_available
 
 
 def fp8_fp8_sm120_available() -> bool:
@@ -593,9 +617,14 @@ def fp8_fp8_sm120_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.fp8_fp8_sm120_available()
+        # Use new standardized name
+        return native.gemm_fp8_fp8_sm120_available()
     else:
         return False
+
+
+# Alias for standardized naming
+gemm_fp8_fp8_sm120_available = fp8_fp8_sm120_available
 
 
 def matmul_fp8_fp8_sm120(
@@ -688,10 +717,14 @@ def _matmul_fp8_fp8_sm120_native(
     else:
         out_native = out._get_native()
 
-    # Call Pure FP8 GEMM
+    # Call Pure FP8 GEMM (use new standardized name)
     native.gemm_fp8_fp8_sm120(a_native, b_native, out_native)
 
     return out
+
+
+# Alias for standardized naming
+gemm_fp8_fp8_sm120 = matmul_fp8_fp8_sm120
 
 
 def fp8_fp8_get_scale_sizes(M: int, N: int, K: int) -> tuple[int, int]:
@@ -720,9 +753,14 @@ def fp8_fp8_get_scale_sizes(M: int, N: int, K: int) -> tuple[int, int]:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.fp8_fp8_get_scale_sizes(M, N, K)
+        # Use new standardized name
+        return native.gemm_fp8_fp8_get_scale_sizes(M, N, K)
     else:
         return (0, 0)
+
+
+# Alias for standardized naming
+gemm_fp8_fp8_get_scale_sizes = fp8_fp8_get_scale_sizes
 
 
 def matmul_fp8_fp8_blockwise_sm120(
@@ -832,6 +870,10 @@ def _matmul_fp8_fp8_blockwise_sm120_native(
     return out
 
 
+# Alias for standardized naming
+gemm_fp8_fp8_blockwise_sm120 = matmul_fp8_fp8_blockwise_sm120
+
+
 def matmul_fp8_sm100(
     a: GPUArray,
     b: GPUArray,
@@ -919,10 +961,14 @@ def _matmul_fp8_sm100_native(
     else:
         out_native = out._get_native()
 
-    # Call FP8 GEMM
-    native.gemm_fp8_sm100(a_native, b_native, out_native)
+    # Call FP8 GEMM (use new standardized name)
+    native.gemm_fp8_f32_sm100(a_native, b_native, out_native)
 
     return out
+
+
+# Alias for standardized naming
+gemm_fp8_f32_sm100 = matmul_fp8_sm100
 
 
 def matmul_fp8_sm120(
@@ -1009,10 +1055,14 @@ def _matmul_fp8_sm120_native(
     else:
         out_native = out._get_native()
 
-    # Call FP8 GEMM
-    native.gemm_fp8_sm120(a_native, b_native, out_native)
+    # Call FP8 GEMM (use new standardized name)
+    native.gemm_fp8_f32_sm120(a_native, b_native, out_native)
 
     return out
+
+
+# Alias for standardized naming
+gemm_fp8_f32_sm120 = matmul_fp8_sm120
 
 
 def matmul_fp8_sm90(
@@ -1099,10 +1149,14 @@ def _matmul_fp8_sm90_native(
     else:
         out_native = out._get_native()
 
-    # Call FP8 GEMM
-    native.gemm_fp8_sm90(a_native, b_native, out_native)
+    # Call FP8 GEMM (use new standardized name)
+    native.gemm_fp8_f32_sm90(a_native, b_native, out_native)
 
     return out
+
+
+# Alias for standardized naming
+gemm_fp8_f32_sm90 = matmul_fp8_sm90
 
 
 def nvf4_bf16_sm120_available() -> bool:
@@ -1120,9 +1174,14 @@ def nvf4_bf16_sm120_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.nvf4_bf16_sm120_available()
+        # Use new standardized name
+        return native.gemm_nvf4_bf16_sm120_available()
     else:
         return False
+
+
+# Alias for standardized naming
+gemm_nvf4_bf16_sm120_available = nvf4_bf16_sm120_available
 
 
 def matmul_nvf4_bf16_sm120(
@@ -1205,6 +1264,10 @@ def _matmul_nvf4_bf16_sm120_native(
     return out
 
 
+# Alias for standardized naming
+gemm_nvf4_bf16_sm120 = matmul_nvf4_bf16_sm120
+
+
 # ============================================================================
 # GEMV Operations (M=1 special case)
 # ============================================================================
@@ -1222,9 +1285,14 @@ def gemv_nvf4_available() -> bool:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        return native.gemv_nvf4_available()
+        # Use new standardized name
+        return native.gemv_nvf4_bf16_sm120_available()
     else:
         return False
+
+
+# Alias for standardized naming
+gemv_nvf4_bf16_sm120_available = gemv_nvf4_available
 
 
 def nvf4_get_sizes(K: int, N: int) -> tuple[int, int]:
@@ -1247,6 +1315,10 @@ def nvf4_get_sizes(K: int, N: int) -> tuple[int, int]:
     data_size = (K // 2) * N
     scale_size = ((K + 31) // 32) * N
     return data_size, scale_size
+
+
+# Alias for standardized naming
+gemv_nvf4_get_sizes = nvf4_get_sizes
 
 
 def quantize_bf16_to_nvf4(
@@ -1383,11 +1455,16 @@ def gemv_nvf4_bf16(
         else:
             out_native = out._get_native()
 
-        native.gemv_nvf4_bf16(a_native, data_native, scale_native, out_native, alpha)
+        # Use new standardized name
+        native.gemv_nvf4_bf16_sm120(a_native, data_native, scale_native, out_native, alpha)
 
         return out
     else:
         raise RuntimeError("NVF4 GEMV requires native backend")
+
+
+# Alias for standardized naming
+gemv_nvf4_bf16_sm120 = gemv_nvf4_bf16
 
 
 def gemv_bf16(
@@ -1456,8 +1533,8 @@ def gemv_bf16(
         else:
             out_native = out._get_native()
 
-        # Use optimized kernel with B[N,K] layout
-        native.gemv_bf16_opt_sm120(a_native, b_native, out_native)
+        # Use optimized kernel with B[N,K] layout (new standardized name)
+        native.gemv_bf16_bf16_sm120(a_native, b_native, out_native)
 
         return out
     else:
@@ -1468,6 +1545,10 @@ def gemv_bf16(
         if out is not None:
             result = result + out.to_numpy().astype(np.float32)
         return from_numpy(result.astype(np.float16).view(np.uint16).astype(np.uint16))
+
+
+# Alias for standardized naming
+gemv_bf16_bf16_sm120 = gemv_bf16
 
 
 # Flag to track if FP8 LUT has been initialized
@@ -1507,8 +1588,13 @@ def w8a16_gemm_init_lut() -> None:
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        native.w8a16_gemm_init_lut()
+        # Use new standardized name
+        native.gemm_w8a16_init_lut()
         _W8A16_GEMM_LUT_INITIALIZED = True
+
+
+# Alias for standardized naming
+gemm_w8a16_init_lut = w8a16_gemm_init_lut
 
 
 def gemv_fp8_bf16(
@@ -1583,11 +1669,16 @@ def gemv_fp8_bf16(
         else:
             out_native = out._get_native()
 
-        native.gemv_fp8_bf16_opt(a_native, b_nk_native, b_scale_native, out_native)
+        # Use new standardized name
+        native.gemv_fp8_bf16_sm120(a_native, b_nk_native, b_scale_native, out_native)
 
         return out
     else:
         raise NotImplementedError("FP8 GEMV requires native GPU backend")
+
+
+# Alias for standardized naming
+gemv_fp8_bf16_sm120 = gemv_fp8_bf16
 
 
 def gemv_fp8_bf16_batched(
@@ -1665,11 +1756,16 @@ def gemv_fp8_bf16_batched(
         else:
             out_native = out._get_native()
 
-        native.gemv_fp8_bf16_opt_batched(a_native, b_nk_native, b_scale_native, out_native)
+        # Use new standardized name
+        native.gemv_fp8_bf16_batched_sm120(a_native, b_nk_native, b_scale_native, out_native)
 
         return out
     else:
         raise NotImplementedError("FP8 batched GEMV requires native GPU backend")
+
+
+# Alias for standardized naming
+gemv_fp8_bf16_batched_sm120 = gemv_fp8_bf16_batched
 
 
 def w8a16_gemm_sm120(
@@ -1747,11 +1843,16 @@ def w8a16_gemm_sm120(
         else:
             out_native = out._get_native()
 
-        native.w8a16_gemm_sm120(a_native, b_fp8_native, b_scale_native, out_native)
+        # Use new standardized name
+        native.gemm_w8a16_bf16_sm120(a_native, b_fp8_native, b_scale_native, out_native)
 
         return out
     else:
         raise NotImplementedError("W8A16 GEMM requires native GPU backend with SM120")
+
+
+# Alias for standardized naming
+gemm_w8a16_bf16_sm120 = w8a16_gemm_sm120
 
 
 # Track if grouped GEMM LUT is initialized
@@ -1868,13 +1969,18 @@ def grouped_gemm_fp8_bf16(
         else:
             out_native = out._get_native()
 
-        native.grouped_gemm_fp8_bf16(
+        # Use new standardized name
+        native.grouped_gemm_fp8_bf16_sm120(
             a_native, b_stacked_native, b_scale_native, out_native, row_expert_ids_native
         )
 
         return out
     else:
         raise NotImplementedError("Grouped GEMM requires native GPU backend")
+
+
+# Alias for standardized naming
+grouped_gemm_fp8_bf16_sm120 = grouped_gemm_fp8_bf16
 
 
 def fp8_get_sizes(K: int, N: int) -> tuple[int, int, int]:

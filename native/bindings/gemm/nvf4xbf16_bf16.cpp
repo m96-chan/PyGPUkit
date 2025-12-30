@@ -23,9 +23,16 @@ extern "C" {
 }
 
 void init_gemm_nvf4xbf16_bf16(py::module_& m) {
+    // ============================================================
+    // NVF4 (4-bit) GEMM for SM120 with BF16 I/O
+    // New name: gemm_nvf4_bf16_sm120_available, alias: nvf4_bf16_sm120_available
+    // ============================================================
+    m.def("gemm_nvf4_bf16_sm120_available", []() {
+        return pygpukit_nvf4_bf16_sm120_available();
+    }, "Check if NVF4 BF16 GEMM is available on SM120 (Blackwell GeForce)");
     m.def("nvf4_bf16_sm120_available", []() {
         return pygpukit_nvf4_bf16_sm120_available();
-    }, "Check if NVF4 BF16 GEMM is available on SM120");
+    }, "[Alias for gemm_nvf4_bf16_sm120_available] Check if NVF4 BF16 GEMM is available on SM120");
 
     m.def("gemm_nvf4_bf16_sm120", [](const GPUArray& A, const GPUArray& B, GPUArray& D) {
         if (A.dtype() != DataType::BFloat16 || B.dtype() != DataType::BFloat16 || D.dtype() != DataType::BFloat16) {
@@ -61,9 +68,13 @@ void init_gemm_nvf4xbf16_bf16(py::module_& m) {
     }, py::arg("A"), py::arg("B"), py::arg("D"),
        "NVF4 (4-bit) GEMM for SM120 with BF16 I/O: D = A @ B (BF16 -> NVF4 quantize -> GEMM -> BF16)");
 
+    // New name: gemm_nvf4_nvf4_sm120_available, alias: nvf4_nvf4_sm120_available
+    m.def("gemm_nvf4_nvf4_sm120_available", []() {
+        return pygpukit_nvf4_nvf4_sm120_available();
+    }, "Check if pure NVF4 GEMM is available on SM120 (Blackwell GeForce)");
     m.def("nvf4_nvf4_sm120_available", []() {
         return pygpukit_nvf4_nvf4_sm120_available();
-    }, "Check if pure NVF4 GEMM is available (SM120+)");
+    }, "[Alias for gemm_nvf4_nvf4_sm120_available] Check if pure NVF4 GEMM is available (SM120+)");
 
     m.def("benchmark_gemm_nvf4_sm120", [](GPUArray& D, int M, int N, int K) {
         if (D.dtype() != DataType::BFloat16) {
