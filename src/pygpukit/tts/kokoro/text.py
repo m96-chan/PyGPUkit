@@ -184,12 +184,21 @@ class KokoroTokenizer:
             return self._text_to_phonemes_basic(text)
 
         try:
-            # misaki returns (graphemes, phonemes) pairs
+            # misaki returns a generator of (grapheme, phoneme) tuples
             result = self._misaki_pipeline(text)
-            if isinstance(result, tuple):
-                _, phonemes = result
-                return phonemes
-            return str(result)
+
+            # Collect all phonemes from the generator
+            phoneme_parts = []
+            for item in result:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    # (grapheme, phoneme) tuple
+                    phoneme_parts.append(str(item[1]) if item[1] else "")
+                elif isinstance(item, str):
+                    phoneme_parts.append(item)
+
+            # Join phonemes with space separator
+            phonemes = " ".join(p for p in phoneme_parts if p)
+            return phonemes if phonemes else self._text_to_phonemes_basic(text)
         except Exception:
             # Fallback on error
             return self._text_to_phonemes_basic(text)
