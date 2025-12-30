@@ -101,6 +101,41 @@ They were all observed in production or real benchmarks.
 
 ## What's New in v0.2.18
 
+### Major Codebase Refactoring
+Complete modularization of the codebase for better maintainability:
+- Split monolithic files into modular `.inl` components
+- Reorganized matmul kernel directory structure
+- Standardized GEMM/GEMV naming conventions
+- Modular pybind11 bindings
+
+### Kokoro-82M TTS
+Text-to-speech synthesis with Japanese/English support:
+```python
+from pygpukit.tts import KokoroModel
+model = KokoroModel.from_safetensors("kokoro-v1.0-82m.safetensors")
+audio = model.generate("Hello world", voice="af_heart")
+```
+
+### Positional Encoding Operations
+New neural network operations for attention mechanisms:
+
+| Function | Description |
+|----------|-------------|
+| `pope_init_encoding` | Sinusoidal positional encoding (PoPE) |
+| `pope_inplace` | Apply additive encoding to Q/K |
+| `alibi_init_slopes` | ALiBi head-specific slopes |
+| `alibi_compute_bias` | ALiBi attention bias matrix |
+| `rope_init_ntk_aware` | NTK-aware RoPE for context extension |
+| `rope_init_yarn` | YaRN dimension-wise interpolation |
+| `rope_init_linear` | Linear position interpolation |
+| `relu2` | ReLU squared activation (Primer) |
+
+### Unified Benchmark Suite
+New `scripts/benchmark.py` for comprehensive performance testing across all dtypes and sizes.
+
+### QAT/Pruning/Sparsity Config
+Model config support for quantization-aware training, pruning, and sparsity patterns.
+
 ### Optimized BF16 GEMV
 New optimized BF16 GEMV kernel with B[N,K] layout achieves **98-101% peak bandwidth** for typical LLM dimensions:
 
@@ -111,9 +146,6 @@ New optimized BF16 GEMV kernel with B[N,K] layout achieves **98-101% peak bandwi
 
 ### W8A16 GEMM Fix
 Fixed MMA A-fragment register mapping for m16n8k16 instruction. MoE models now produce correct output.
-
-### MoE Inference Test
-Added comprehensive MoE inference test for various prompt lengths.
 
 ---
 
@@ -562,7 +594,7 @@ PyGPUkit/
 | **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
 | **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
 | **v0.2.17** | **Triton backend** MVP, hybrid execution (Triton + Native CUDA), TritonArray wrapper |
-| **v0.2.18** | **Optimized BF16 GEMV** (98% BW), W8A16 GEMM fix (MoE), MoE inference test |
+| **v0.2.18** | **Codebase refactoring**, Kokoro TTS, Positional encoding (PoPE/ALiBi/YaRN/NTK), ReLU², Unified benchmark, BF16 GEMV (98% BW), W8A16 fix |
 
 ### Planned
 
