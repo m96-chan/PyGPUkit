@@ -169,9 +169,57 @@ def tanh(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
         return from_numpy(np.tanh(x))
 
 
+def relu2(a: GPUArray, *, out: GPUArray | None = None) -> GPUArray:
+    """ReLU squared activation: y = (max(0, x))^2.
+
+    Introduced in the Primer paper (Google, 2021). Benefits:
+    - Stronger sparsity than standard ReLU
+    - Continuous first derivative (unlike ReLU)
+    - Improved training dynamics in some architectures
+
+    Args:
+        a: Input array (float32, float16, or bfloat16).
+        out: Optional pre-allocated output array.
+
+    Returns:
+        A new GPUArray containing the ReLU squared values.
+
+    Example:
+        >>> x = from_numpy(np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32))
+        >>> y = relu2(x)
+        >>> y.to_numpy()  # [0.0, 0.0, 0.0, 1.0, 4.0]
+    """
+    _validate_float_dtype(a, "relu2")
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        a_native = a._get_native()
+
+        if out is not None:
+            out_native = out._get_native()
+            native.relu2_(a_native, out_native)
+            return out
+        else:
+            return GPUArray._wrap_native(native.relu2(a_native))
+    else:
+        # CPU fallback
+        x = a.to_numpy()
+        relu_val = np.maximum(0, x)
+        result_np = (relu_val * relu_val).astype(x.dtype)
+        if out is not None:
+            # Update output buffer in-place
+            backend.copy_host_to_device(result_np.ravel(), out._device_ptr)
+            return out
+        return from_numpy(result_np)
+
+
 __all__ = [
     "gelu",
     "silu",
     "sigmoid",
     "tanh",
+    "relu2",
 ]

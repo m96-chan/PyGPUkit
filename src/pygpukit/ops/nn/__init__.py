@@ -16,6 +16,7 @@ from __future__ import annotations
 # Activation functions
 from pygpukit.ops.nn.activation import (
     gelu,
+    relu2,
     sigmoid,
     silu,
     tanh,
@@ -49,6 +50,17 @@ from pygpukit.ops.nn.recurrent import (
 
 # RoPE operations
 from pygpukit.ops.nn.rope import (
+    alibi_add_bias,
+    alibi_compute_bias,
+    # ALiBi
+    alibi_init_slopes,
+    # PoPE
+    pope_init_encoding,
+    pope_inplace,
+    rope_init_linear,
+    # RoPE extensions
+    rope_init_ntk_aware,
+    rope_init_yarn,
     rope_inplace,
     rope_inplace_f32table,
 )
@@ -56,6 +68,7 @@ from pygpukit.ops.nn.rope import (
 __all__ = [
     # Activation
     "gelu",
+    "relu2",
     "silu",
     "sigmoid",
     "tanh",
@@ -69,6 +82,17 @@ __all__ = [
     # RoPE
     "rope_inplace",
     "rope_inplace_f32table",
+    # RoPE extensions
+    "rope_init_ntk_aware",
+    "rope_init_yarn",
+    "rope_init_linear",
+    # PoPE
+    "pope_init_encoding",
+    "pope_inplace",
+    # ALiBi
+    "alibi_init_slopes",
+    "alibi_compute_bias",
+    "alibi_add_bias",
     # Linear
     "bias_add_inplace",
     "split_qkv_batch",

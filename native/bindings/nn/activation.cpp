@@ -42,4 +42,14 @@ void init_nn_activation(py::module_& m) {
           "Fused linear + bias + GELU: output = gelu(input @ weight^T + bias)\n"
           "Uses CUTLASS TensorCore epilogue fusion for efficiency.\n"
           "input: [batch, in_features], weight: [out_features, in_features], bias: [out_features]");
+
+    // ReLU squared (Primer paper)
+    m.def("relu2", py::overload_cast<const GPUArray&>(&ops::relu2),
+          py::arg("input"),
+          "ReLU squared activation: y = (max(0, x))^2\n"
+          "Introduced in the Primer paper (Google, 2021).");
+
+    m.def("relu2_", py::overload_cast<const GPUArray&, GPUArray&>(&ops::relu2),
+          py::arg("input"), py::arg("out"),
+          "ReLU squared with output buffer (for CUDA Graph capture)");
 }

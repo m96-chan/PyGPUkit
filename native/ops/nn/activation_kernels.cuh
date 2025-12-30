@@ -45,6 +45,11 @@ __device__ __forceinline__ float sigmoid_f32(float x) {
     return 1.0f / (1.0f + expf(-x));
 }
 
+__device__ __forceinline__ float relu2_f32(float x) {
+    float relu_val = fmaxf(0.0f, x);
+    return relu_val * relu_val;
+}
+
 // ============================================================================
 // Kernel declarations (always available)
 // ============================================================================
@@ -87,6 +92,14 @@ __global__ void tanh_f16_kernel(const __half* __restrict__ input,
                                  __half* __restrict__ output, size_t n);
 __global__ void tanh_bf16_kernel(const __nv_bfloat16* __restrict__ input,
                                   __nv_bfloat16* __restrict__ output, size_t n);
+
+// ReLU squared (Primer paper)
+__global__ void relu2_f32_kernel(const float* __restrict__ input,
+                                  float* __restrict__ output, size_t n);
+__global__ void relu2_f16_kernel(const __half* __restrict__ input,
+                                  __half* __restrict__ output, size_t n);
+__global__ void relu2_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                   __nv_bfloat16* __restrict__ output, size_t n);
 
 // ============================================================================
 // Kernel definitions (only when PYGPUKIT_IMPLEMENT_NN_KERNELS is defined)
@@ -226,6 +239,31 @@ __global__ void tanh_bf16_kernel(const __nv_bfloat16* __restrict__ input,
     if (idx < n) {
         float x = __bfloat162float(input[idx]);
         output[idx] = __float2bfloat16(tanhf(x));
+    }
+}
+
+// ReLU squared kernels
+__global__ void relu2_f32_kernel(const float* __restrict__ input,
+                                  float* __restrict__ output, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) output[idx] = relu2_f32(input[idx]);
+}
+
+__global__ void relu2_f16_kernel(const __half* __restrict__ input,
+                                  __half* __restrict__ output, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(relu2_f32(x));
+    }
+}
+
+__global__ void relu2_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                   __nv_bfloat16* __restrict__ output, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = __bfloat162float(input[idx]);
+        output[idx] = __float2bfloat16(relu2_f32(x));
     }
 }
 
