@@ -153,6 +153,8 @@ pybind11_add_module(${MODULE_NAME}
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
+    ops/matmul/fused.cu
+    ops/matmul/batched.cu
     # GEMM kernels (Issue #122: Reorganized with w{weight}a{act}_{out} naming)
     ops/matmul/gemm/f32_f32/generic/f32_ampere.cu
     ops/matmul/gemm/w8a8_f32/sm90/fp8_cutlass.cu

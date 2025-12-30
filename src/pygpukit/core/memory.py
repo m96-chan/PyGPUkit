@@ -157,9 +157,7 @@ def copy_device_to_device_async(
         raise RuntimeError("copy_device_to_device_async requires native backend")
 
     if dst.nbytes != src.nbytes:
-        raise ValueError(
-            f"Size mismatch: dst.nbytes={dst.nbytes}, src.nbytes={src.nbytes}"
-        )
+        raise ValueError(f"Size mismatch: dst.nbytes={dst.nbytes}, src.nbytes={src.nbytes}")
 
     native = get_native_module()
     native.memcpy_device_to_device_async(
