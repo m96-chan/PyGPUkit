@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.factory import from_numpy, zeros
+from pygpukit.core.factory import from_numpy
 from pygpukit.ops.audio import AudioBuffer
 from pygpukit.tts.kokoro.config import KokoroConfig
 from pygpukit.tts.kokoro.loader import (
@@ -217,9 +217,7 @@ class KokoroModel:
         # Note: Actual weight prefix may vary depending on checkpoint format
         # This is a placeholder - actual implementation needs weight inspection
         try:
-            self._plbert = build_plbert_from_weights(
-                self.config, self.weights, prefix="bert"
-            )
+            self._plbert = build_plbert_from_weights(self.config, self.weights, prefix="bert")
         except (KeyError, ValueError):
             # Weights might use different naming
             self._plbert = None

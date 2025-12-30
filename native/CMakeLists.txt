@@ -215,6 +215,7 @@ pybind11_add_module(${MODULE_NAME}
     bindings/nn/norm.cpp
     bindings/nn/attention.cpp
     bindings/nn/rope.cpp
+    bindings/nn/recurrent.cpp
     # Bindings - GEMM operations (by dtype combination)
     bindings/gemm/generic.cpp
     bindings/gemm/fp8xfp8_bf16.cpp

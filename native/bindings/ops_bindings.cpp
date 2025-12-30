@@ -32,6 +32,7 @@ void init_ops_bindings(py::module_& m) {
     init_nn_norm(m);
     init_nn_attention(m);
     init_nn_rope(m);
+    init_nn_recurrent(m);
 
     // Embedding operations
     init_embedding_lookup(m);

@@ -12,11 +12,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.dtypes import bfloat16, float32
 from pygpukit.core.factory import from_numpy
 
 if TYPE_CHECKING:
-    from pygpukit.tts.kokoro.config import KokoroConfig
+    pass
 
 
 def _download_model(repo_id: str, local_dir: Path | None = None) -> Path:
@@ -83,7 +82,7 @@ def _load_pytorch_weights(path: Path) -> dict[str, np.ndarray]:
         return weights
     except ImportError as err:
         raise ImportError(
-            "PyTorch is required to load .pth files. " "Install with: pip install torch"
+            "PyTorch is required to load .pth files. Install with: pip install torch"
         ) from err
 
 
@@ -125,8 +124,6 @@ def _convert_to_gpu(
     Returns:
         Dictionary of GPUArrays
     """
-    target_dtype = bfloat16 if dtype == "bfloat16" else float32
-
     gpu_weights = {}
     for name, array in weights.items():
         # Convert to float32 first if needed
@@ -175,7 +172,7 @@ def load_voice_embedding(
         return from_numpy(embedding.astype(np.float32))
     except ImportError as err:
         raise ImportError(
-            "PyTorch is required to load voice files. " "Install with: pip install torch"
+            "PyTorch is required to load voice files. Install with: pip install torch"
         ) from err
 
 

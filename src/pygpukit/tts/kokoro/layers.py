@@ -15,8 +15,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.dtypes import bfloat16 as dt_bfloat16
-from pygpukit.core.factory import from_numpy, zeros
+from pygpukit.core.factory import from_numpy
 
 if TYPE_CHECKING:
     from pygpukit.tts.kokoro.config import KokoroConfig
@@ -126,9 +125,7 @@ class Conv1d:
 
         # Pad input
         if self.padding > 0:
-            x_np = np.pad(
-                x_np, ((0, 0), (0, 0), (self.padding, self.padding)), mode="constant"
-            )
+            x_np = np.pad(x_np, ((0, 0), (0, 0), (self.padding, self.padding)), mode="constant")
 
         # im2col: extract patches
         col = np.zeros(
@@ -157,6 +154,97 @@ class Conv1d:
             out_np = out_np + bias_np.reshape(1, -1, 1)
 
         return from_numpy(out_np.astype(np.float32))
+
+
+class LSTM:
+    """LSTM layer using native CUDA kernel.
+
+    Implements unidirectional or bidirectional LSTM with PyTorch-compatible weights.
+
+    Args:
+        W_ih: Input-to-hidden weights [4*hidden_size, input_size]
+        W_hh: Hidden-to-hidden weights [4*hidden_size, hidden_size]
+        b_ih: Input bias [4*hidden_size]
+        b_hh: Hidden bias [4*hidden_size]
+        bidirectional: If True, runs bidirectional LSTM
+        W_ih_reverse: Backward direction weights (only if bidirectional)
+        W_hh_reverse: Backward direction weights (only if bidirectional)
+        b_ih_reverse: Backward direction bias (only if bidirectional)
+        b_hh_reverse: Backward direction bias (only if bidirectional)
+    """
+
+    def __init__(
+        self,
+        W_ih: GPUArray,
+        W_hh: GPUArray,
+        b_ih: GPUArray,
+        b_hh: GPUArray,
+        bidirectional: bool = False,
+        W_ih_reverse: GPUArray | None = None,
+        W_hh_reverse: GPUArray | None = None,
+        b_ih_reverse: GPUArray | None = None,
+        b_hh_reverse: GPUArray | None = None,
+    ):
+        self.W_ih = W_ih
+        self.W_hh = W_hh
+        self.b_ih = b_ih
+        self.b_hh = b_hh
+        self.bidirectional = bidirectional
+        self.W_ih_reverse = W_ih_reverse
+        self.W_hh_reverse = W_hh_reverse
+        self.b_ih_reverse = b_ih_reverse
+        self.b_hh_reverse = b_hh_reverse
+
+        # Infer dimensions from weights
+        self.hidden_size = W_hh.shape[1]
+        self.input_size = W_ih.shape[1]
+
+    def __call__(
+        self,
+        x: GPUArray,
+        h0: GPUArray | None = None,
+        c0: GPUArray | None = None,
+    ) -> tuple[GPUArray, tuple[GPUArray, GPUArray]]:
+        """Forward pass.
+
+        Args:
+            x: Input sequence [batch, seq_len, input_size]
+            h0: Initial hidden state [num_layers * num_directions, batch, hidden_size]
+            c0: Initial cell state [num_layers * num_directions, batch, hidden_size]
+
+        Returns:
+            Tuple of (output, (h_n, c_n)):
+                output: Hidden states [batch, seq_len, hidden_size * num_directions]
+                h_n: Final hidden state
+                c_n: Final cell state
+        """
+        from pygpukit.ops.nn import lstm_bidirectional, lstm_forward
+
+        if self.bidirectional:
+            if self.W_ih_reverse is None:
+                raise ValueError("Bidirectional LSTM requires reverse weights")
+
+            output, h_n, c_n = lstm_bidirectional(
+                x,
+                self.W_ih,
+                self.W_hh,
+                self.b_ih,
+                self.b_hh,
+                self.W_ih_reverse,
+                self.W_hh_reverse,
+                self.b_ih_reverse,
+                self.b_hh_reverse,
+            )
+        else:
+            # Extract h0, c0 for single layer if provided
+            h0_layer = h0
+            c0_layer = c0
+
+            output, h_n, c_n = lstm_forward(
+                x, self.W_ih, self.W_hh, self.b_ih, self.b_hh, h0_layer, c0_layer
+            )
+
+        return output, (h_n, c_n)
 
 
 class ConvTranspose1d:
@@ -384,9 +472,7 @@ class PLBERTEncoder:
         # Token embeddings (numpy-based for simplicity)
         input_ids_np: np.ndarray = input_ids.to_numpy().astype(np.int32)
         embeddings_np = self.embeddings.to_numpy()
-        token_embeds_np = embeddings_np[input_ids_np.flatten()].reshape(
-            batch_size, seq_len, -1
-        )
+        token_embeds_np = embeddings_np[input_ids_np.flatten()].reshape(batch_size, seq_len, -1)
         token_embeds = from_numpy(token_embeds_np.astype(np.float32))
 
         # Position embeddings
@@ -537,7 +623,8 @@ class Decoder:
         x = self.input_proj(text_features)
 
         # Add style conditioning (broadcast over sequence)
-        style_expanded = style.to_numpy()[:, :, np.newaxis]
+        # Note: style conditioning is applied after duration expansion
+        _ = style  # Reserved for future use
         x_np = x.to_numpy()
 
         # Simple duration expansion (repeat each frame by duration)
@@ -611,7 +698,7 @@ class ISTFTNet:
         x = mel
 
         # Upsampling stages
-        for i, (up, resblock_group) in enumerate(zip(self.ups, self.resblocks)):
+        for _i, (up, resblock_group) in enumerate(zip(self.ups, self.resblocks)):
             x = leaky_relu(x)
             x = up(x)
 
