@@ -64,6 +64,13 @@ extern "C" {
     cudaError_t pygpukit_gemm_fp8_fp8_sm120_v3(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
     cudaError_t pygpukit_gemm_fp8_fp8_sm120_v4(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
 
+    // SM120 FP8 GEMM optimized variants (V5-V8) - Cooperative scheduler + explicit stages
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v5(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v6(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v7(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    cudaError_t pygpukit_gemm_fp8_fp8_sm120_v8(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
+    void pygpukit_gemm_fp8_fp8_sm120_cleanup();
+
     // SM120 (Blackwell GeForce) - NVF4 (4-bit) with BF16 I/O
     cudaError_t pygpukit_gemm_nvf4_bf16_sm120(
         const __nv_bfloat16* A, const __nv_bfloat16* B, __nv_bfloat16* D,
@@ -97,13 +104,16 @@ extern "C" {
         const void* A, const void* B_data, const void* B_scale, void* C,
         int K, int N, float alpha, cudaStream_t stream
     );
-    cudaError_t pygpukit_gemv_bf16(
-        const void* A, const void* B, void* C,
-        int K, int N, float alpha, float beta, cudaStream_t stream
+    // Optimized BF16 GEMV with B[N,K] layout
+    cudaError_t pygpukit_gemv_bf16_opt_sm120(
+        const __nv_bfloat16* A, const __nv_bfloat16* B_nk, __nv_bfloat16* C,
+        int K, int N, cudaStream_t stream
     );
+    bool pygpukit_gemv_bf16_opt_sm120_available();
     void pygpukit_nvf4_get_sizes(int K, int N, size_t* data_size, size_t* scale_size);
 
     // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output
+    cudaError_t pygpukit_w8a16_gemm_init_lut();
     cudaError_t pygpukit_w8a16_gemm_sm120(
         const void* A, const void* B_fp8, const void* B_scale, void* C,
         int M, int N, int K, int scale_stride_n, cudaStream_t stream
@@ -184,6 +194,15 @@ extern "C" {
         int K, int N, cudaStream_t stream
     );
     bool pygpukit_gemv_fp8_fp8_sm120_available();
+
+    // Accurate FP8/FP8 GEMV (SM120) - Issue #123: <0.5% error
+    cudaError_t pygpukit_gemv_fp8_fp8_bf16_accurate_sm120(
+        const uint8_t* A, const uint8_t* B_nk,
+        const float* scale_A, const float* scale_B,
+        __nv_bfloat16* C,
+        int K, int N, cudaStream_t stream
+    );
+    bool pygpukit_gemv_fp8_fp8_accurate_sm120_available();
 
     // Pure NVF4/NVF4/NVF4 GEMV (SM120)
     cudaError_t pygpukit_gemv_nvf4_nvf4_bf16_sm120(
@@ -1660,6 +1679,12 @@ void init_ops_bindings(py::module_& m) {
     bind_fp8_tile("gemm_fp8_fp8_sm120_v3", pygpukit_gemm_fp8_fp8_sm120_v3, "FP8 GEMM 256x128x64");
     bind_fp8_tile("gemm_fp8_fp8_sm120_v4", pygpukit_gemm_fp8_fp8_sm120_v4, "FP8 GEMM 128x128x64");
 
+    // Optimized FP8 GEMM (V5-V8) - Cached scale buffers
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v5", pygpukit_gemm_fp8_fp8_sm120_v5, "FP8 GEMM 128x128x128 cached");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v6", pygpukit_gemm_fp8_fp8_sm120_v6, "FP8 GEMM 128x256x64 cached");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v7", pygpukit_gemm_fp8_fp8_sm120_v7, "FP8 GEMM 256x128x64 cached");
+    bind_fp8_tile("gemm_fp8_fp8_sm120_v8", pygpukit_gemm_fp8_fp8_sm120_v8, "FP8 GEMM 128x128x64 cached");
+
     // Blockwise scaled FP8 GEMM
     m.def("gemm_fp8_fp8_blockwise_sm120", [](
         const GPUArray& A, const GPUArray& B, GPUArray& D,
@@ -1856,34 +1881,47 @@ void init_ops_bindings(py::module_& m) {
     }, py::arg("A"), py::arg("B_data"), py::arg("B_scale"), py::arg("C"), py::arg("alpha") = 1.0f,
        "NVF4 GEMV for SM120: C[N] = alpha * A[K] @ B[K,N] (NVF4 quantized weights)");
 
-    m.def("gemv_bf16", [](const GPUArray& A, const GPUArray& B, GPUArray& C, float alpha, float beta) {
-        if (A.dtype() != DataType::BFloat16 || B.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
-            throw std::runtime_error("gemv_bf16: all inputs must be bfloat16");
+    // ========================================================================
+    // Optimized BF16 GEMV (warp-level reduction, B[N,K] layout)
+    // ========================================================================
+
+    m.def("gemv_bf16_opt_sm120", [](const GPUArray& A, const GPUArray& B_nk, GPUArray& C) {
+        // A: [K] BF16 activation
+        // B_nk: [N, K] BF16 weights (row-major, row = output)
+        // C: [N] BF16 output
+        if (A.dtype() != DataType::BFloat16 || B_nk.dtype() != DataType::BFloat16 || C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_bf16_opt_sm120: all inputs must be bfloat16");
         }
-        if (A.ndim() != 1 || B.ndim() != 2 || C.ndim() != 1) {
-            throw std::runtime_error("gemv_bf16: A[K], B[K,N], C[N] dimensions required");
+        if (A.ndim() != 1 || B_nk.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_bf16_opt_sm120: A[K], B_nk[N,K], C[N] dimensions required");
         }
 
         int K = A.shape()[0];
-        int N = B.shape()[1];
+        int N = B_nk.shape()[0];  // Note: N is first dim in [N, K] layout
 
-        if (B.shape()[0] != static_cast<size_t>(K)) {
-            throw std::runtime_error("gemv_bf16: K dimension mismatch");
+        if (B_nk.shape()[1] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_bf16_opt_sm120: K dimension mismatch");
         }
         if (C.shape()[0] != static_cast<size_t>(N)) {
-            throw std::runtime_error("gemv_bf16: N dimension mismatch");
+            throw std::runtime_error("gemv_bf16_opt_sm120: N dimension mismatch");
         }
 
-        cudaError_t err = pygpukit_gemv_bf16(
-            A.data(), B.data(), C.data(),
-            K, N, alpha, beta, nullptr
+        cudaError_t err = pygpukit_gemv_bf16_opt_sm120(
+            reinterpret_cast<const __nv_bfloat16*>(A.data()),
+            reinterpret_cast<const __nv_bfloat16*>(B_nk.data()),
+            reinterpret_cast<__nv_bfloat16*>(C.data()),
+            K, N, nullptr
         );
 
         if (err != cudaSuccess) {
-            throw std::runtime_error("gemv_bf16 failed: " + std::string(cudaGetErrorString(err)));
+            throw std::runtime_error("gemv_bf16_opt_sm120 failed: " + std::string(cudaGetErrorString(err)));
         }
-    }, py::arg("A"), py::arg("B"), py::arg("C"), py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
-       "BF16 GEMV: C[N] = alpha * A[K] @ B[K,N] + beta * C[N]");
+    }, py::arg("A"), py::arg("B_nk"), py::arg("C"),
+       "Optimized BF16 GEMV: C[N] = A[K] @ B_nk[N,K]^T (warp-reduce, B[N,K] layout)");
+
+    m.def("gemv_bf16_opt_available", []() {
+        return pygpukit_gemv_bf16_opt_sm120_available();
+    }, "Check if optimized BF16 GEMV is available (SM80+)");
 
     m.def("nvf4_get_sizes", [](int K, int N) {
         size_t data_size, scale_size;
@@ -1985,6 +2023,13 @@ void init_ops_bindings(py::module_& m) {
     // ========================================================================
     // W8A16 GEMM: FP8 weight x BF16 activation -> BF16 output (SM120)
     // ========================================================================
+
+    m.def("w8a16_gemm_init_lut", []() {
+        cudaError_t err = pygpukit_w8a16_gemm_init_lut();
+        if (err != cudaSuccess) {
+            throw std::runtime_error("w8a16_gemm_init_lut failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, "Initialize FP8->F32 LUT for W8A16 GEMM");
 
     m.def("w8a16_gemm_sm120", [](const GPUArray& A, const GPUArray& B_fp8, const GPUArray& B_scale, GPUArray& C) {
         // A: [M, K] BF16 activation
@@ -2561,6 +2606,64 @@ void init_ops_bindings(py::module_& m) {
         }
     }, py::arg("A"), py::arg("B_nk"), py::arg("scale_A"), py::arg("scale_B"), py::arg("C"), py::arg("scale_C"),
        "Pure FP8 GEMV: C[N](FP8) = A[K](FP8) @ B_nk[N,K](FP8)^T with blockwise scaling and FP8 output");
+
+    // ========================================================================
+    // Accurate FP8/FP8 GEMV (SM120) - Issue #123
+    // ========================================================================
+
+    m.def("gemv_fp8_fp8_accurate_available", []() {
+        return pygpukit_gemv_fp8_fp8_accurate_sm120_available();
+    }, "Check if accurate FP8/FP8 GEMV is available (SM120)");
+
+    m.def("gemv_fp8_fp8_bf16_accurate_sm120", [](
+        const GPUArray& A, const GPUArray& B_nk,
+        const GPUArray& scale_A, const GPUArray& scale_B,
+        GPUArray& C
+    ) {
+        // Accurate FP8 GEMV: <0.5% error (vs ~1-2% in fast version)
+        // Uses smaller scale blocks (32 vs 128) and Kahan/double accumulation
+        // A: [K] FP8 E4M3 (stored as uint8)
+        // B_nk: [N, K] FP8 E4M3 (stored as uint8)
+        // scale_A: [K/32] FP32 blockwise scales (4x more than fast version)
+        // scale_B: [N/32, K/32] FP32 blockwise scales (16x more than fast version)
+        // C: [N] BF16 output
+        if (A.dtype() != DataType::UInt8 || B_nk.dtype() != DataType::UInt8) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate: A, B must be uint8 (FP8 E4M3)");
+        }
+        if (scale_A.dtype() != DataType::Float32 || scale_B.dtype() != DataType::Float32) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate: scales must be float32");
+        }
+        if (C.dtype() != DataType::BFloat16) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate: C must be bfloat16");
+        }
+        if (A.ndim() != 1 || B_nk.ndim() != 2 || C.ndim() != 1) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate: A[K], B_nk[N,K], C[N] dimensions required");
+        }
+
+        int K = A.shape()[0];
+        int N = B_nk.shape()[0];
+
+        if (B_nk.shape()[1] != static_cast<size_t>(K)) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate: K dimension mismatch");
+        }
+        if (C.shape()[0] != static_cast<size_t>(N)) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate: N dimension mismatch");
+        }
+
+        cudaError_t err = pygpukit_gemv_fp8_fp8_bf16_accurate_sm120(
+            reinterpret_cast<const uint8_t*>(A.data()),
+            reinterpret_cast<const uint8_t*>(B_nk.data()),
+            reinterpret_cast<const float*>(scale_A.data()),
+            reinterpret_cast<const float*>(scale_B.data()),
+            reinterpret_cast<__nv_bfloat16*>(C.data()),
+            K, N, nullptr
+        );
+
+        if (err != cudaSuccess) {
+            throw std::runtime_error("gemv_fp8_fp8_bf16_accurate failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }, py::arg("A"), py::arg("B_nk"), py::arg("scale_A"), py::arg("scale_B"), py::arg("C"),
+       "Accurate FP8 GEMV: C[N](BF16) = A[K](FP8) @ B_nk[N,K](FP8)^T with 32-element scale blocks (<0.5% error)");
 
     // ========================================================================
     // Pure NVF4/NVF4/NVF4 GEMV (SM120)

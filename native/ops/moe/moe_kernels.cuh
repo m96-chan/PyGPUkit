@@ -124,7 +124,7 @@ __global__ void moe_router_kernel(
 
     // Step 2: Top-K selection (single thread for simplicity)
     if (threadIdx.x == 0) {
-        float local_logits[64];
+        float local_logits[128];  // Max 128 experts
         for (int i = 0; i < num_experts; ++i) {
             local_logits[i] = logits[i];
         }

@@ -99,6 +99,24 @@ They were all observed in production or real benchmarks.
 
 ---
 
+## What's New in v0.2.18
+
+### Optimized BF16 GEMV
+New optimized BF16 GEMV kernel with B[N,K] layout achieves **98-101% peak bandwidth** for typical LLM dimensions:
+
+| Matrix | Bandwidth | % of Peak |
+|--------|-----------|-----------|
+| 2048 x 8192 | 1763 GB/s | **98%** |
+| 4096 x 14336 | 1810 GB/s | **101%** |
+
+### W8A16 GEMM Fix
+Fixed MMA A-fragment register mapping for m16n8k16 instruction. MoE models now produce correct output.
+
+### MoE Inference Test
+Added comprehensive MoE inference test for various prompt lengths.
+
+---
+
 ## What's New in v0.2.17
 
 ### Triton Backend MVP
@@ -268,14 +286,29 @@ output_ids = model.generate(input_ids, max_new_tokens=32)
 
 For LLM decode (M=1), custom GEMV kernels for different quantization formats:
 
+#### GEMV Bandwidth Utilization (v0.2.18)
+
+Optimized BF16 GEMV achieves near-peak memory bandwidth for large matrices:
+
+| K | N | BF16 BW | BF16 % | W8A16 BW | W8A16 % |
+|------|-------|---------|--------|----------|---------|
+| 2048 | 2048 | 434 GB/s | 24% | 278 GB/s | 16% |
+| 2048 | 8192 | **1763 GB/s** | **98%** | 434 GB/s | 24% |
+| 8192 | 2048 | 543 GB/s | 30% | 363 GB/s | 20% |
+| 4096 | 14336 | **1810 GB/s** | **101%** | 467 GB/s | 26% |
+
+> **Note:** BF16 GEMV with optimized B[N,K] layout achieves 98-101% peak bandwidth for typical LLM FFN dimensions. W8A16 (FP8 weight) includes dequantization overhead.
+
+#### GEMV Latency by Layer
+
 | Layer | K | N | BF16 | W8A16 | W8A8 | W4A16 | W4A4 | Int4 |
 |-------|------|-------|------|-------|------|-------|------|------|
-| Qwen-7B hidden | 4096 | 4096 | 65 us | 90 us | **10 us** | 140 us | 252 us | 31 us |
-| Qwen-7B MLP up | 4096 | 14336 | 125 us | 244 us | **17 us** | 141 us | 253 us | 47 us |
-| Qwen-7B MLP down | 14336 | 4096 | 399 us | 306 us | **22 us** | 404 us | 873 us | 58 us |
-| Qwen-72B hidden | 8192 | 8192 | 232 us | 306 us | **21 us** | 252 us | 497 us | 51 us |
-| Qwen-72B MLP up | 8192 | 29568 | 324 us | 947 us | 146 us | 436 us | 509 us | **112 us** |
-| Qwen-72B MLP down | 29568 | 8192 | 839 us | — | 170 us | 1393 us | 1294 us | **129 us** |
+| Qwen-7B hidden | 4096 | 4096 | **31 us** | 108 us | **31 us** | 142 us | 252 us | 33 us |
+| Qwen-7B MLP up | 4096 | 14336 | 100 us | 272 us | **43 us** | 140 us | 253 us | 49 us |
+| Qwen-7B MLP down | 14336 | 4096 | 102 us | 330 us | **46 us** | 403 us | 873 us | 59 us |
+| Qwen-72B hidden | 8192 | 8192 | 112 us | 326 us | **46 us** | 246 us | 497 us | 51 us |
+| Qwen-72B MLP up | 8192 | 29568 | 324 us | 976 us | 180 us | 448 us | 509 us | **111 us** |
+| Qwen-72B MLP down | 29568 | 8192 | 839 us | — | 204 us | 1395 us | 1294 us | **125 us** |
 
 | Kernel | Format | Memory | Rel. Err (vs FP32) | Best For |
 |--------|--------|--------|------------|----------|
@@ -322,20 +355,20 @@ All GEMV kernels compared on Qwen2.5-7B gate_proj (K=3584, N=18944):
 
 | Kernel | A dtype | B dtype | Weight Size | Time (us) | vs BF16 |
 |--------|---------|---------|-------------|-----------|---------|
-| BF16 | BF16 | BF16 | 129.5 MB | 119 | 1.00x |
-| FP8/BF16 (W8A16) | BF16 | FP8 | 64.8 MB | 272 | 0.44x |
+| BF16 | BF16 | BF16 | 129.5 MB | 121 | 1.00x |
+| FP8/BF16 (W8A16) | BF16 | FP8 | 64.8 MB | 275 | 0.44x |
 | **FP8/FP8 (W8A8)** | FP8 | FP8 | 64.8 MB | **19** | **6.2x** |
-| NVF4/BF16 (W4A16) | BF16 | NVF4 | 32.4 MB | 106 | 1.12x |
-| NVF4/NVF4 (W4A4) | NVF4 | NVF4 | 32.4 MB | 217 | 0.55x |
+| NVF4/BF16 (W4A16) | BF16 | NVF4 | 32.4 MB | 125 | 0.97x |
+| NVF4/NVF4 (W4A4) | NVF4 | NVF4 | 32.4 MB | 241 | 0.50x |
 
 **Performance by Layer Type:**
 
 | Layer | K | N | Best Kernel | Speedup |
 |-------|---|---|-------------|---------|
 | gate_proj | 3584 | 18944 | FP8/FP8 | 6.2x |
-| down_proj | 18944 | 3584 | FP8/FP8 | 22.7x |
+| down_proj | 18944 | 3584 | FP8/FP8 | 21.6x |
 | o_proj | 3584 | 3584 | FP8/FP8 | 6.8x |
-| qkv_proj | 3584 | 512 | FP8/FP8 | 9.1x |
+| qkv_proj | 3584 | 512 | FP8/FP8 | 8.7x |
 
 > **Recommendation:** FP8/FP8 is optimal for SM120 (Blackwell). NVF4/BF16 (W4A16) provides the best balance when FP8 compute is unavailable.
 
@@ -529,6 +562,7 @@ PyGPUkit/
 | **v0.2.15** | **FP8 I/O GEMM** (blockwise scaling), Pure NVF4 (446 TFLOPS), New math ops (sin, cos, sqrt, rsqrt, abs, neg, clamp, where, sigmoid, tanh, argmax, min, sum_axis) |
 | **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
 | **v0.2.17** | **Triton backend** MVP, hybrid execution (Triton + Native CUDA), TritonArray wrapper |
+| **v0.2.18** | **Optimized BF16 GEMV** (98% BW), W8A16 GEMM fix (MoE), MoE inference test |
 
 ### Planned
 

@@ -1395,25 +1395,26 @@ def gemv_bf16(
     b: GPUArray,
     *,
     out: GPUArray | None = None,
-    alpha: float = 1.0,
-    beta: float = 0.0,
 ) -> GPUArray:
-    """BF16 GEMV: C[N] = alpha * A[K] @ B[K,N] + beta * C[N].
+    """BF16 GEMV: C[N] = A[K] @ B[N,K]^T.
 
-    Standard BF16 matrix-vector multiplication without quantization.
+    Optimized BF16 matrix-vector multiplication with B[N,K] layout.
+    Each row of B contains the weights for one output element.
 
     Args:
         a: Input vector [K], BF16.
-        b: Weight matrix [K, N], BF16 (row-major).
+        b: Weight matrix [N, K], BF16 (row-major, each row = one output).
         out: Optional output vector [N], BF16.
-        alpha: Scaling factor for A @ B (default 1.0).
-        beta: Scaling factor for existing C (default 0.0).
 
     Returns:
         Output vector [N], BF16.
 
     Raises:
         ValueError: If shapes or dtypes don't match.
+
+    Note:
+        This function uses the optimized B[N,K] layout for better memory
+        coalescing. If you have weights in [K,N] format, transpose them first.
     """
     from pygpukit.core.dtypes import bfloat16
 
@@ -1427,10 +1428,10 @@ def gemv_bf16(
         raise ValueError("gemv_bf16 requires bfloat16 inputs")
 
     K = a.shape[0]
-    if b.shape[0] != K:
-        raise ValueError(f"gemv_bf16 dimension mismatch: A[{K}] vs B[{b.shape[0]}, {b.shape[1]}]")
+    N = b.shape[0]  # N is first dim in [N, K] layout
 
-    N = b.shape[1]
+    if b.shape[1] != K:
+        raise ValueError(f"gemv_bf16 dimension mismatch: A[{K}] vs B[{N}, {b.shape[1]}]")
 
     # Validate output
     if out is not None:
@@ -1455,16 +1456,17 @@ def gemv_bf16(
         else:
             out_native = out._get_native()
 
-        native.gemv_bf16(a_native, b_native, out_native, alpha, beta)
+        # Use optimized kernel with B[N,K] layout
+        native.gemv_bf16_opt_sm120(a_native, b_native, out_native)
 
         return out
     else:
-        # CPU fallback
+        # CPU fallback: B[N,K] @ A[K] = C[N] (B @ A^T transposed)
         a_np: np.ndarray[np.floating] = a.to_numpy().astype(np.float32)
         b_np: np.ndarray[np.floating] = b.to_numpy().astype(np.float32)
-        result: np.ndarray[np.floating] = alpha * (a_np @ b_np)
+        result: np.ndarray[np.floating] = b_np @ a_np  # [N,K] @ [K] = [N]
         if out is not None:
-            result = result + beta * out.to_numpy().astype(np.float32)
+            result = result + out.to_numpy().astype(np.float32)
         return from_numpy(result.astype(np.float16).view(np.uint16).astype(np.uint16))
 
 
@@ -1483,6 +1485,30 @@ def fp8_init_lut() -> None:
         return
     # LUT is already initialized in constant memory at compile time
     _FP8_LUT_INITIALIZED = True
+
+
+# Flag to track if W8A16 GEMM LUT has been initialized
+_W8A16_GEMM_LUT_INITIALIZED = False
+
+
+def w8a16_gemm_init_lut() -> None:
+    """Initialize FP8->F32 LUT for W8A16 GEMM.
+
+    This uses runtime initialization to avoid symbol conflicts with the GEMV LUT.
+    Must be called before using w8a16_gemm_sm120.
+    """
+    global _W8A16_GEMM_LUT_INITIALIZED
+    if _W8A16_GEMM_LUT_INITIALIZED:
+        return
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        native.w8a16_gemm_init_lut()
+        _W8A16_GEMM_LUT_INITIALIZED = True
 
 
 def gemv_fp8_bf16(
@@ -1701,8 +1727,8 @@ def w8a16_gemm_sm120(
         if out.dtype != bfloat16:
             raise ValueError(f"out dtype {out.dtype} must be bfloat16")
 
-    # Initialize LUT if not already done
-    fp8_init_lut()
+    # Initialize W8A16 GEMM LUT (runtime initialization to avoid symbol conflicts)
+    w8a16_gemm_init_lut()
 
     backend = get_backend()
 

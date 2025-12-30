@@ -22,7 +22,7 @@ namespace moe {
 
 // Simple insertion sort for small K (K <= 8)
 // Each thread handles one token
-template <typename T, int MAX_EXPERTS = 64>
+template <typename T, int MAX_EXPERTS = 128>
 __global__ void topk_with_indices_kernel(
     const T* __restrict__ logits,      // [num_tokens, num_experts]
     T* __restrict__ values,            // [num_tokens, k]
@@ -81,9 +81,9 @@ __global__ void topk_with_indices_f32_kernel(
     float* token_values = values + token_idx * k;
     int32_t* token_indices = indices + token_idx * k;
 
-    // For Mixtral: num_experts=8, k=2
+    // For Qwen3-MoE: num_experts=128, k=8
     // Load into registers
-    float local_logits[64];  // Max 64 experts
+    float local_logits[128];  // Max 128 experts
     for (int i = 0; i < num_experts; ++i) {
         local_logits[i] = token_logits[i];
     }
@@ -124,7 +124,7 @@ __global__ void topk_with_indices_bf16_kernel(
     int32_t* token_indices = indices + token_idx * k;
 
     // Load and convert to FP32 for comparison
-    float local_logits[64];
+    float local_logits[128];  // Max 128 experts
     for (int i = 0; i < num_experts; ++i) {
         local_logits[i] = __bfloat162float(token_logits[i]);
     }
@@ -163,7 +163,7 @@ __global__ void topk_with_indices_f16_kernel(
     int32_t* token_indices = indices + token_idx * k;
 
     // Load and convert to FP32 for comparison
-    float local_logits[64];
+    float local_logits[128];  // Max 128 experts
     for (int i = 0; i < num_experts; ++i) {
         local_logits[i] = __half2float(token_logits[i]);
     }

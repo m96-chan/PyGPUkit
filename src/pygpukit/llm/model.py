@@ -59,6 +59,18 @@ if TYPE_CHECKING:
     pass
 
 
+def _to_float32_logits(logits_np: np.ndarray) -> np.ndarray:
+    """Convert logits to float32 for sampling.
+
+    If logits are stored as uint16 (bfloat16 representation), convert them
+    to float32. Otherwise return as-is.
+    """
+    if logits_np.dtype == np.uint16:
+        # bfloat16 stored as uint16: convert to float32
+        return (logits_np.astype(np.uint32) << 16).view(np.float32)
+    return logits_np.astype(np.float32)
+
+
 # =============================================================================
 # Unified CausalTransformerModel
 # =============================================================================
@@ -202,7 +214,7 @@ class CausalTransformerModel:
                 # GPU sampling: only transfer 1 int instead of full vocab logits
                 next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
             else:
-                last_logits = logits.to_numpy()[-1]
+                last_logits = _to_float32_logits(logits.to_numpy()[-1])
                 next_token = sample_token(last_logits, temperature, top_k, top_p)
             tokens.append(next_token)
 
@@ -219,7 +231,7 @@ class CausalTransformerModel:
                 if gpu_sampling:
                     next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
                 else:
-                    last_logits = logits.to_numpy()[-1]
+                    last_logits = _to_float32_logits(logits.to_numpy()[-1])
                     next_token = sample_token(last_logits, temperature, top_k, top_p)
                 tokens.append(next_token)
 
@@ -233,7 +245,7 @@ class CausalTransformerModel:
                 if gpu_sampling:
                     next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
                 else:
-                    last_logits = logits.to_numpy()[-1]
+                    last_logits = _to_float32_logits(logits.to_numpy()[-1])
                     next_token = sample_token(last_logits, temperature, top_k, top_p)
                 tokens.append(next_token)
 
@@ -283,7 +295,7 @@ class CausalTransformerModel:
         if gpu_sampling:
             next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
         else:
-            last_logits = logits.to_numpy()[-1]
+            last_logits = _to_float32_logits(logits.to_numpy()[-1])
             next_token = sample_token(last_logits, temperature, top_k, top_p)
 
         yield next_token
@@ -301,7 +313,7 @@ class CausalTransformerModel:
             if gpu_sampling:
                 next_token = sample_token_gpu(logits[-1], temperature, top_k, top_p)
             else:
-                last_logits = logits.to_numpy()[-1]
+                last_logits = _to_float32_logits(logits.to_numpy()[-1])
                 next_token = sample_token(last_logits, temperature, top_k, top_p)
 
             yield next_token

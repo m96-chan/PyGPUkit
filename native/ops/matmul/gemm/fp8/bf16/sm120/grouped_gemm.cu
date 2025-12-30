@@ -10,8 +10,9 @@
 namespace pygpukit {
 namespace grouped_gemm {
 
-// LUT for FP8 E4M3 -> BF16 conversion (256 entries)
-__device__ __constant__ __nv_bfloat16 g_fp8_lut[256];
+// LUT for FP8 E4M3 -> F32 conversion (256 entries)
+// Using float32 for precision and to avoid __hmul type mismatch with BF16
+__device__ __constant__ float g_fp8_lut[256];
 
 // FP8 block scaling parameters
 constexpr int SCALE_BLOCK_H = 128;
@@ -59,8 +60,8 @@ __global__ void grouped_gemm_simple_kernel(
         uint8_t fp8_val = B[col * K + k];
         int scale_row = col / SCALE_BLOCK_H;
         int scale_col = k / SCALE_BLOCK_W;
-        __nv_bfloat16 scale = B_scale[scale_row * scale_k + scale_col];
-        float b_val = __bfloat162float(__hmul(g_fp8_lut[fp8_val], scale));
+        float scale_f = __bfloat162float(B_scale[scale_row * scale_k + scale_col]);
+        float b_val = g_fp8_lut[fp8_val] * scale_f;
 
         acc += a_val * b_val;
     }
@@ -126,8 +127,8 @@ __global__ void grouped_gemm_tiled_kernel(
                 uint8_t fp8_val = B[col * K + global_k];
                 int scale_row = col / SCALE_BLOCK_H;
                 int scale_col = global_k / SCALE_BLOCK_W;
-                __nv_bfloat16 scale = B_scale[scale_row * scale_k + scale_col];
-                float b_val = __bfloat162float(__hmul(g_fp8_lut[fp8_val], scale));
+                float scale_f = __bfloat162float(B_scale[scale_row * scale_k + scale_col]);
+                float b_val = g_fp8_lut[fp8_val] * scale_f;
 
                 acc += a_val * b_val;
             }
@@ -143,15 +144,27 @@ __global__ void grouped_gemm_tiled_kernel(
 }  // namespace grouped_gemm
 }  // namespace pygpukit
 
-// Initialize FP8 LUT
+// Initialize FP8 LUT with float32 values
 extern "C" cudaError_t pygpukit_grouped_gemm_init_lut() {
-    __nv_bfloat16 h_lut[256];
+    float h_lut[256];
     for (int i = 0; i < 256; ++i) {
-        __nv_fp8_e4m3 fp8 = *reinterpret_cast<const __nv_fp8_e4m3*>(&i);
-        h_lut[i] = __nv_bfloat16(fp8);
+        // FP8 E4M3: 1 sign, 4 exp (bias=7), 3 mantissa
+        int sign = (i >> 7) & 1;
+        int exp = (i >> 3) & 0xF;
+        int mant = i & 0x7;
+
+        float val;
+        if (exp == 0) {
+            // Subnormal: (mant/8) * 2^(-6)
+            val = (mant / 8.0f) * (1.0f / 64.0f);
+        } else {
+            // Normal: (1 + mant/8) * 2^(exp-7)
+            val = (1.0f + mant / 8.0f) * ldexpf(1.0f, exp - 7);
+        }
+        h_lut[i] = sign ? -val : val;
     }
     return cudaMemcpyToSymbol(
-        pygpukit::grouped_gemm::g_fp8_lut, h_lut, 256 * sizeof(__nv_bfloat16)
+        pygpukit::grouped_gemm::g_fp8_lut, h_lut, 256 * sizeof(float)
     );
 }
 

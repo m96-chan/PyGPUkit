@@ -105,16 +105,26 @@ class LinearBF16:
         )
 
         if use_gemv:
-            # GEMV path: zero-copy view to 1D, call gemv_bf16, view back to 2D
-            x_1d = x.view((self.in_features,))
-            y_1d = gemv_bf16(x_1d, self._weight_t)
+            # GEMV path for M=1 decode
+            from pygpukit.core.backend import get_native_module
 
-            if out is not None:
-                # Copy to output buffer
-                copy_to(y_1d.view((1, self.out_features)), out)
-                y = out
+            native = get_native_module()
+            x_1d = x.view((self.in_features,))
+
+            # Use optimized kernel (SM80+) with B[N,K] layout
+            if native.gemv_bf16_opt_available():
+                y_1d = zeros((self.out_features,), dtype="bfloat16")
+                # gemv_bf16_opt: A[K] @ B[N,K]^T -> C[N]
+                native.gemv_bf16_opt_sm120(
+                    x_1d._get_native(),
+                    self.weight._get_native(),  # [N, K] - no transpose
+                    y_1d._get_native(),
+                )
             else:
-                y = y_1d.view((1, self.out_features))
+                # Fallback: old kernel with B[K,N] layout
+                y_1d = gemv_bf16(x_1d, self._weight_t)
+
+            y = y_1d.view((1, self.out_features))
         else:
             # Standard matmul path
             y = matmul(x, self._weight_t, out=out)
@@ -631,7 +641,6 @@ class Attention:
         v_t = transpose_3d_021(v_expanded)
 
         attn_output = sdpa_causal(q_t, k_t, v_t)
-
         attn_output = transpose_3d_021(attn_output)
         attn_output = reshape_copy(attn_output, (seq_len, self.num_heads * self.head_dim))
 
@@ -1050,8 +1059,12 @@ class MoELayer:
         self._stacked_down_scale: GPUArray | None = None
 
         # Check if first expert uses FP8 - use grouped GEMM v2 for optimization
-        if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
-            self._stack_fp8_weights()
+        # TEMP: Disabled for debugging
+        import os
+
+        if os.environ.get("PYGPUKIT_DISABLE_GROUPED_GEMM") != "1":
+            if len(self.experts) > 0 and isinstance(self.experts[0].gate_proj, LinearFP8):
+                self._stack_fp8_weights()
 
     # Profiling flag (set to True to enable timing)
     _profile: bool = True
