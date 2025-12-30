@@ -184,11 +184,58 @@ pybind11_add_module(${MODULE_NAME}
     ops/sampling/sampling.cu
     ops/audio/audio.cu
     ops/moe/moe.cu
-    # Bindings
+    # Bindings - Main entry points
     bindings/module.cpp
     bindings/core_bindings.cpp
     bindings/jit_bindings.cpp
     bindings/ops_bindings.cpp
+    # Bindings - Elementwise operations
+    bindings/elementwise/binary.cpp
+    bindings/elementwise/inplace.cpp
+    bindings/elementwise/compare.cpp
+    # Bindings - Unary operations
+    bindings/unary/math.cpp
+    bindings/unary/trig.cpp
+    # Bindings - Reduction operations
+    bindings/reduction/basic.cpp
+    bindings/reduction/argmax.cpp
+    bindings/reduction/softmax.cpp
+    # Bindings - Tensor operations
+    bindings/tensor/cast.cpp
+    bindings/tensor/transpose.cpp
+    bindings/tensor/reshape.cpp
+    bindings/tensor/repeat.cpp
+    # Bindings - Embedding operations
+    bindings/embedding/lookup.cpp
+    bindings/embedding/kv_cache.cpp
+    # Bindings - Neural network operations
+    bindings/nn/activation.cpp
+    bindings/nn/norm.cpp
+    bindings/nn/attention.cpp
+    bindings/nn/rope.cpp
+    # Bindings - GEMM operations (by dtype combination)
+    bindings/gemm/generic.cpp
+    bindings/gemm/fp8xfp8_bf16.cpp
+    bindings/gemm/fp8xfp8_fp8.cpp
+    bindings/gemm/fp8xbf16_bf16.cpp
+    bindings/gemm/nvf4xbf16_bf16.cpp
+    bindings/gemm/grouped.cpp
+    bindings/gemm/int.cpp
+    # Bindings - GEMV operations
+    bindings/gemv/generic.cpp
+    bindings/gemv/fp8xfp8_bf16.cpp
+    bindings/gemv/nvf4xbf16_bf16.cpp
+    # Bindings - Sampling operations
+    bindings/sampling/basic.cpp
+    bindings/sampling/topk.cpp
+    bindings/sampling/seed.cpp
+    # Bindings - Other operations
+    bindings/quantize.cpp
+    bindings/paged_attention.cpp
+    bindings/continuous_batching.cpp
+    bindings/audio.cpp
+    bindings/cublaslt.cpp
+    bindings/moe.cpp
 )
 
 # Link only cuda_driver (no cudart, no nvrtc/cublasLt link-time dependency)
