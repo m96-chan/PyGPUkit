@@ -111,6 +111,8 @@ from pygpukit.ops.nn import (
     bias_add_inplace,
     gelu,
     layernorm,
+    lstm_bidirectional,
+    lstm_forward,
     rmsnorm,
     rope_inplace,
     rope_inplace_f32table,
@@ -282,6 +284,9 @@ __all__ = [
     "rope_inplace_f32table",
     "split_qkv_batch",
     "slice_rows_range_ptr",
+    # LSTM
+    "lstm_forward",
+    "lstm_bidirectional",
     # Embedding & KV Cache
     "embedding_lookup",
     "embedding_lookup_ptr",

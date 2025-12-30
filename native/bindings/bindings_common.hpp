@@ -35,6 +35,7 @@ void init_nn_activation(py::module_& m);
 void init_nn_norm(py::module_& m);
 void init_nn_attention(py::module_& m);
 void init_nn_rope(py::module_& m);
+void init_nn_recurrent(py::module_& m);
 
 void init_embedding_lookup(py::module_& m);
 void init_embedding_kv_cache(py::module_& m);

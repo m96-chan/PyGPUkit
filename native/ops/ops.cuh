@@ -10,6 +10,7 @@
 #pragma once
 
 #include "../core/memory.hpp"
+#include <tuple>
 
 namespace pygpukit {
 namespace ops {
@@ -524,6 +525,38 @@ int sample_token_gpu(
 
 // Set random seed for reproducible sampling
 void set_sampling_seed(unsigned int seed);
+
+// ============================================================================
+// LSTM (Long Short-Term Memory)
+// ============================================================================
+
+// LSTM forward pass (unidirectional)
+// x: [batch, seq_len, input_size]
+// W_ih: [4*hidden_size, input_size], W_hh: [4*hidden_size, hidden_size]
+// b_ih, b_hh: [4*hidden_size]
+// h0, c0: [batch, hidden_size] or empty for zeros
+// reverse: process sequence in reverse order
+// Returns: (output[batch, seq_len, hidden], h_n[batch, hidden], c_n[batch, hidden])
+std::tuple<GPUArray, GPUArray, GPUArray> lstm_forward(
+    const GPUArray& x,
+    const GPUArray& W_ih,
+    const GPUArray& W_hh,
+    const GPUArray& b_ih,
+    const GPUArray& b_hh,
+    const GPUArray& h0,
+    const GPUArray& c0,
+    bool reverse = false
+);
+
+// Bidirectional LSTM
+// Returns: (output[batch, seq_len, 2*hidden], h_n[2, batch, hidden], c_n[2, batch, hidden])
+std::tuple<GPUArray, GPUArray, GPUArray> lstm_bidirectional(
+    const GPUArray& x,
+    const GPUArray& W_ih_fwd, const GPUArray& W_hh_fwd,
+    const GPUArray& b_ih_fwd, const GPUArray& b_hh_fwd,
+    const GPUArray& W_ih_bwd, const GPUArray& W_hh_bwd,
+    const GPUArray& b_ih_bwd, const GPUArray& b_hh_bwd
+);
 
 } // namespace ops
 } // namespace pygpukit

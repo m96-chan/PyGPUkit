@@ -36,3 +36,4 @@
 #include "embedding/embedding.inl"
 #include "elementwise/inplace.inl"
 #include "cast/cast.inl"
+#include "recurrent/lstm.inl"
