@@ -585,7 +585,13 @@ from pygpukit.llm.layers import (  # noqa: E402
 )
 
 # Loaders (refactored v0.2.11)
-from pygpukit.llm.loader import (  # noqa: E402
+# Quantization/Optimization configs (v0.2.18 - Issue #115)
+from pygpukit.llm.loader import (  # noqa: E402  # noqa: E402
+    FP8QuantConfig,
+    ModelOptimizationInfo,
+    PruningConfig,
+    QATQuantConfig,
+    SparsityConfig,
     load_gpt2_from_safetensors,
     load_llama_from_safetensors,
     load_mixtral_from_safetensors,
@@ -685,4 +691,10 @@ __all__ = [
     "DecodeBatch",
     "DecodeSpeculative",
     "DecodeJacobi",
+    # Quantization/Optimization configs (v0.2.18 - Issue #115)
+    "FP8QuantConfig",
+    "QATQuantConfig",
+    "PruningConfig",
+    "SparsityConfig",
+    "ModelOptimizationInfo",
 ]
