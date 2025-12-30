@@ -177,6 +177,8 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/gemv/w8a8_bf16/sm120/fp8_accurate.cu
     ops/matmul/gemv/w4a4_bf16/sm120/nvf4_gemv.cu
     ops/matmul/gemv/int4_int4/sm120/int4_gemv.cu
+    # NN ops - Issue #133: Modular source files compiled as single translation unit
+    # Dispatch functions are in subdirectories (*.inl) included by nn.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu
