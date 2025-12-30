@@ -7,7 +7,6 @@ import numpy as np
 from .base import Benchmark
 from .results import BenchmarkResult
 
-
 # LLM-relevant GEMV configurations
 LLM_CONFIGS = [
     # (K, N, label)

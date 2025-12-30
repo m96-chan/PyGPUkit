@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 from .base import Benchmark
 from .results import BenchmarkResult
 
@@ -62,11 +60,11 @@ class SDPABenchmark(Benchmark):
         # (Q@K^T and attn@V, each 2*seq*seq*dim)
         flops = 4.0 * seq_len * seq_len * self.head_dim * self.num_heads
 
-        # Create Q, K, V
-        Q = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
-        K = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
-        V = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
-        O = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
+        # Create Q, K, V, Out
+        q = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
+        k = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
+        v = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
+        out = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
 
         # Check if native SDPA available
         if not hasattr(native, "sdpa_causal_bf16"):
@@ -74,10 +72,10 @@ class SDPABenchmark(Benchmark):
 
         def run_fn() -> None:
             native.sdpa_causal_bf16(
-                Q._get_native(),
-                K._get_native(),
-                V._get_native(),
-                O._get_native(),
+                q._get_native(),
+                k._get_native(),
+                v._get_native(),
+                out._get_native(),
             )
 
         return self._measure(name, run_fn, params, flops=flops)
@@ -139,20 +137,20 @@ class GQABenchmark(Benchmark):
         # GQA FLOPs (KV heads broadcasted)
         flops = 4.0 * seq_len * seq_len * self.head_dim * self.num_heads
 
-        Q = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
-        K = gk.empty((self.num_kv_heads, seq_len, self.head_dim), dtype="bfloat16")
-        V = gk.empty((self.num_kv_heads, seq_len, self.head_dim), dtype="bfloat16")
-        O = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
+        q = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
+        k = gk.empty((self.num_kv_heads, seq_len, self.head_dim), dtype="bfloat16")
+        v = gk.empty((self.num_kv_heads, seq_len, self.head_dim), dtype="bfloat16")
+        out = gk.empty((self.num_heads, seq_len, self.head_dim), dtype="bfloat16")
 
         if not hasattr(native, "sdpa_causal_gqa_bf16"):
             return None
 
         def run_fn() -> None:
             native.sdpa_causal_gqa_bf16(
-                Q._get_native(),
-                K._get_native(),
-                V._get_native(),
-                O._get_native(),
+                q._get_native(),
+                k._get_native(),
+                v._get_native(),
+                out._get_native(),
                 self.num_heads // self.num_kv_heads,
             )
 
