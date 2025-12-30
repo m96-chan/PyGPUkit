@@ -11,7 +11,7 @@
 
 #if PYGPUKIT_HAS_CUTLASS
 
-#include "gemm/bf16/bf16/sm80/bf16_cutlass.cuh"
+#include "gemm/bf16_bf16/sm80/bf16_cutlass.cuh"
 
 namespace pygpukit {
 namespace ops {

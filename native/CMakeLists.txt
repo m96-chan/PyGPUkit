@@ -153,30 +153,30 @@ pybind11_add_module(${MODULE_NAME}
     ops/reduction/reduction.cu
     ops/matmul/matmul.cu
     ops/matmul/matmul_cutlass.cu
-    # GEMM kernels
-    ops/matmul/gemm/f32/f32/generic/f32_ampere.cu
-    ops/matmul/gemm/fp8/f32/sm90/fp8_cutlass.cu
-    ops/matmul/gemm/fp8/f32/sm100/fp8_blockwise.cu
-    ops/matmul/gemm/fp8/bf16/sm120/fp8_blockwise.cu
-    ops/matmul/gemm/fp8/bf16/sm120/w8a16_gemm.cu
-    ops/matmul/gemm/fp8/bf16/sm120/w8a16_cutlass.cu
-    ops/matmul/gemm/fp8/bf16/sm120/grouped_gemm.cu
-    ops/matmul/gemm/fp8/fp8/sm120/fp8_cutlass.cu
-    ops/matmul/gemm/fp8/fp8/sm120/fp8_cutlass_v2.cu
-    ops/matmul/gemm/fp8/fp8/sm120/fp8_cutlass_v3.cu
-    ops/matmul/gemm/int8/int8/sm120/int8_native.cu
-    ops/matmul/gemm/int4/int4/sm120/int4_via_int8.cu
-    ops/matmul/gemm/nvf4/bf16/sm120/nvf4_cutlass.cu
-    ops/matmul/gemm/nvf4/bf16/sm120/nvf4_nvf4_cutlass.cu
-    # GEMV kernels
-    ops/matmul/gemv/bf16/bf16/sm120/nvf4.cu
-    ops/matmul/gemv/bf16/bf16/sm120/nvf4_kernels.cu
-    ops/matmul/gemv/bf16/bf16/sm120/fp8_opt_kernels.cu
-    ops/matmul/gemv/bf16/bf16/sm120/bf16_opt.cu
-    ops/matmul/gemv/fp8/fp8/sm120/fp8_gemv.cu
-    ops/matmul/gemv/fp8/fp8/sm120/fp8_accurate.cu
-    ops/matmul/gemv/nvf4/nvf4/sm120/nvf4_gemv.cu
-    ops/matmul/gemv/int4/int4/sm120/int4_gemv.cu
+    # GEMM kernels (Issue #122: Reorganized with w{weight}a{act}_{out} naming)
+    ops/matmul/gemm/f32_f32/generic/f32_ampere.cu
+    ops/matmul/gemm/w8a8_f32/sm90/fp8_cutlass.cu
+    ops/matmul/gemm/w8a8_f32/sm100/fp8_blockwise.cu
+    ops/matmul/gemm/w8a16_bf16/sm120/fp8_blockwise.cu
+    ops/matmul/gemm/w8a16_bf16/sm120/w8a16_gemm.cu
+    ops/matmul/gemm/w8a16_bf16/sm120/w8a16_cutlass.cu
+    ops/matmul/gemm/w8a16_bf16/sm120/grouped_gemm.cu
+    ops/matmul/gemm/w8a8_bf16/sm120/fp8_cutlass.cu
+    ops/matmul/gemm/w8a8_bf16/sm120/fp8_cutlass_v2.cu
+    ops/matmul/gemm/w8a8_bf16/sm120/fp8_cutlass_v3.cu
+    ops/matmul/gemm/int8_int8/sm120/int8_native.cu
+    ops/matmul/gemm/int4_int4/sm120/int4_via_int8.cu
+    ops/matmul/gemm/w4a16_bf16/sm120/nvf4_cutlass.cu
+    ops/matmul/gemm/w4a16_bf16/sm120/nvf4_nvf4_cutlass.cu
+    # GEMV kernels (Issue #122: Reorganized with w{weight}a{act}_{out} naming)
+    ops/matmul/gemv/w4a16_bf16/sm120/nvf4.cu
+    ops/matmul/gemv/w4a16_bf16/sm120/nvf4_kernels.cu
+    ops/matmul/gemv/w8a16_bf16/sm120/fp8_opt_kernels.cu
+    ops/matmul/gemv/bf16_bf16/sm120/bf16_opt.cu
+    ops/matmul/gemv/w8a8_bf16/sm120/fp8_gemv.cu
+    ops/matmul/gemv/w8a8_bf16/sm120/fp8_accurate.cu
+    ops/matmul/gemv/w4a4_bf16/sm120/nvf4_gemv.cu
+    ops/matmul/gemv/int4_int4/sm120/int4_gemv.cu
     ops/nn/nn.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu
