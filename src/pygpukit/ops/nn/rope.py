@@ -5,6 +5,8 @@ Corresponds to native/ops/nn/rope/.
 
 from __future__ import annotations
 
+import numpy as np
+
 from pygpukit.core.array import GPUArray
 from pygpukit.core.backend import NativeBackend, get_backend
 from pygpukit.core.factory import from_numpy
@@ -51,6 +53,7 @@ def _rope_inplace_cpu(
     sin: GPUArray,
 ) -> None:
     """CPU implementation of rope_inplace."""
+    backend = get_backend()
 
     q_np = q.to_numpy()
     k_np = k.to_numpy()
@@ -82,8 +85,8 @@ def _rope_inplace_cpu(
             k_np[s, h, half_dim:] = k1 * c + k0 * sn
 
     # Update the GPUArray data in-place
-    q._data = from_numpy(q_np)._data
-    k._data = from_numpy(k_np)._data
+    backend.copy_host_to_device(q_np.ravel(), q._device_ptr)
+    backend.copy_host_to_device(k_np.ravel(), k._device_ptr)
 
 
 def _rope_inplace_native(
@@ -156,11 +159,53 @@ def rope_init_ntk_aware(
         >>> cos, sin = rope_init_ntk_aware(8192, 128, scale=2.0)
         >>> rope_inplace(q, k, cos, sin)
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    cos_native, sin_native = native.rope_init_ntk_aware(max_seq_len, head_dim, base, scale)
-    return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        cos_native, sin_native = native.rope_init_ntk_aware(
+            max_seq_len, head_dim, base, scale
+        )
+        return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
+    else:
+        return _rope_init_ntk_aware_cpu(max_seq_len, head_dim, base, scale)
+
+
+def _rope_init_ntk_aware_cpu(
+    max_seq_len: int,
+    head_dim: int,
+    base: float,
+    scale: float,
+) -> tuple[GPUArray, GPUArray]:
+    """CPU implementation of NTK-aware RoPE initialization."""
+    # NTK-aware scaling: base' = base * scale^(dim / (dim - 2))
+    scaled_base = base * (scale ** (head_dim / (head_dim - 2))) if scale > 1.0 else base
+
+    # Compute inverse frequencies
+    half_dim = head_dim // 2
+    inv_freq = 1.0 / (scaled_base ** (np.arange(0, half_dim, dtype=np.float32) / half_dim))
+
+    # Compute positions
+    positions = np.arange(max_seq_len, dtype=np.float32)
+
+    # Compute angles: [max_seq_len, half_dim]
+    angles = np.outer(positions, inv_freq)
+
+    # Compute cos and sin, then interleave to get [max_seq_len, head_dim]
+    cos_half = np.cos(angles)
+    sin_half = np.sin(angles)
+
+    # Interleave: [cos0, cos0, cos1, cos1, ...] for compatibility with RoPE apply
+    cos_table = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+    sin_table = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+    cos_table[:, 0::2] = cos_half
+    cos_table[:, 1::2] = cos_half
+    sin_table[:, 0::2] = sin_half
+    sin_table[:, 1::2] = sin_half
+
+    return from_numpy(cos_table), from_numpy(sin_table)
 
 
 def rope_init_yarn(
@@ -200,13 +245,79 @@ def rope_init_yarn(
         >>> cos, sin = rope_init_yarn(32768, 128, scale=4.0, original_max_len=4096)
         >>> rope_inplace(q, k, cos, sin)
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    cos_native, sin_native = native.rope_init_yarn(
-        max_seq_len, head_dim, base, scale, original_max_len, beta_fast, beta_slow, mscale
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        cos_native, sin_native = native.rope_init_yarn(
+            max_seq_len,
+            head_dim,
+            base,
+            scale,
+            original_max_len,
+            beta_fast,
+            beta_slow,
+            mscale,
+        )
+        return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
+    else:
+        return _rope_init_yarn_cpu(
+            max_seq_len, head_dim, base, scale, original_max_len, beta_fast, beta_slow
+        )
+
+
+def _rope_init_yarn_cpu(
+    max_seq_len: int,
+    head_dim: int,
+    base: float,
+    scale: float,
+    original_max_len: int,
+    beta_fast: float,
+    beta_slow: float,
+) -> tuple[GPUArray, GPUArray]:
+    """CPU implementation of YaRN RoPE initialization."""
+    half_dim = head_dim // 2
+
+    # Compute base frequencies
+    inv_freq = 1.0 / (base ** (np.arange(0, half_dim, dtype=np.float32) / half_dim))
+
+    # Compute wavelengths for each dimension
+    wavelengths = 2 * np.pi / inv_freq
+
+    # Compute interpolation factors (YaRN dimension-wise interpolation)
+    low_freq_wavelen = original_max_len / beta_slow
+    high_freq_wavelen = original_max_len / beta_fast
+
+    # Interpolation factor: 0 = no interpolation, 1 = full interpolation
+    smooth = np.clip(
+        (wavelengths - high_freq_wavelen) / (low_freq_wavelen - high_freq_wavelen), 0, 1
     )
-    return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
+
+    # Apply interpolation: mix between original and scaled frequencies
+    scaled_inv_freq = inv_freq / scale
+    interpolated_inv_freq = (1 - smooth) * scaled_inv_freq + smooth * inv_freq
+
+    # Compute positions
+    positions = np.arange(max_seq_len, dtype=np.float32)
+
+    # Compute angles
+    angles = np.outer(positions, interpolated_inv_freq)
+
+    # Compute cos and sin
+    cos_half = np.cos(angles)
+    sin_half = np.sin(angles)
+
+    # Interleave
+    cos_table = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+    sin_table = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+    cos_table[:, 0::2] = cos_half
+    cos_table[:, 1::2] = cos_half
+    sin_table[:, 0::2] = sin_half
+    sin_table[:, 1::2] = sin_half
+
+    return from_numpy(cos_table), from_numpy(sin_table)
 
 
 def rope_init_linear(
@@ -229,11 +340,51 @@ def rope_init_linear(
     Returns:
         Tuple of (cos_table, sin_table) each of shape [max_seq_len, head_dim].
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    cos_native, sin_native = native.rope_init_linear(max_seq_len, head_dim, base, scale)
-    return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        cos_native, sin_native = native.rope_init_linear(
+            max_seq_len, head_dim, base, scale
+        )
+        return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
+    else:
+        return _rope_init_linear_cpu(max_seq_len, head_dim, base, scale)
+
+
+def _rope_init_linear_cpu(
+    max_seq_len: int,
+    head_dim: int,
+    base: float,
+    scale: float,
+) -> tuple[GPUArray, GPUArray]:
+    """CPU implementation of linear position interpolation RoPE."""
+    half_dim = head_dim // 2
+
+    # Compute inverse frequencies
+    inv_freq = 1.0 / (base ** (np.arange(0, half_dim, dtype=np.float32) / half_dim))
+
+    # Compute scaled positions (linear interpolation: pos' = pos / scale)
+    positions = np.arange(max_seq_len, dtype=np.float32) / scale
+
+    # Compute angles
+    angles = np.outer(positions, inv_freq)
+
+    # Compute cos and sin
+    cos_half = np.cos(angles)
+    sin_half = np.sin(angles)
+
+    # Interleave
+    cos_table = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+    sin_table = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+    cos_table[:, 0::2] = cos_half
+    cos_table[:, 1::2] = cos_half
+    sin_table[:, 0::2] = sin_half
+    sin_table[:, 1::2] = sin_half
+
+    return from_numpy(cos_table), from_numpy(sin_table)
 
 
 def pope_init_encoding(
@@ -259,11 +410,40 @@ def pope_init_encoding(
         >>> encoding = pope_init_encoding(2048, 128)
         >>> pope_inplace(q, k, encoding)
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    encoding_native = native.pope_init_encoding(max_seq_len, head_dim, base)
-    return GPUArray._wrap_native(encoding_native)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        encoding_native = native.pope_init_encoding(max_seq_len, head_dim, base)
+        return GPUArray._wrap_native(encoding_native)
+    else:
+        return _pope_init_encoding_cpu(max_seq_len, head_dim, base)
+
+
+def _pope_init_encoding_cpu(
+    max_seq_len: int,
+    head_dim: int,
+    base: float,
+) -> GPUArray:
+    """CPU implementation of sinusoidal positional encoding."""
+    encoding = np.zeros((max_seq_len, head_dim), dtype=np.float32)
+
+    positions = np.arange(max_seq_len, dtype=np.float32)
+    half_dim = head_dim // 2
+
+    # Compute inverse frequencies
+    inv_freq = 1.0 / (base ** (np.arange(0, half_dim, dtype=np.float32) / half_dim))
+
+    # Compute angles
+    angles = np.outer(positions, inv_freq)
+
+    # PE(pos, 2i) = sin, PE(pos, 2i+1) = cos
+    encoding[:, 0::2] = np.sin(angles)
+    encoding[:, 1::2] = np.cos(angles)
+
+    return from_numpy(encoding)
 
 
 def pope_inplace(
@@ -283,10 +463,51 @@ def pope_inplace(
         encoding: Position encoding [max_seq_len, head_dim] (f32).
         start_pos: Starting position for incremental decoding.
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    native.pope_inplace(q._get_native(), k._get_native(), encoding._get_native(), start_pos)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        native.pope_inplace(
+            q._get_native(), k._get_native(), encoding._get_native(), start_pos
+        )
+    else:
+        _pope_inplace_cpu(q, k, encoding, start_pos)
+
+
+def _pope_inplace_cpu(
+    q: GPUArray,
+    k: GPUArray,
+    encoding: GPUArray,
+    start_pos: int,
+) -> None:
+    """CPU implementation of PoPE in-place application."""
+    backend = get_backend()
+
+    q_np = q.to_numpy()
+    k_np = k.to_numpy()
+    enc_np = encoding.to_numpy()
+
+    seq_len = q_np.shape[0]
+    n_heads_q = q_np.shape[1]
+    n_heads_k = k_np.shape[1]
+
+    # Add positional encoding to each position
+    for s in range(seq_len):
+        pos = start_pos + s
+        enc_pos = enc_np[pos]
+
+        # Add to all heads
+        for h in range(n_heads_q):
+            q_np[s, h] = q_np[s, h] + enc_pos
+
+        for h in range(n_heads_k):
+            k_np[s, h] = k_np[s, h] + enc_pos
+
+    # Update the GPUArray data in-place
+    backend.copy_host_to_device(q_np.ravel(), q._device_ptr)
+    backend.copy_host_to_device(k_np.ravel(), k._device_ptr)
 
 
 def alibi_init_slopes(num_heads: int) -> GPUArray:
@@ -307,11 +528,25 @@ def alibi_init_slopes(num_heads: int) -> GPUArray:
         >>> slopes = alibi_init_slopes(32)
         >>> bias = alibi_compute_bias(512, 32, slopes)
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    slopes_native = native.alibi_init_slopes(num_heads)
-    return GPUArray._wrap_native(slopes_native)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        slopes_native = native.alibi_init_slopes(num_heads)
+        return GPUArray._wrap_native(slopes_native)
+    else:
+        return _alibi_init_slopes_cpu(num_heads)
+
+
+def _alibi_init_slopes_cpu(num_heads: int) -> GPUArray:
+    """CPU implementation of ALiBi slopes initialization."""
+    # m_h = 2^(-8 * (h+1) / num_heads)
+    slopes = np.array(
+        [2 ** (-8 * (h + 1) / num_heads) for h in range(num_heads)], dtype=np.float32
+    )
+    return from_numpy(slopes)
 
 
 def alibi_compute_bias(
@@ -334,11 +569,45 @@ def alibi_compute_bias(
     Returns:
         Bias tensor of shape [num_heads, seq_len, seq_len].
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    bias_native = native.alibi_compute_bias(seq_len, num_heads, slopes._get_native(), causal)
-    return GPUArray._wrap_native(bias_native)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        bias_native = native.alibi_compute_bias(
+            seq_len, num_heads, slopes._get_native(), causal
+        )
+        return GPUArray._wrap_native(bias_native)
+    else:
+        return _alibi_compute_bias_cpu(seq_len, num_heads, slopes, causal)
+
+
+def _alibi_compute_bias_cpu(
+    seq_len: int,
+    num_heads: int,
+    slopes: GPUArray,
+    causal: bool,
+) -> GPUArray:
+    """CPU implementation of ALiBi bias computation."""
+    slopes_np = slopes.to_numpy()
+
+    # Create bias tensor [num_heads, seq_len, seq_len]
+    bias = np.zeros((num_heads, seq_len, seq_len), dtype=np.float32)
+
+    # Compute distance matrix
+    for h in range(num_heads):
+        slope = slopes_np[h]
+        for i in range(seq_len):
+            for j in range(seq_len):
+                if causal and j > i:
+                    # Causal mask: future positions are masked
+                    bias[h, i, j] = -1e9
+                else:
+                    # ALiBi bias: -slope * distance
+                    bias[h, i, j] = -slope * (i - j)
+
+    return from_numpy(bias)
 
 
 def alibi_add_bias(
@@ -355,10 +624,43 @@ def alibi_add_bias(
         slopes: Head-specific slopes [num_heads].
         start_pos: Starting position for incremental decoding.
     """
-    from pygpukit.core.backend import get_native_module
+    backend = get_backend()
 
-    native = get_native_module()
-    native.alibi_add_bias(scores._get_native(), slopes._get_native(), start_pos)
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        from pygpukit.core.backend import get_native_module
+
+        native = get_native_module()
+        native.alibi_add_bias(scores._get_native(), slopes._get_native(), start_pos)
+    else:
+        _alibi_add_bias_cpu(scores, slopes, start_pos)
+
+
+def _alibi_add_bias_cpu(
+    scores: GPUArray,
+    slopes: GPUArray,
+    start_pos: int,
+) -> None:
+    """CPU implementation of ALiBi in-place bias addition."""
+    backend = get_backend()
+
+    scores_np = scores.to_numpy()
+    slopes_np = slopes.to_numpy()
+
+    # scores shape: [batch, num_heads, q_len, kv_len]
+    batch, num_heads, q_len, kv_len = scores_np.shape
+
+    for b in range(batch):
+        for h in range(num_heads):
+            slope = slopes_np[h]
+            for qi in range(q_len):
+                q_pos = start_pos + qi
+                for kj in range(kv_len):
+                    # Distance from query position to key position
+                    distance = q_pos - kj
+                    scores_np[b, h, qi, kj] -= slope * distance
+
+    # Update the GPUArray data in-place
+    backend.copy_host_to_device(scores_np.ravel(), scores._device_ptr)
 
 
 __all__ = [
