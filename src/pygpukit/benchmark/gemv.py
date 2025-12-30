@@ -74,7 +74,7 @@ class GEMVBenchmark(Benchmark):
             from pygpukit.ops.matmul import gemv_bf16
 
             A = gk.empty((K,), dtype="bfloat16")
-            B = gk.empty((K, N), dtype="bfloat16")
+            B = gk.empty((N, K), dtype="bfloat16")  # B[N, K] layout for gemv
             C = gk.empty((N,), dtype="bfloat16")
 
             def run_fn() -> None:
