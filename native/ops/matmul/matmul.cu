@@ -1,22 +1,22 @@
 /**
  * Matrix multiplication dispatch
  */
-#include "gemm/f32/f32/generic/f32_naive.cuh"
+#include "gemm/f32_f32/generic/f32_naive.cuh"
 #include "../common/error.cuh"
 #include "../common/device.cuh"
 #include "../../core/memory.hpp"
 #include "../../core/cuda_graph.hpp"
 #include "../ops.cuh"  // For transpose()
 
-// Include existing optimized kernels
-#include "gemm/f32/f32/generic/f32_ampere.cuh"
-#include "gemm/f32/f32/generic/tf32_wmma.cuh"
-#include "gemm/f32/f32/generic/tf32_mma.cuh"
-#include "gemm/bf16/bf16/generic/bf16_naive.cuh"
-#include "gemm/bf16/bf16/generic/bf16_wmma.cuh"
-#include "gemm/bf16/bf16/generic/bf16_wmma_generic.cuh"
+// Include existing optimized kernels (Issue #122: Updated paths)
+#include "gemm/f32_f32/generic/f32_ampere.cuh"
+#include "gemm/f32_f32/generic/tf32_wmma.cuh"
+#include "gemm/f32_f32/generic/tf32_mma.cuh"
+#include "gemm/bf16_bf16/generic/bf16_naive.cuh"
+#include "gemm/bf16_bf16/generic/bf16_wmma.cuh"
+#include "gemm/bf16_bf16/generic/bf16_wmma_generic.cuh"
 #include "cublaslt.cuh"
-#include "gemm/bf16/bf16/sm80/bf16_cutlass.cuh"
+#include "gemm/bf16_bf16/sm80/bf16_cutlass.cuh"
 
 #include <cstdlib>
 #include <algorithm>
