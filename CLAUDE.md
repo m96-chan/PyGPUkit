@@ -633,7 +633,7 @@ python -m mypy src/ --ignore-missing-imports --disable-error-code=union-attr --d
 python -m pytest tests/ -v
 
 # 4. Benchmark runs (optional but recommended)
-python benchmark.py --quick
+python -m pygpukit.benchmark --quick
 ```
 
 **DO NOT create PR until all checks pass locally.**
@@ -679,27 +679,36 @@ If performance or correctness degrades:
 
 ### Benchmarking
 
-**Always use `benchmark.py` for performance measurement.**
+**Use unified benchmark suite: `python -m pygpukit.benchmark`**
 
 ```bash
-# Full benchmark (all dtypes, all sizes)
-python benchmark.py
+# Quick benchmark (GEMM + GEMV)
+python -m pygpukit.benchmark --quick
 
-# Quick mode (fewer warmup/iterations)
-python benchmark.py --quick
+# Full benchmark
+python -m pygpukit.benchmark
 
-# Specific sizes
-python benchmark.py --sizes 4096 8192
+# Save results and compare with baseline
+python -m pygpukit.benchmark --quick --save baseline.json
+python -m pygpukit.benchmark --compare baseline.json --fail-on-regression
 
-# TF32 kernel version selection
-python benchmark.py --tf32-version v1   # WMMA API
-python benchmark.py --tf32-version v2   # PTX mma.sync (default)
+# Specific benchmarks
+python -m pygpukit.benchmark --gemm --sizes 4096,8192
+python -m pygpukit.benchmark --gemv --dtypes bf16,fp8
+python -m pygpukit.benchmark --attention --seq-lens 512,1024
+
+# All benchmarks including FP8 (SM120+)
+python -m pygpukit.benchmark --all --fp8
+
+# Markdown output for README
+python -m pygpukit.benchmark --quick --markdown
 ```
 
 **Output includes:**
-- Kernel-only timing (no D2H copy overhead)
-- Correctness verification (relative error)
-- README.md-ready table format
+- Time in microseconds (us)
+- TFLOPS for compute benchmarks
+- Correctness verification
+- JSON export for regression tracking
 
 **Environment Variables:**
 - `PYGPUKIT_ALLOW_TF32=1` - Enable TF32 TensorCore
