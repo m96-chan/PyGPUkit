@@ -35,25 +35,62 @@ The core scheduling, memory management, GPU coordination, and performance-critic
 ```
 PyGPUkit/
 ├── src/pygpukit/           # Python API (NumPy-compatible)
-│   ├── core/               # GPUArray, backend abstraction
-│   ├── ops/                # GPU operations (matmul, nn, audio, etc.)
-│   ├── llm/                # LLM inference (Qwen, LLaMA)
+│   ├── core/               # Core abstractions
+│   │   ├── array.py        # GPUArray implementation
+│   │   ├── backend.py      # Backend detection/initialization
+│   │   ├── memory.py       # Memory utilities (copy, sync)
+│   │   └── stream.py       # CUDA Stream wrapper
+│   ├── ops/                # GPU operations (modular packages)
+│   │   ├── matmul/         # Matrix multiplication
+│   │   │   ├── gemm/       # GEMM operations (M > 1)
+│   │   │   └── gemv/       # GEMV operations (M = 1)
+│   │   ├── nn/             # Neural network ops
+│   │   │   ├── activation.py   # GELU, SiLU, etc.
+│   │   │   ├── attention.py    # SDPA, paged attention
+│   │   │   ├── norm.py         # RMSNorm, LayerNorm
+│   │   │   └── rope.py         # Rotary position embedding
+│   │   └── audio/          # Audio processing
+│   │       ├── transforms/ # FFT, Mel spectrogram
+│   │       └── analysis/   # Pitch, onset detection
+│   ├── llm/                # LLM inference (modular)
 │   │   ├── models/         # Model implementations
-│   │   └── sampling/       # Token sampling strategies
-│   └── asr/                # Speech recognition (Whisper)
-│       ├── preprocessing.py    # Audio preprocessing (mel, normalize)
-│       └── whisper/            # Whisper model implementation
-│           ├── config.py       # WhisperConfig
-│           ├── loader.py       # SafeTensors loader
-│           ├── encoder.py      # Whisper encoder
-│           ├── decoder.py      # Whisper decoder
-│           └── model.py        # WhisperModel high-level API
+│   │   │   └── causal_transformer.py
+│   │   ├── layers/         # Layer types
+│   │   │   ├── attention.py    # Multi-head attention
+│   │   │   ├── ffn.py          # Feed-forward networks
+│   │   │   ├── norm.py         # Normalization layers
+│   │   │   ├── embedding.py    # Token/position embeddings
+│   │   │   └── recurrent.py    # LSTM, Mamba
+│   │   ├── decode/         # Decoding strategies
+│   │   ├── loader/         # Model loading
+│   │   │   ├── safetensors.py  # SafeTensors loader
+│   │   │   └── tokenizer.py    # Tokenizer wrapper
+│   │   └── quantization/   # Quantization utilities
+│   │       ├── config.py       # Quant configs
+│   │       └── repack.py       # Weight repacking
+│   ├── asr/                # Speech recognition (Whisper)
+│   │   └── whisper/        # Whisper model implementation
+│   └── tts/                # Text-to-speech (Kokoro)
+│       └── kokoro/         # Kokoro TTS model
 ├── native/
 │   ├── core/               # C++ (CUDA Runtime/Driver API)
 │   ├── jit/                # C++ (NVRTC)
 │   ├── ops/                # C++ (CUDA kernels)
-│   │   └── matmul/         # MatMul kernels (see below)
-│   └── bindings/           # pybind11
+│   │   ├── matmul/         # MatMul kernels (see below)
+│   │   │   ├── matmul.cu       # Main dispatcher
+│   │   │   ├── fused.cu        # Fused ops (linear+bias+GELU)
+│   │   │   └── batched.cu      # Batched GEMM
+│   │   ├── nn/             # Neural network ops
+│   │   │   ├── activation/ # Activation functions
+│   │   │   ├── attention/  # Attention kernels
+│   │   │   ├── norm/       # Normalization kernels
+│   │   │   ├── rope/       # RoPE kernels
+│   │   │   └── recurrent/  # LSTM/Mamba kernels
+│   │   └── audio/          # Audio processing kernels
+│   └── bindings/           # pybind11 (modular)
+│       ├── gemm/           # GEMM bindings by dtype
+│       ├── gemv/           # GEMV bindings by dtype
+│       └── nn/             # NN operation bindings
 ├── rust/
 │   ├── pygpukit-core/      # Pure Rust GPU runtime
 │   │   └── src/
@@ -61,8 +98,12 @@ PyGPUkit/
 │   │       ├── scheduler/  # Task state machine, QoS policies
 │   │       └── device.rs   # DeviceCapabilities, KernelType
 │   └── pygpukit-python/    # PyO3 bindings
-├── examples/
-├── benchmarks/             # Performance benchmarks
+├── examples/               # Example scripts (organized)
+│   ├── benchmarks/         # Performance benchmarks
+│   ├── chat/               # Chat CLI applications
+│   ├── demos/              # Feature demos
+│   │   └── archived/       # Version-specific demos (historical)
+│   └── demo_*.py           # Current feature demos
 └── tests/
 ```
 
