@@ -1,12 +1,11 @@
-"""CausalTransformerModel implementation for PyGPUkit.
+"""LLM model implementations.
 
-This module re-exports from llm/models/ for backwards compatibility.
-See llm/models/causal.py for the actual implementation.
+This module provides unified transformer runtime implementations.
 """
 
 from __future__ import annotations
 
-# Re-export everything from models/
+# Legacy component aliases (for backward compatibility)
 from pygpukit.llm.models.causal import (
     CausalSelfAttention,
     CausalTransformerModel,
