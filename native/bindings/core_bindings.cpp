@@ -9,6 +9,7 @@
 #include "../core/stream.hpp"
 #include "../core/event.hpp"
 #include "../core/cuda_graph.hpp"
+#include "../core/profiler.hpp"
 
 namespace py = pybind11;
 using namespace pygpukit;
@@ -403,4 +404,109 @@ void init_core_bindings(py::module_& m) {
                 return std::string("CudaGraph(not ready)");
             }
         });
+
+    // KernelRecord struct for profiling results
+    py::class_<KernelRecord>(m, "KernelRecord")
+        .def(py::init<>())
+        .def_readwrite("name", &KernelRecord::name)
+        .def_readwrite("elapsed_ms", &KernelRecord::elapsed_ms)
+        .def_readwrite("elapsed_us", &KernelRecord::elapsed_us)
+        .def_readwrite("flops", &KernelRecord::flops)
+        .def_readwrite("bytes", &KernelRecord::bytes)
+        .def_readwrite("timestamp", &KernelRecord::timestamp)
+        .def("tflops", &KernelRecord::tflops,
+             "Calculate TFLOPS (returns -1 if flops not set or time is 0)")
+        .def("bandwidth_gb_s", &KernelRecord::bandwidth_gb_s,
+             "Calculate bandwidth in GB/s (returns -1 if bytes not set or time is 0)")
+        .def("__repr__", [](const KernelRecord& self) {
+            std::string repr = "KernelRecord(name='" + self.name +
+                              "', elapsed_ms=" + std::to_string(self.elapsed_ms);
+            if (self.flops >= 0) {
+                repr += ", tflops=" + std::to_string(self.tflops());
+            }
+            repr += ")";
+            return repr;
+        });
+
+    // ScopedTimer for RAII-based kernel timing
+    py::class_<ScopedTimer>(m, "ScopedTimer")
+        .def(py::init<const std::string&, int64_t, int64_t>(),
+             py::arg("name"),
+             py::arg("flops") = -1,
+             py::arg("bytes") = -1,
+             "Create a scoped timer that starts immediately.\n\n"
+             "Args:\n"
+             "    name: Name of the kernel being timed\n"
+             "    flops: Number of floating-point ops (for TFLOPS calculation)\n"
+             "    bytes: Bytes transferred (for bandwidth calculation)")
+        .def("stop", &ScopedTimer::stop,
+             "Stop the timer explicitly (called automatically on destruction)")
+        .def("elapsed_ms", &ScopedTimer::elapsed_ms,
+             "Get elapsed time in milliseconds (only valid after stop)")
+        .def("elapsed_us", &ScopedTimer::elapsed_us,
+             "Get elapsed time in microseconds (only valid after stop)")
+        .def("get_record", &ScopedTimer::get_record,
+             "Get the KernelRecord (only valid after stop)")
+        .def("__enter__", [](ScopedTimer& self) -> ScopedTimer& {
+            return self;
+        })
+        .def("__exit__", [](ScopedTimer& self, py::object, py::object, py::object) {
+            self.stop();
+        });
+
+    // KernelProfiler for accumulating timing records
+    py::class_<KernelProfiler>(m, "KernelProfiler")
+        .def(py::init<>(),
+             "Create a kernel profiler for accumulating timing records.\n\n"
+             "Usage:\n"
+             "    profiler = KernelProfiler()\n"
+             "    profiler.record_start('matmul', flops=2*M*N*K)\n"
+             "    # ... kernel execution ...\n"
+             "    profiler.record_stop()\n"
+             "    print(profiler.total_time_ms())")
+        .def_property("enabled", &KernelProfiler::is_enabled, &KernelProfiler::set_enabled,
+             "Enable/disable profiling (disabled has minimal overhead)")
+        .def("record_start", &KernelProfiler::record_start,
+             py::arg("name"),
+             py::arg("flops") = -1,
+             py::arg("bytes") = -1,
+             "Start timing a kernel")
+        .def("record_stop", &KernelProfiler::record_stop,
+             "Stop timing and add record")
+        .def("add_record", &KernelProfiler::add_record,
+             py::arg("record"),
+             "Add a pre-recorded kernel record")
+        .def("records", &KernelProfiler::records,
+             py::return_value_policy::reference_internal,
+             "Get all recorded kernel executions")
+        .def("record_count", &KernelProfiler::record_count,
+             "Get number of records")
+        .def("clear", &KernelProfiler::clear,
+             "Clear all records")
+        .def("total_time_ms", &KernelProfiler::total_time_ms,
+             "Get total profiled time in milliseconds")
+        .def("summary_by_name", [](const KernelProfiler& self) {
+            auto stats = self.summary_by_name();
+            py::list result;
+            for (const auto& s : stats) {
+                py::dict d;
+                d["name"] = s.name;
+                d["count"] = s.count;
+                d["total_ms"] = s.total_ms;
+                d["avg_ms"] = s.avg_ms;
+                d["min_ms"] = s.min_ms;
+                d["max_ms"] = s.max_ms;
+                result.append(d);
+            }
+            return result;
+        }, "Get summary statistics grouped by kernel name")
+        .def("__repr__", [](const KernelProfiler& self) {
+            return "KernelProfiler(records=" + std::to_string(self.record_count()) +
+                   ", total_ms=" + std::to_string(self.total_time_ms()) + ")";
+        });
+
+    // Global profiler access
+    m.def("get_global_profiler", &global_profiler,
+          py::return_value_policy::reference,
+          "Get the global kernel profiler instance");
 }

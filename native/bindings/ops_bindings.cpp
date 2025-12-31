@@ -72,6 +72,9 @@ void init_ops_bindings(py::module_& m) {
     // cuBLASLt utility functions
     init_cublaslt(m);
 
+    // cuBLAS utility functions
+    init_cublas(m);
+
     // MoE (Mixture of Experts) operations
     init_moe(m);
 }
