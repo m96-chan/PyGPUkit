@@ -38,9 +38,7 @@ class LoadingStrategy(ABC):
     """
 
     @abstractmethod
-    def on_layer_start(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_start(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """Called before processing a layer.
 
         Args:
@@ -51,9 +49,7 @@ class LoadingStrategy(ABC):
         pass
 
     @abstractmethod
-    def on_layer_end(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_end(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """Called after processing a layer.
 
         Args:
@@ -118,17 +114,13 @@ class SimpleStreaming(LoadingStrategy):
 
     prefix_template: str = "model.layers.{}."
 
-    def on_layer_start(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_start(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """Load the current layer."""
         # Layer loading is handled by the native layer when tensors are accessed
         # This is a marker for explicit loading if needed
         pass
 
-    def on_layer_end(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_end(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """Unload the current layer immediately."""
         prefix = self.layer_prefix(layer_idx, self.prefix_template)
         loader.unload_layer(prefix)
@@ -161,9 +153,7 @@ class SlidingWindow(LoadingStrategy):
         if self.prefetch_ahead < 0:
             raise ValueError("prefetch_ahead must be >= 0")
 
-    def on_layer_start(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_start(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """Prefetch upcoming layers within window."""
         # Prefetch layers ahead
         for i in range(1, self.prefetch_ahead + 1):
@@ -173,9 +163,7 @@ class SlidingWindow(LoadingStrategy):
                 # (actual loading happens when tensors are accessed)
                 pass
 
-    def on_layer_end(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_end(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """Unload layers outside the window."""
         # Calculate the oldest layer that should be evicted
         evict_idx = layer_idx - self.window_size
@@ -204,15 +192,11 @@ class AutoLRU(LoadingStrategy):
     prefix_template: str = "model.layers.{}."
     unload_on_end: bool = False
 
-    def on_layer_start(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_start(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """No explicit loading - let LRU handle it."""
         pass
 
-    def on_layer_end(
-        self, loader: LazyModelLoader, layer_idx: int, num_layers: int
-    ) -> None:
+    def on_layer_end(self, loader: LazyModelLoader, layer_idx: int, num_layers: int) -> None:
         """No explicit unloading - let LRU handle it."""
         pass
 
@@ -271,9 +255,7 @@ class LayerStreamingContext:
         """Exit the streaming context."""
         # Finish last layer if any
         if self._current_layer is not None:
-            self.strategy.on_layer_end(
-                self.loader, self._current_layer, self.num_layers
-            )
+            self.strategy.on_layer_end(self.loader, self._current_layer, self.num_layers)
         self.strategy.on_end(self.loader, self.num_layers)
         self._active = False
         self._current_layer = None
@@ -291,15 +273,11 @@ class LayerStreamingContext:
             raise RuntimeError("StreamingContext must be used within a 'with' block")
 
         if layer_idx < 0 or layer_idx >= self.num_layers:
-            raise ValueError(
-                f"layer_idx {layer_idx} out of range [0, {self.num_layers})"
-            )
+            raise ValueError(f"layer_idx {layer_idx} out of range [0, {self.num_layers})")
 
         # End previous layer if switching
         if self._current_layer is not None and self._current_layer != layer_idx:
-            self.strategy.on_layer_end(
-                self.loader, self._current_layer, self.num_layers
-            )
+            self.strategy.on_layer_end(self.loader, self._current_layer, self.num_layers)
 
         # Start new layer
         self._current_layer = layer_idx
@@ -381,10 +359,7 @@ def create_streaming_context(
                 unload_on_end=kwargs.get("unload_on_end", False),
             )
         else:
-            raise ValueError(
-                f"Unknown strategy: {strategy}. "
-                "Use 'simple', 'sliding', or 'auto'."
-            )
+            raise ValueError(f"Unknown strategy: {strategy}. Use 'simple', 'sliding', or 'auto'.")
     else:
         strategy_obj = strategy
 
