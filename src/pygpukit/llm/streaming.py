@@ -66,20 +66,26 @@ class LoadingStrategy(ABC):
     def on_start(self, loader: LazyModelLoader, num_layers: int) -> None:
         """Called when streaming context starts.
 
+        Default implementation does nothing. Override if needed.
+
         Args:
             loader: The LazyModelLoader instance
             num_layers: Total number of layers
         """
-        pass
+        # Default: no-op (subclasses can override)
+        _ = loader, num_layers
 
     def on_end(self, loader: LazyModelLoader, num_layers: int) -> None:
         """Called when streaming context ends.
 
+        Default implementation does nothing. Override if needed.
+
         Args:
             loader: The LazyModelLoader instance
             num_layers: Total number of layers
         """
-        pass
+        # Default: no-op (subclasses can override)
+        _ = loader, num_layers
 
     @staticmethod
     def layer_prefix(layer_idx: int, prefix_template: str = "model.layers.{}.") -> str:
@@ -255,7 +261,7 @@ class LayerStreamingContext:
         self._current_layer: int | None = None
         self._active = False
 
-    def __enter__(self) -> "LayerStreamingContext":
+    def __enter__(self) -> LayerStreamingContext:
         """Enter the streaming context."""
         self._active = True
         self.strategy.on_start(self.loader, self.num_layers)
