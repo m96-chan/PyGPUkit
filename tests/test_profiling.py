@@ -281,15 +281,13 @@ class TestChromeTrace:
             ),
         ]
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             path = f.name
 
         try:
             export_chrome_trace(records, path)
 
-            with open(path, "r") as f:
+            with open(path) as f:
                 data = json.load(f)
 
             assert "traceEvents" in data
@@ -343,15 +341,13 @@ class TestChromeTrace:
             ),
         ]
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             path = f.name
 
         try:
             export_chrome_trace(records, path, memory_snapshots=snapshots)
 
-            with open(path, "r") as f:
+            with open(path) as f:
                 data = json.load(f)
 
             events = data["traceEvents"]
@@ -401,7 +397,6 @@ class TestModuleExports:
 
     def test_profiling_module_import(self):
         """Test that profiling module is importable."""
-        from pygpukit import profiling
 
         assert hasattr(profiling, "Profiler")
         assert hasattr(profiling, "MemoryProfiler")
@@ -410,11 +405,8 @@ class TestModuleExports:
     def test_direct_imports(self):
         """Test direct imports from profiling submodule."""
         from pygpukit.profiling import (
-            KernelRecord,
             MemoryProfiler,
-            MemorySnapshot,
             Profiler,
-            ProfilerContext,
             export_chrome_trace,
         )
 

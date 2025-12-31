@@ -10,8 +10,8 @@ import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pygpukit.profiling.profiler import KernelRecord
     from pygpukit.profiling.memory import MemorySnapshot
+    from pygpukit.profiling.profiler import KernelRecord
 
 
 def export_chrome_trace(
@@ -38,19 +38,23 @@ def export_chrome_trace(
     events: list[dict[str, Any]] = []
 
     # Add metadata events
-    events.append({
-        "name": "process_name",
-        "ph": "M",
-        "pid": 1,
-        "args": {"name": process_name},
-    })
-    events.append({
-        "name": "thread_name",
-        "ph": "M",
-        "pid": 1,
-        "tid": 1,
-        "args": {"name": thread_name},
-    })
+    events.append(
+        {
+            "name": "process_name",
+            "ph": "M",
+            "pid": 1,
+            "args": {"name": process_name},
+        }
+    )
+    events.append(
+        {
+            "name": "thread_name",
+            "ph": "M",
+            "pid": 1,
+            "tid": 1,
+            "args": {"name": thread_name},
+        }
+    )
 
     # Add kernel duration events
     current_ts = 0.0  # microseconds
@@ -92,30 +96,34 @@ def export_chrome_trace(
             else:
                 ts_us = 0
 
-            events.append({
-                "name": snap.name,
-                "cat": "memory",
-                "ph": "i",  # Instant event
-                "ts": ts_us,
-                "pid": 1,
-                "tid": 2,
-                "s": "g",  # Global scope
-                "args": {
-                    "used_mb": snap.used_mb,
-                    "cached_mb": snap.cached_mb,
-                    "active_blocks": snap.active_blocks,
-                    "reuse_rate": snap.reuse_rate,
-                },
-            })
+            events.append(
+                {
+                    "name": snap.name,
+                    "cat": "memory",
+                    "ph": "i",  # Instant event
+                    "ts": ts_us,
+                    "pid": 1,
+                    "tid": 2,
+                    "s": "g",  # Global scope
+                    "args": {
+                        "used_mb": snap.used_mb,
+                        "cached_mb": snap.cached_mb,
+                        "active_blocks": snap.active_blocks,
+                        "reuse_rate": snap.reuse_rate,
+                    },
+                }
+            )
 
         # Add memory thread metadata
-        events.append({
-            "name": "thread_name",
-            "ph": "M",
-            "pid": 1,
-            "tid": 2,
-            "args": {"name": "Memory"},
-        })
+        events.append(
+            {
+                "name": "thread_name",
+                "ph": "M",
+                "pid": 1,
+                "tid": 2,
+                "args": {"name": "Memory"},
+            }
+        )
 
     # Write trace file
     trace_data = {"traceEvents": events}
@@ -139,15 +147,11 @@ def export_combined_trace(
         path: Output file path.
         process_name: Name shown for the process.
     """
-    from pygpukit.profiling.profiler import Profiler
     from pygpukit.profiling.memory import MemoryProfiler
+    from pygpukit.profiling.profiler import Profiler
 
     records = profiler.records if isinstance(profiler, Profiler) else []
-    snapshots = (
-        memory_profiler.snapshots
-        if isinstance(memory_profiler, MemoryProfiler)
-        else None
-    )
+    snapshots = memory_profiler.snapshots if isinstance(memory_profiler, MemoryProfiler) else None
 
     export_chrome_trace(
         records,

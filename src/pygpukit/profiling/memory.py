@@ -6,7 +6,7 @@ Tracks memory pool statistics, allocation patterns, and peak usage.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -163,9 +163,7 @@ class MemoryProfiler:
                 return snap
         return None
 
-    def diff(
-        self, name1: str, name2: str
-    ) -> dict[str, int | float] | None:
+    def diff(self, name1: str, name2: str) -> dict[str, int | float] | None:
         """Calculate difference between two snapshots.
 
         Args:
@@ -200,16 +198,15 @@ class MemoryProfiler:
             print("No snapshots recorded.")
             return
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("Memory Profiler Report")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"Total snapshots: {len(self._snapshots)}")
         print(f"Peak memory used: {self.peak_used_mb:.2f} MB")
         print()
 
         print(
-            f"{'Snapshot':<20} {'Used (MB)':>12} {'Cached (MB)':>12} "
-            f"{'Active':>8} {'Reuse %':>10}"
+            f"{'Snapshot':<20} {'Used (MB)':>12} {'Cached (MB)':>12} {'Active':>8} {'Reuse %':>10}"
         )
         print("-" * 70)
 
@@ -238,7 +235,7 @@ class MemoryProfiler:
         print(f"Active blocks:  {diff_data['active_blocks_delta']:+d}")
         print(f"Free blocks:    {diff_data['free_blocks_delta']:+d}")
         print(f"Allocations:    {diff_data['allocation_delta']:+d}")
-        print(f"Time elapsed:   {diff_data['time_delta']*1000:.2f} ms")
+        print(f"Time elapsed:   {diff_data['time_delta'] * 1000:.2f} ms")
         print()
 
 
@@ -271,7 +268,7 @@ def print_memory_summary() -> None:
         print("Memory pool not available (GPU not initialized or CPU mode).")
         return
 
-    print(f"\nGPU Memory Summary")
+    print("\nGPU Memory Summary")
     print("-" * 40)
     print(f"Used:       {stats['used_mb']:.2f} MB")
     print(f"Cached:     {stats['cached_mb']:.2f} MB")

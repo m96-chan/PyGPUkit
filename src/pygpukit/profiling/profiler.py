@@ -136,12 +136,8 @@ class ProfilerContext:
             native = _get_native()
             self._stop_event.record()
             self._stop_event.synchronize()
-            self._elapsed_ms = native.event_elapsed_ms(
-                self._start_event, self._stop_event
-            )
-            self._elapsed_us = native.event_elapsed_us(
-                self._start_event, self._stop_event
-            )
+            self._elapsed_ms = native.event_elapsed_ms(self._start_event, self._stop_event)
+            self._elapsed_us = native.event_elapsed_us(self._start_event, self._stop_event)
         else:
             self._end_time = time.perf_counter()
             elapsed_sec = self._end_time - self._start_time
@@ -244,9 +240,7 @@ class Profiler:
         Returns:
             A context manager that profiles the enclosed code.
         """
-        ctx = ProfilerContext(
-            name, flops=flops, bytes_transferred=bytes_transferred
-        )
+        ctx = ProfilerContext(name, flops=flops, bytes_transferred=bytes_transferred)
         self._active_context = ctx
         return _RecordingContext(self, ctx)
 
@@ -272,10 +266,7 @@ class Profiler:
     def records(self) -> list[KernelRecord]:
         """Get all recorded kernel executions."""
         if self._native_profiler is not None:
-            return [
-                KernelRecord.from_native(r)
-                for r in self._native_profiler.records()
-            ]
+            return [KernelRecord.from_native(r) for r in self._native_profiler.records()]
         return self._records.copy()
 
     def clear(self) -> None:
@@ -336,11 +327,11 @@ class Profiler:
             print("No records to summarize.")
             return
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("Profiler Summary")
         if self.using_native:
             print("(using native C++ profiler)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Total records: {len(records)}")
         print(f"Total time: {self.total_time_ms:.3f} ms")
         print()
@@ -348,9 +339,7 @@ class Profiler:
         summary = self.summary_by_name()
         print(f"{'Kernel':<30} {'Count':>8} {'Total (ms)':>12} {'Avg (ms)':>12}")
         print("-" * 62)
-        for name, stats in sorted(
-            summary.items(), key=lambda x: x[1]["total_ms"], reverse=True
-        ):
+        for name, stats in sorted(summary.items(), key=lambda x: x[1]["total_ms"], reverse=True):
             print(
                 f"{name:<30} {stats['count']:>8} "
                 f"{stats['total_ms']:>12.3f} {stats['avg_ms']:>12.3f}"
