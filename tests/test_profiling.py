@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from pygpukit import from_numpy, profiling
+from pygpukit.core.backend import has_native_module
 from pygpukit.profiling import (
     KernelRecord,
     MemoryProfiler,
@@ -70,6 +71,7 @@ class TestKernelRecord:
         assert record.bandwidth_gb_s is None
 
 
+@pytest.mark.skipif(not has_native_module(), reason="Native CUDA module not available")
 class TestProfilerContext:
     """Test ProfilerContext context manager."""
 
@@ -104,6 +106,7 @@ class TestProfilerContext:
         assert record.flops == 1000
 
 
+@pytest.mark.skipif(not has_native_module(), reason="Native CUDA module not available")
 class TestProfiler:
     """Test Profiler class."""
 
@@ -360,6 +363,7 @@ class TestChromeTrace:
             os.unlink(path)
 
 
+@pytest.mark.skipif(not has_native_module(), reason="Native CUDA module not available")
 class TestProfilerIntegration:
     """Integration tests with actual GPU arrays."""
 
