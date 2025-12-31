@@ -141,12 +141,14 @@ pybind11_add_module(${MODULE_NAME}
     core/stream.cpp
     core/stream.cu
     core/event.cpp
+    core/profiler.cpp
     core/cuda_graph.cu
     # JIT
     jit/compiler.cpp
     jit/kernel.cpp
     jit/nvrtc_loader.cpp
     jit/cublaslt_loader.cpp
+    jit/cublas_loader.cpp
     # Ops - Modular structure
     ops/elementwise/elementwise.cu
     ops/unary/unary.cu
@@ -240,6 +242,7 @@ pybind11_add_module(${MODULE_NAME}
     bindings/continuous_batching.cpp
     bindings/audio.cpp
     bindings/cublaslt.cpp
+    bindings/cublas.cpp
     bindings/moe.cpp
 )
 

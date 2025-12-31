@@ -1,9 +1,9 @@
 """PyGPUkit - A lightweight GPU runtime for Python."""
 
-__version__ = "0.2.15"
+__version__ = "0.2.19"
 
 # LLM support (safetensors loader)
-from pygpukit import llm, ops
+from pygpukit import llm, ops, profiling
 from pygpukit.core.array import GPUArray
 from pygpukit.core.device import (
     DeviceInfo,
@@ -199,4 +199,6 @@ __all__ = [
     "CudaEvent",
     "event_elapsed_ms",
     "event_elapsed_us",
+    # Profiling
+    "profiling",
 ]

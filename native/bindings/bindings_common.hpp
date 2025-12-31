@@ -10,6 +10,7 @@
 #include "../ops/ops.cuh"
 #include "../ops/audio/audio.hpp"
 #include "../jit/cublaslt_loader.hpp"
+#include "../jit/cublas_loader.hpp"
 
 namespace py = pybind11;
 using namespace pygpukit;
@@ -61,4 +62,5 @@ void init_paged_attention(py::module_& m);
 void init_continuous_batching(py::module_& m);
 void init_audio(py::module_& m);
 void init_cublaslt(py::module_& m);
+void init_cublas(py::module_& m);
 void init_moe(py::module_& m);

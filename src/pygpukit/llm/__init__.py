@@ -101,14 +101,27 @@ from pygpukit.llm.model import (
 # SafeTensors (extracted v0.2.18)
 from pygpukit.llm.safetensors import (
     Dtype,
+    LazyModelLoader,
+    PoolStats,
     SafeTensorsFile,
     ShardedSafeTensorsFile,
     TensorInfo,
+    TensorState,
     load_safetensors,
 )
 
 # Sampling (refactored v0.2.11)
 from pygpukit.llm.sampling import sample_token
+
+# Streaming strategies (v0.2.20 - Issue #159)
+from pygpukit.llm.streaming import (
+    AutoLRU,
+    LayerStreamingContext,
+    LoadingStrategy,
+    SimpleStreaming,
+    SlidingWindow,
+    create_streaming_context,
+)
 
 # Tokenizer (extracted v0.2.18)
 from pygpukit.llm.tokenizer import Tokenizer
@@ -120,6 +133,10 @@ __all__ = [
     "SafeTensorsFile",
     "ShardedSafeTensorsFile",
     "load_safetensors",
+    # Lazy Loading (v0.2.20 - Issue #159)
+    "LazyModelLoader",
+    "TensorState",
+    "PoolStats",
     # Tokenizer
     "Tokenizer",
     # Core Transformer (v0.2.9)
@@ -193,4 +210,11 @@ __all__ = [
     "PruningConfig",
     "SparsityConfig",
     "ModelOptimizationInfo",
+    # Streaming strategies (v0.2.20 - Issue #159)
+    "LoadingStrategy",
+    "SimpleStreaming",
+    "SlidingWindow",
+    "AutoLRU",
+    "LayerStreamingContext",
+    "create_streaming_context",
 ]
