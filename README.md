@@ -99,6 +99,55 @@ They were all observed in production or real benchmarks.
 
 ---
 
+## What's New in v0.2.19
+
+### FLUX.1 Image Generation
+Text-to-image generation with Black Forest Labs' FLUX.1 model:
+
+```python
+from pygpukit.diffusion import FluxPipeline
+
+# Load FLUX.1-schnell (fast variant)
+pipeline = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell")
+
+# Generate image
+image = pipeline.generate(
+    prompt="a photo of a cat sitting on a windowsill",
+    num_inference_steps=4,  # schnell uses few steps
+    guidance_scale=0.0,     # schnell doesn't use CFG
+)
+image.save("output.png")
+```
+
+| Component | Description |
+|-----------|-------------|
+| **FluxTransformer** | 19 joint blocks + 38 single blocks |
+| **FluxScheduler** | Flow matching Euler scheduler |
+| **GPU-native ops** | Transpose, batched matmul, RoPE on GPU |
+| **RoPE frequencies** | Cached on GPU for efficient reuse |
+
+### DiT Architecture Support
+Diffusion Transformer (DiT) components for PixArt and similar models:
+
+| Module | Description |
+|--------|-------------|
+| `dit/model.py` | PixArt transformer with AdaLN-Zero |
+| `dit/attention.py` | Self/cross attention with GQA |
+| `dit/embeddings.py` | Patch embed, timestep embed, 2D sincos pos |
+| `dit/adaln.py` | Adaptive LayerNorm modulation |
+| `dit/ffn.py` | GEGLU feed-forward network |
+
+### New GPU Operations for Diffusion
+| Operation | Description |
+|-----------|-------------|
+| `transpose_4d_0213` | GPU-native 4D transpose [B,S,H,D] -> [B,H,S,D] |
+| `transpose_3d_012` | GPU-native 3D transpose [B,S,D] -> [B,D,S] |
+| `gpu_batched_matmul` | Batched matrix multiplication |
+| `gpu_softmax` | GPU-native softmax |
+| `gpu_apply_rope` | Apply rotary position embedding |
+
+---
+
 ## What's New in v0.2.18
 
 ### Major Codebase Refactoring
@@ -595,6 +644,7 @@ PyGPUkit/
 | **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
 | **v0.2.17** | **Triton backend** MVP, hybrid execution (Triton + Native CUDA), TritonArray wrapper |
 | **v0.2.18** | **Codebase refactoring**, Kokoro TTS, Positional encoding (PoPE/ALiBi/YaRN/NTK), ReLU², Unified benchmark, BF16 GEMV (98% BW), W8A16 fix |
+| **v0.2.19** | **FLUX.1 image generation**, DiT architecture, GPU-native diffusion ops, Flow matching scheduler |
 
 ### Planned
 
