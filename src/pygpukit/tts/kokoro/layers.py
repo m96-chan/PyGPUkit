@@ -833,6 +833,555 @@ def build_plbert_from_weights(
     )
 
 
+# =============================================================================
+# Weight Normalization and Instance Normalization
+# =============================================================================
+
+
+class WeightNormConv1d:
+    """1D Convolution with weight normalization.
+
+    Weight normalization decomposes weight W = g * (v / ||v||)
+    where g is a scalar magnitude and v is the direction.
+    """
+
+    def __init__(
+        self,
+        weight_g: GPUArray,  # [out_channels, 1, 1] - magnitude
+        weight_v: GPUArray,  # [out_channels, in_channels, kernel_size] - direction
+        bias: GPUArray | None = None,
+        stride: int = 1,
+        padding: int = 0,
+        dilation: int = 1,
+    ):
+        self.weight_g = weight_g
+        self.weight_v = weight_v
+        self.bias = bias
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+
+        self.out_channels = weight_v.shape[0]
+        self.in_channels = weight_v.shape[1]
+        self.kernel_size = weight_v.shape[2]
+
+    def _compute_weight(self) -> np.ndarray:
+        """Compute normalized weight: W = g * (v / ||v||)."""
+        g = self.weight_g.to_numpy()  # [out_channels, 1, 1]
+        v = self.weight_v.to_numpy()  # [out_channels, in_channels, kernel_size]
+
+        # Compute L2 norm of v along in_channels and kernel dimensions
+        v_norm = np.sqrt((v**2).sum(axis=(1, 2), keepdims=True) + 1e-12)
+        weight = g * (v / v_norm)
+        return weight.astype(np.float32)
+
+    def __call__(self, x: GPUArray) -> GPUArray:
+        """Forward pass."""
+        batch_size = x.shape[0]
+        length = x.shape[2]
+
+        # Compute normalized weight
+        weight = self._compute_weight()
+
+        # Calculate output length
+        effective_kernel = self.dilation * (self.kernel_size - 1) + 1
+        out_length = (length + 2 * self.padding - effective_kernel) // self.stride + 1
+
+        x_np = x.to_numpy()
+
+        # Pad input
+        if self.padding > 0:
+            x_np = np.pad(x_np, ((0, 0), (0, 0), (self.padding, self.padding)), mode="constant")
+
+        # im2col
+        col = np.zeros(
+            (batch_size, self.in_channels, self.kernel_size, out_length), dtype=np.float32
+        )
+        for i in range(self.kernel_size):
+            i_dilated = i * self.dilation
+            for j in range(out_length):
+                j_strided = j * self.stride
+                col[:, :, i, j] = x_np[:, :, j_strided + i_dilated]
+
+        col = col.reshape(batch_size, -1, out_length)
+        w_reshaped = weight.reshape(self.out_channels, -1)
+        out_np = np.einsum("bkl,ok->bol", col, w_reshaped)
+
+        if self.bias is not None:
+            bias_np = self.bias.to_numpy()
+            out_np = out_np + bias_np.reshape(1, -1, 1)
+
+        return from_numpy(out_np.astype(np.float32))
+
+
+class InstanceNorm1d:
+    """1D Instance Normalization.
+
+    Normalizes each channel independently for each sample.
+    Uses gamma and beta for affine transform.
+    """
+
+    def __init__(
+        self,
+        gamma: GPUArray,  # [channels] - scale
+        beta: GPUArray,  # [channels] - shift
+        eps: float = 1e-5,
+    ):
+        self.gamma = gamma
+        self.beta = beta
+        self.eps = eps
+        self.num_features = gamma.shape[0]
+
+    def __call__(self, x: GPUArray) -> GPUArray:
+        """Forward pass: y = gamma * (x - mean) / sqrt(var + eps) + beta."""
+        x_np = x.to_numpy()  # [batch, channels, length]
+
+        # Compute mean and var along length dimension
+        mean = x_np.mean(axis=2, keepdims=True)
+        var = x_np.var(axis=2, keepdims=True)
+
+        # Normalize
+        x_norm = (x_np - mean) / np.sqrt(var + self.eps)
+
+        # Apply affine transform
+        gamma = self.gamma.to_numpy().reshape(1, -1, 1)
+        beta = self.beta.to_numpy().reshape(1, -1, 1)
+        out = gamma * x_norm + beta
+
+        return from_numpy(out.astype(np.float32))
+
+
+class AdaIN:
+    """Adaptive Instance Normalization.
+
+    Computes style-dependent scale and shift from a style vector.
+    y = scale * (x - mean) / std + shift
+    where scale and shift are computed from the style vector.
+    """
+
+    def __init__(
+        self,
+        fc_weight: GPUArray,  # [2 * channels, style_dim]
+        fc_bias: GPUArray,  # [2 * channels]
+    ):
+        self.fc_weight = fc_weight
+        self.fc_bias = fc_bias
+        self.num_features = fc_weight.shape[0] // 2
+
+    def __call__(self, x: GPUArray, style: GPUArray, eps: float = 1e-5) -> GPUArray:
+        """Forward pass.
+
+        Args:
+            x: Input [batch, channels, length]
+            style: Style vector [batch, style_dim]
+
+        Returns:
+            Normalized and styled output [batch, channels, length]
+        """
+        x_np = x.to_numpy()
+        style_np = style.to_numpy()
+
+        # Compute scale and shift from style
+        fc_w = self.fc_weight.to_numpy()
+        fc_b = self.fc_bias.to_numpy()
+        params = style_np @ fc_w.T + fc_b  # [batch, 2 * channels]
+
+        scale = params[:, : self.num_features].reshape(-1, self.num_features, 1)
+        shift = params[:, self.num_features :].reshape(-1, self.num_features, 1)
+
+        # Instance normalization
+        mean = x_np.mean(axis=2, keepdims=True)
+        std = np.sqrt(x_np.var(axis=2, keepdims=True) + eps)
+        x_norm = (x_np - mean) / std
+
+        # Apply adaptive style
+        out = scale * x_norm + shift
+
+        return from_numpy(out.astype(np.float32))
+
+
+# =============================================================================
+# ALBERT Encoder (used by Kokoro instead of BERT)
+# =============================================================================
+
+
+class ALBERTLayer:
+    """Single ALBERT layer with shared weights across layers."""
+
+    def __init__(
+        self,
+        query: Linear,
+        key: Linear,
+        value: Linear,
+        attention_dense: Linear,
+        attention_norm: LayerNorm,
+        ffn: Linear,
+        ffn_output: Linear,
+        full_layer_norm: LayerNorm,
+        num_attention_heads: int,
+        hidden_size: int,
+    ):
+        self.query = query
+        self.key = key
+        self.value = value
+        self.attention_dense = attention_dense
+        self.attention_norm = attention_norm
+        self.ffn = ffn
+        self.ffn_output = ffn_output
+        self.full_layer_norm = full_layer_norm
+        self.num_attention_heads = num_attention_heads
+        self.attention_head_size = hidden_size // num_attention_heads
+
+    def transpose_for_scores(self, x: GPUArray) -> GPUArray:
+        """Reshape for multi-head attention."""
+        batch_size = x.shape[0]
+        seq_len = x.shape[1]
+
+        x_np = x.to_numpy()
+        x_reshaped = x_np.reshape(
+            batch_size, seq_len, self.num_attention_heads, self.attention_head_size
+        )
+        x_transposed = x_reshaped.transpose(0, 2, 1, 3)
+        return from_numpy(x_transposed.astype(np.float32))
+
+    def __call__(self, hidden_states: GPUArray, attention_mask: GPUArray | None = None) -> GPUArray:
+        """Forward pass."""
+        from pygpukit.ops.basic import add, gelu
+
+        # Self-attention
+        query_layer = self.transpose_for_scores(self.query(hidden_states))
+        key_layer = self.transpose_for_scores(self.key(hidden_states))
+        value_layer = self.transpose_for_scores(self.value(hidden_states))
+
+        q_np = query_layer.to_numpy()
+        k_np = key_layer.to_numpy()
+        v_np = value_layer.to_numpy()
+
+        # Scaled dot-product attention
+        attention_scores = np.matmul(q_np, k_np.transpose(0, 1, 3, 2))
+        attention_scores = attention_scores / np.sqrt(self.attention_head_size)
+
+        if attention_mask is not None:
+            mask_np = attention_mask.to_numpy()
+            attention_scores = attention_scores + mask_np
+
+        attention_probs = np.exp(attention_scores - attention_scores.max(axis=-1, keepdims=True))
+        attention_probs = attention_probs / attention_probs.sum(axis=-1, keepdims=True)
+
+        context = np.matmul(attention_probs, v_np)
+
+        # Reshape back
+        batch_size = context.shape[0]
+        seq_len = context.shape[2]
+        hidden_size = self.num_attention_heads * self.attention_head_size
+        context = context.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, hidden_size)
+        context = from_numpy(context.astype(np.float32))
+
+        # Attention output
+        attention_output = self.attention_dense(context)
+        hidden_states = self.attention_norm(add(attention_output, hidden_states))
+
+        # Feed-forward
+        ffn_output = gelu(self.ffn(hidden_states))
+        ffn_output = self.ffn_output(ffn_output)
+        hidden_states = self.full_layer_norm(add(ffn_output, hidden_states))
+
+        return hidden_states
+
+
+class ALBERTEncoder:
+    """ALBERT encoder for Kokoro TTS.
+
+    ALBERT shares weights across layers, making it more parameter-efficient.
+    """
+
+    def __init__(
+        self,
+        word_embeddings: GPUArray,
+        position_embeddings: GPUArray,
+        token_type_embeddings: GPUArray,
+        embeddings_norm: LayerNorm,
+        embedding_mapping: Linear,  # Maps from embedding dim to hidden dim
+        layer: ALBERTLayer,  # Shared layer
+        num_hidden_layers: int = 12,
+    ):
+        self.word_embeddings = word_embeddings
+        self.position_embeddings = position_embeddings
+        self.token_type_embeddings = token_type_embeddings
+        self.embeddings_norm = embeddings_norm
+        self.embedding_mapping = embedding_mapping
+        self.layer = layer
+        self.num_hidden_layers = num_hidden_layers
+
+    def __call__(
+        self,
+        input_ids: GPUArray,
+        attention_mask: GPUArray | None = None,
+    ) -> GPUArray:
+        """Forward pass."""
+
+        batch_size = input_ids.shape[0]
+        seq_len = input_ids.shape[1]
+
+        # Token embeddings
+        input_ids_np: np.ndarray = input_ids.to_numpy().astype(np.int32)
+        word_embeds_np = self.word_embeddings.to_numpy()
+        token_embeds = word_embeds_np[input_ids_np.flatten()].reshape(batch_size, seq_len, -1)
+
+        # Position embeddings
+        positions = np.arange(seq_len, dtype=np.int32)
+        pos_embeds_np = self.position_embeddings.to_numpy()
+        pos_embeds = pos_embeds_np[positions].reshape(1, seq_len, -1)
+
+        # Token type embeddings (all zeros for single sequence)
+        token_type_embeds_np = self.token_type_embeddings.to_numpy()
+        token_type_embeds = token_type_embeds_np[0].reshape(1, 1, -1)
+
+        # Combine embeddings
+        embeddings = token_embeds + pos_embeds + token_type_embeds
+        embeddings = from_numpy(embeddings.astype(np.float32))
+        embeddings = self.embeddings_norm(embeddings)
+
+        # Project to hidden size
+        hidden_states = self.embedding_mapping(embeddings)
+
+        # Create attention mask
+        if attention_mask is not None:
+            mask_np = attention_mask.to_numpy()
+            extended_mask = mask_np[:, np.newaxis, np.newaxis, :]
+            extended_mask = (1.0 - extended_mask) * -10000.0
+            attention_mask = from_numpy(extended_mask.astype(np.float32))
+
+        # Apply shared layer multiple times
+        for _ in range(self.num_hidden_layers):
+            hidden_states = self.layer(hidden_states, attention_mask)
+
+        return hidden_states
+
+
+# =============================================================================
+# Kokoro Text Encoder (CNN + LSTM)
+# =============================================================================
+
+
+class KokoroTextEncoder:
+    """Text encoder for Kokoro TTS.
+
+    Architecture: Embedding -> CNN layers -> BiLSTM
+    """
+
+    def __init__(
+        self,
+        embedding: GPUArray,  # [vocab_size, embed_dim]
+        cnn_layers: list[tuple[WeightNormConv1d, InstanceNorm1d]],
+        lstm: LSTM,
+    ):
+        self.embedding = embedding
+        self.cnn_layers = cnn_layers
+        self.lstm = lstm
+
+    def __call__(self, input_ids: GPUArray) -> GPUArray:
+        """Forward pass.
+
+        Args:
+            input_ids: Token IDs [batch, seq_len]
+
+        Returns:
+            Encoded features [batch, seq_len, hidden_dim]
+        """
+        batch_size = input_ids.shape[0]
+        seq_len = input_ids.shape[1]
+
+        # Embedding lookup
+        input_ids_np: np.ndarray = input_ids.to_numpy().astype(np.int32)
+        embed_np = self.embedding.to_numpy()
+        x = embed_np[input_ids_np.flatten()].reshape(batch_size, seq_len, -1)
+        x = from_numpy(x.astype(np.float32))
+
+        # Transpose for CNN: [batch, embed_dim, seq_len]
+        x = from_numpy(x.to_numpy().transpose(0, 2, 1).astype(np.float32))
+
+        # CNN layers with instance norm
+        for conv, norm in self.cnn_layers:
+            x = conv(x)
+            x = norm(x)
+            x = leaky_relu(x)
+
+        # Transpose back for LSTM: [batch, seq_len, channels]
+        x = from_numpy(x.to_numpy().transpose(0, 2, 1).astype(np.float32))
+
+        # BiLSTM
+        output, _ = self.lstm(x)
+
+        return output
+
+
+# =============================================================================
+# Kokoro AdaIN ResBlock
+# =============================================================================
+
+
+class AdaINResBlock:
+    """Residual block with AdaIN for style conditioning."""
+
+    def __init__(
+        self,
+        conv1: WeightNormConv1d,
+        conv2: WeightNormConv1d,
+        norm1: AdaIN,
+        norm2: AdaIN,
+        conv1x1: WeightNormConv1d | None = None,  # For channel mismatch
+    ):
+        self.conv1 = conv1
+        self.conv2 = conv2
+        self.norm1 = norm1
+        self.norm2 = norm2
+        self.conv1x1 = conv1x1
+
+    def __call__(self, x: GPUArray, style: GPUArray) -> GPUArray:
+        """Forward pass with style conditioning."""
+        residual = x
+
+        # First conv + AdaIN
+        out = self.norm1(x, style)
+        out = leaky_relu(out)
+        out = self.conv1(out)
+
+        # Second conv + AdaIN
+        out = self.norm2(out, style)
+        out = leaky_relu(out)
+        out = self.conv2(out)
+
+        # Residual connection (with 1x1 conv if needed)
+        if self.conv1x1 is not None:
+            residual = self.conv1x1(residual)
+
+        out_np = out.to_numpy() + residual.to_numpy()
+        return from_numpy(out_np.astype(np.float32))
+
+
+# =============================================================================
+# Builder Functions
+# =============================================================================
+
+
+def build_albert_from_weights(
+    weights: dict[str, GPUArray],
+    prefix: str = "bert",
+    num_hidden_layers: int = 12,
+    num_attention_heads: int = 12,
+    hidden_size: int = 768,
+) -> ALBERTEncoder:
+    """Build ALBERT encoder from weight dictionary."""
+    # Embeddings
+    word_embeddings = weights[f"{prefix}.module.embeddings.word_embeddings.weight"]
+    position_embeddings = weights[f"{prefix}.module.embeddings.position_embeddings.weight"]
+    token_type_embeddings = weights[f"{prefix}.module.embeddings.token_type_embeddings.weight"]
+
+    embeddings_norm = LayerNorm(
+        weights[f"{prefix}.module.embeddings.LayerNorm.weight"],
+        weights.get(f"{prefix}.module.embeddings.LayerNorm.bias"),
+    )
+
+    embedding_mapping = Linear(
+        weights[f"{prefix}.module.encoder.embedding_hidden_mapping_in.weight"],
+        weights.get(f"{prefix}.module.encoder.embedding_hidden_mapping_in.bias"),
+    )
+
+    # Shared ALBERT layer
+    layer_prefix = f"{prefix}.module.encoder.albert_layer_groups.0.albert_layers.0"
+
+    layer = ALBERTLayer(
+        query=Linear(
+            weights[f"{layer_prefix}.attention.query.weight"],
+            weights.get(f"{layer_prefix}.attention.query.bias"),
+        ),
+        key=Linear(
+            weights[f"{layer_prefix}.attention.key.weight"],
+            weights.get(f"{layer_prefix}.attention.key.bias"),
+        ),
+        value=Linear(
+            weights[f"{layer_prefix}.attention.value.weight"],
+            weights.get(f"{layer_prefix}.attention.value.bias"),
+        ),
+        attention_dense=Linear(
+            weights[f"{layer_prefix}.attention.dense.weight"],
+            weights.get(f"{layer_prefix}.attention.dense.bias"),
+        ),
+        attention_norm=LayerNorm(
+            weights[f"{layer_prefix}.attention.LayerNorm.weight"],
+            weights.get(f"{layer_prefix}.attention.LayerNorm.bias"),
+        ),
+        ffn=Linear(
+            weights[f"{layer_prefix}.ffn.weight"],
+            weights.get(f"{layer_prefix}.ffn.bias"),
+        ),
+        ffn_output=Linear(
+            weights[f"{layer_prefix}.ffn_output.weight"],
+            weights.get(f"{layer_prefix}.ffn_output.bias"),
+        ),
+        full_layer_norm=LayerNorm(
+            weights[f"{layer_prefix}.full_layer_layer_norm.weight"],
+            weights.get(f"{layer_prefix}.full_layer_layer_norm.bias"),
+        ),
+        num_attention_heads=num_attention_heads,
+        hidden_size=hidden_size,
+    )
+
+    return ALBERTEncoder(
+        word_embeddings=word_embeddings,
+        position_embeddings=position_embeddings,
+        token_type_embeddings=token_type_embeddings,
+        embeddings_norm=embeddings_norm,
+        embedding_mapping=embedding_mapping,
+        layer=layer,
+        num_hidden_layers=num_hidden_layers,
+    )
+
+
+def build_text_encoder_from_weights(
+    weights: dict[str, GPUArray],
+    prefix: str = "text_encoder",
+) -> KokoroTextEncoder:
+    """Build Kokoro text encoder from weight dictionary."""
+    # Embedding
+    embedding = weights[f"{prefix}.module.embedding.weight"]
+
+    # CNN layers (3 layers)
+    cnn_layers = []
+    for i in range(3):
+        conv = WeightNormConv1d(
+            weight_g=weights[f"{prefix}.module.cnn.{i}.0.weight_g"],
+            weight_v=weights[f"{prefix}.module.cnn.{i}.0.weight_v"],
+            bias=weights.get(f"{prefix}.module.cnn.{i}.0.bias"),
+            padding=2,  # kernel_size=5, padding=2 for same output length
+        )
+        norm = InstanceNorm1d(
+            gamma=weights[f"{prefix}.module.cnn.{i}.1.gamma"],
+            beta=weights[f"{prefix}.module.cnn.{i}.1.beta"],
+        )
+        cnn_layers.append((conv, norm))
+
+    # BiLSTM
+    lstm = LSTM(
+        W_ih=weights[f"{prefix}.module.lstm.weight_ih_l0"],
+        W_hh=weights[f"{prefix}.module.lstm.weight_hh_l0"],
+        b_ih=weights[f"{prefix}.module.lstm.bias_ih_l0"],
+        b_hh=weights[f"{prefix}.module.lstm.bias_hh_l0"],
+        bidirectional=True,
+        W_ih_reverse=weights[f"{prefix}.module.lstm.weight_ih_l0_reverse"],
+        W_hh_reverse=weights[f"{prefix}.module.lstm.weight_hh_l0_reverse"],
+        b_ih_reverse=weights[f"{prefix}.module.lstm.bias_ih_l0_reverse"],
+        b_hh_reverse=weights[f"{prefix}.module.lstm.bias_hh_l0_reverse"],
+    )
+
+    return KokoroTextEncoder(
+        embedding=embedding,
+        cnn_layers=cnn_layers,
+        lstm=lstm,
+    )
+
+
 __all__ = [
     # Basic layers
     "Linear",
@@ -840,6 +1389,10 @@ __all__ = [
     "Conv1d",
     "ConvTranspose1d",
     "ResBlock1d",
+    "WeightNormConv1d",
+    "InstanceNorm1d",
+    "AdaIN",
+    "AdaINResBlock",
     # Activations
     "leaky_relu",
     "tanh",
@@ -850,6 +1403,12 @@ __all__ = [
     "StyleEncoder",
     "Decoder",
     "ISTFTNet",
+    "LSTM",
+    "ALBERTLayer",
+    "ALBERTEncoder",
+    "KokoroTextEncoder",
     # Utilities
     "build_plbert_from_weights",
+    "build_albert_from_weights",
+    "build_text_encoder_from_weights",
 ]
