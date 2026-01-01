@@ -226,7 +226,11 @@ class Text2ImagePipeline:
     @classmethod
     def _load_pixart(cls, path: Path, dtype: str) -> Text2ImagePipeline:
         """Load PixArt model."""
-        transformer = DiT.from_safetensors(path, spec=PIXART_SIGMA_SPEC, dtype=dtype)
+        # Check for transformer subdirectory (HuggingFace diffusers format)
+        transformer_path = path / "transformer"
+        if not transformer_path.exists():
+            transformer_path = path
+        transformer = DiT.from_safetensors(transformer_path, spec=PIXART_SIGMA_SPEC, dtype=dtype)
 
         vae_path = path / "vae"
         if not vae_path.exists():
@@ -236,7 +240,13 @@ class Text2ImagePipeline:
         t5_path = path / "text_encoder"
         text_encoder_2 = None
         if t5_path.exists():
-            text_encoder_2 = T5Encoder.from_safetensors(t5_path, dtype=dtype)
+            # Check if it's a single file or sharded
+            single_file = t5_path / "model.safetensors"
+            if single_file.exists():
+                text_encoder_2 = T5Encoder.from_safetensors(t5_path, dtype=dtype)
+            else:
+                # Sharded T5 models not yet supported, use random embeddings
+                print("Note: Sharded T5 encoder detected, using random embeddings")
 
         scheduler = EulerDiscreteScheduler()
 
@@ -342,6 +352,12 @@ class Text2ImagePipeline:
                 pooled_projections=pooled,
                 guidance=guidance_scale if self.model_type == "flux" else None,
             )
+
+            # For models with variance prediction (8 channels), extract noise only (first 4)
+            pred_np = noise_pred.to_numpy()
+            if pred_np.shape[1] == 8:
+                pred_np = pred_np[:, :4, :, :]
+                noise_pred = from_numpy(pred_np.astype(np.float32))
 
             # CFG
             if guidance_scale > 1.0 and neg_embeds is not None:

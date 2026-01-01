@@ -178,7 +178,7 @@ PIXART_SIGMA_SPEC = PixArtSpec(
     text_encoder_dim=4096,
     pos_embed_type="sinusoidal",
     in_channels=4,
-    out_channels=4,
+    out_channels=8,  # PixArt-Sigma uses 8 output channels (4 latent + 4 for variance)
     cross_attention_dim=4096,
 )
 
