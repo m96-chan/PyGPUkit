@@ -98,7 +98,11 @@ class PixArtTransformer:
 
         # Detect spec from weights
         hidden_size = weights["pos_embed.proj.bias"].shape[0]
-        num_blocks = sum(1 for k in weights if k.startswith("transformer_blocks.") and k.endswith(".attn1.to_q.weight"))
+        num_blocks = sum(
+            1
+            for k in weights
+            if k.startswith("transformer_blocks.") and k.endswith(".attn1.to_q.weight")
+        )
 
         spec = PixArtSpec(
             name="pixart_sigma",
@@ -179,7 +183,9 @@ class PixArtTransformer:
         # Add 2D sinusoidal positional embedding
         pos_embed = get_2d_sincos_pos_embed(self.hidden_size, (h_patches, w_patches))
         x_proj_np = x_proj.to_numpy()
-        x_proj_np = x_proj_np + pos_embed[None, :, :]  # [1, num_patches, D] broadcast to [B, num_patches, D]
+        x_proj_np = (
+            x_proj_np + pos_embed[None, :, :]
+        )  # [1, num_patches, D] broadcast to [B, num_patches, D]
 
         return from_numpy(x_proj_np.astype(np.float32))
 
@@ -325,8 +331,15 @@ class PixArtTransformer:
             return x
 
         return self_attention(
-            x, q_w, k_w, v_w, out_w,
-            q_b, k_b, v_b, out_b,
+            x,
+            q_w,
+            k_w,
+            v_w,
+            out_w,
+            q_b,
+            k_b,
+            v_b,
+            out_b,
             num_heads=self.num_heads,
         )
 
@@ -348,8 +361,16 @@ class PixArtTransformer:
             return from_numpy(np.zeros_like(x.to_numpy()))
 
         return cross_attention(
-            x, context, q_w, k_w, v_w, out_w,
-            q_b, k_b, v_b, out_b,
+            x,
+            context,
+            q_w,
+            k_w,
+            v_w,
+            out_w,
+            q_b,
+            k_b,
+            v_b,
+            out_b,
             num_heads=self.num_heads,
         )
 
@@ -398,7 +419,9 @@ class PixArtTransformer:
 
         if proj_w is not None:
             return unpatchify(
-                x, H, W,
+                x,
+                H,
+                W,
                 out_channels=self.spec.out_channels,
                 patch_size=self.patch_size,
                 proj_weight=proj_w,

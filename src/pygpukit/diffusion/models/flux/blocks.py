@@ -161,6 +161,7 @@ def joint_block(
     Returns:
         Tuple of (image_output, text_output).
     """
+
     # Get weights helper
     def get_weight(name: str) -> GPUArray | None:
         return weights.get(f"{prefix}.{name}")

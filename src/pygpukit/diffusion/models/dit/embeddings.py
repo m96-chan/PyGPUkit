@@ -64,10 +64,10 @@ def get_2d_sincos_pos_embed(embed_dim: int, grid_size: int | tuple[int, int]) ->
 
     # Create 2D grid in column-major order (h varies first)
     # This matches diffusers: for each column, iterate through rows
-    h_grid, w_grid = np.meshgrid(grid_h_pos, grid_w_pos, indexing='ij')
+    h_grid, w_grid = np.meshgrid(grid_h_pos, grid_w_pos, indexing="ij")
     # Flatten in Fortran order (column-major) to match diffusers patch ordering
-    h_flat = h_grid.flatten('F')  # [H*W]
-    w_flat = w_grid.flatten('F')  # [H*W]
+    h_flat = h_grid.flatten("F")  # [H*W]
+    w_flat = w_grid.flatten("F")  # [H*W]
 
     # Get embeddings for each dimension
     emb_h = sinusoidal_embedding(h_flat, embed_dim // 2)  # height embedding
