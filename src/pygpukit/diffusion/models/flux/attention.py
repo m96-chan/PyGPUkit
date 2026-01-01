@@ -58,13 +58,14 @@ def layer_norm(x: GPUArray | np.ndarray, eps: float = 1e-6) -> GPUArray | np.nda
 
     Returns:
         Normalized tensor [..., dim].
+
+    Note:
+        Uses native CUDA kernel for GPUArray input.
     """
     if isinstance(x, GPUArray):
-        x_np = x.to_numpy()
-        mean = np.mean(x_np, axis=-1, keepdims=True)
-        var = np.var(x_np, axis=-1, keepdims=True)
-        result = (x_np - mean) / np.sqrt(var + eps)
-        return from_numpy(result.astype(np.float32))
+        from pygpukit.diffusion.models.flux.ops import gpu_layer_norm
+
+        return gpu_layer_norm(x, eps)
     else:
         # numpy input
         mean = np.mean(x, axis=-1, keepdims=True)

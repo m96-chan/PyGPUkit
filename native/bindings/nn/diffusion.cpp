@@ -73,4 +73,58 @@ void init_nn_diffusion(py::module_& m) {
           py::arg("dil_h") = 1, py::arg("dil_w") = 1,
           "col2im for transposed convolution\n"
           "input: [N, C*K_h*K_w, H_in*W_in] -> output: [N, C, H, W]");
+
+    // =========================================================================
+    // FLUX-specific operations (Issue #187)
+    // =========================================================================
+
+    m.def("layer_norm_simple", &ops::layer_norm_simple,
+          py::arg("input"), py::arg("eps") = 1e-5f,
+          "Layer normalization without learnable parameters\n"
+          "input: [B, N, D] -> output: [B, N, D]\n"
+          "Normalizes over the last dimension");
+
+    m.def("modulate", &ops::modulate,
+          py::arg("input"), py::arg("scale"), py::arg("shift"),
+          "AdaLN-style modulation: y = x * (1 + scale) + shift\n"
+          "input: [B, N, D], scale/shift: [B, D] -> output: [B, N, D]");
+
+    m.def("gated_residual", &ops::gated_residual,
+          py::arg("residual"), py::arg("gate"), py::arg("value"),
+          "Gated residual connection: y = residual + gate * value\n"
+          "residual: [B, N, D], gate: [B, D], value: [B, N, D] -> output: [B, N, D]");
+
+    m.def("gated_residual_inplace", &ops::gated_residual_inplace,
+          py::arg("residual"), py::arg("gate"), py::arg("value"),
+          "In-place gated residual: residual += gate * value\n"
+          "residual: [B, N, D], gate: [B, D], value: [B, N, D]");
+
+    m.def("scale_tensor", &ops::scale_tensor,
+          py::arg("input"), py::arg("scale"),
+          "Scale tensor by scalar: y = x * scale");
+
+    m.def("concat_axis1", &ops::concat_axis1,
+          py::arg("a"), py::arg("b"),
+          "Concatenate along axis 1\n"
+          "a: [B, N1, D], b: [B, N2, D] -> output: [B, N1+N2, D]");
+
+    m.def("split_axis1", &ops::split_axis1,
+          py::arg("input"), py::arg("split_size"),
+          "Split along axis 1\n"
+          "input: [B, N, D] -> (first: [B, split_size, D], second: [B, N-split_size, D])");
+
+    m.def("apply_rope", &ops::apply_rope,
+          py::arg("x"), py::arg("cos_freq"), py::arg("sin_freq"),
+          "Apply rotary position embedding\n"
+          "x: [B, N, H, D], cos/sin: [N, D] -> output: [B, N, H, D]");
+
+    m.def("layer_norm_modulate", &ops::layer_norm_modulate,
+          py::arg("input"), py::arg("scale"), py::arg("shift"), py::arg("eps") = 1e-5f,
+          "Fused LayerNorm + Modulate: y = LayerNorm(x) * (1 + scale) + shift\n"
+          "input: [B, N, D], scale/shift: [B, D] -> output: [B, N, D]");
+
+    m.def("add_broadcast", &ops::add_broadcast,
+          py::arg("x"), py::arg("bias"),
+          "Add with broadcasting: x + bias\n"
+          "x: [B, N, D], bias: [B, D] -> output: [B, N, D]");
 }

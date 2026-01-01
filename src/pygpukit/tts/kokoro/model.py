@@ -305,7 +305,9 @@ class KokoroModel:
             except Exception as e:
                 import warnings
 
-                warnings.warn(f"ALBERT forward failed: {e}, using text encoder fallback", stacklevel=2)
+                warnings.warn(
+                    f"ALBERT forward failed: {e}, using text encoder fallback", stacklevel=2
+                )
                 hidden_states = None
 
         # Run through text encoder if available
