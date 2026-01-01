@@ -692,5 +692,47 @@ GPUArray col2im(
     int dil_h = 1, int dil_w = 1
 );
 
+// ============================================================================
+// FLUX-specific operations (Issue #187)
+// ============================================================================
+
+// LayerNorm without learnable parameters
+// input: [B, N, D] -> output: [B, N, D]
+GPUArray layer_norm_simple(const GPUArray& input, float eps = 1e-5f);
+
+// Modulate: y = x * (1 + scale) + shift (AdaLN-style)
+// input: [B, N, D], scale/shift: [B, D] -> output: [B, N, D]
+GPUArray modulate(const GPUArray& input, const GPUArray& scale, const GPUArray& shift);
+
+// Gated residual: y = residual + gate * value
+// residual: [B, N, D], gate: [B, D], value: [B, N, D] -> output: [B, N, D]
+GPUArray gated_residual(const GPUArray& residual, const GPUArray& gate, const GPUArray& value);
+
+// In-place gated residual: residual += gate * value
+void gated_residual_inplace(GPUArray& residual, const GPUArray& gate, const GPUArray& value);
+
+// Scale tensor: y = x * scale
+GPUArray scale_tensor(const GPUArray& input, float scale);
+
+// Concatenate along axis 1
+// a: [B, N1, D], b: [B, N2, D] -> output: [B, N1+N2, D]
+GPUArray concat_axis1(const GPUArray& a, const GPUArray& b);
+
+// Split along axis 1
+// input: [B, N, D] -> (first: [B, split_size, D], second: [B, N-split_size, D])
+std::pair<GPUArray, GPUArray> split_axis1(const GPUArray& input, int split_size);
+
+// Apply rotary position embedding
+// x: [B, N, H, D], cos/sin: [N, D] -> output: [B, N, H, D]
+GPUArray apply_rope(const GPUArray& x, const GPUArray& cos_freq, const GPUArray& sin_freq);
+
+// Fused LayerNorm + Modulate: y = LayerNorm(x) * (1 + scale) + shift
+// input: [B, N, D], scale/shift: [B, D] -> output: [B, N, D]
+GPUArray layer_norm_modulate(const GPUArray& input, const GPUArray& scale, const GPUArray& shift, float eps = 1e-5f);
+
+// Add with broadcasting: x + bias
+// x: [B, N, D], bias: [B, D] -> output: [B, N, D]
+GPUArray add_broadcast(const GPUArray& x, const GPUArray& bias);
+
 } // namespace ops
 } // namespace pygpukit

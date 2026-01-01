@@ -327,8 +327,8 @@ def _batched_matmul_native(
 ) -> GPUArray:
     """Native batched GEMM implementation.
 
-    First tries cuBLASLt strided batched GEMM.
-    Falls back to loop of 2D matmul if CUTLASS fails (e.g., SM120).
+    Uses cuBLAS sgemm_strided_batched for high-performance batched GEMM.
+    This works on all architectures including SM120 (Blackwell).
     """
     from pygpukit.core.backend import get_native_module
     from pygpukit.core.dtypes import float32
@@ -356,63 +356,21 @@ def _batched_matmul_native(
     else:
         out_native = out._get_native()
 
-    try:
-        native.gemm_strided_batched_fp32(
-            a_native,
-            b_native,
-            out_native,
-            M,
-            N,
-            K,
-            batch_count,
-            strideA,
-            strideB,
-            strideC,
-        )
-    except RuntimeError:
-        # CUTLASS failed (e.g., SM120 not supported)
-        # Fall back to loop of 2D matmul on GPU
-        return _batched_matmul_loop(a, b, M, N, K, batch_count, out_shape, out=out)
+    # Use cuBLAS sgemm_strided_batched (works on all SM versions)
+    native.gemm_strided_batched_fp32(
+        a_native,
+        b_native,
+        out_native,
+        M,
+        N,
+        K,
+        batch_count,
+        strideA,
+        strideB,
+        strideC,
+    )
 
     return out
-
-
-def _batched_matmul_loop(
-    a: GPUArray,
-    b: GPUArray,
-    M: int,
-    N: int,
-    K: int,
-    batch_count: int,
-    out_shape: tuple[int, ...],
-    *,
-    out: GPUArray | None = None,
-) -> GPUArray:
-    """Batched matmul via loop of 2D matmul (GPU).
-
-    Less efficient than strided batched GEMM but works on all architectures.
-    Each batch is processed on GPU, only input/output transfer via numpy.
-    """
-    # Transfer to CPU once
-    a_np = a.to_numpy().reshape(batch_count, M, K)
-    b_np = b.to_numpy().reshape(batch_count, K, N)
-    out_np = np.zeros((batch_count, M, N), dtype=np.float32)
-
-    # Process each batch on GPU
-    for i in range(batch_count):
-        a_i = from_numpy(a_np[i].astype(np.float32))
-        b_i = from_numpy(b_np[i].astype(np.float32))
-        c_i = _matmul_native(a_i, b_i)
-        out_np[i] = c_i.to_numpy()
-
-    # Transfer result back to GPU
-    result = from_numpy(out_np.reshape(out_shape))
-    if out is not None:
-        from pygpukit.ops.elementwise import copy_to
-
-        copy_to(result, out)
-        return out
-    return result
 
 
 __all__ = [
