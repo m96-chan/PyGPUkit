@@ -67,17 +67,34 @@ class T5Encoder:
         Returns:
             Loaded T5 encoder.
         """
-        from pygpukit.llm.safetensors import load_safetensors
 
         path = Path(path)
+        base_dir = path if path.is_dir() else path.parent
 
-        # Find safetensors
+        # Check for sharded index file first
+        index_path = None
+        for name in [
+            "model.safetensors.index.fp16.json",
+            "model.safetensors.index.json",
+        ]:
+            candidate = base_dir / name
+            if candidate.exists():
+                index_path = candidate
+                break
+
+        if index_path is not None:
+            # Load sharded model using Python safetensors library
+            return cls._load_sharded(index_path, dtype)
+
+        # Single file loading (fallback to Rust loader)
         if path.is_dir():
             for name in ["model.safetensors", "text_encoder_2.safetensors"]:
                 model_path = path / name
                 if model_path.exists():
                     path = model_path
                     break
+
+        from pygpukit.llm.safetensors import load_safetensors
 
         st = load_safetensors(str(path))
 
@@ -119,6 +136,75 @@ class T5Encoder:
         tokenizer_path = (
             path.parent / "tokenizer.json" if path.is_file() else path / "tokenizer.json"
         )
+        if tokenizer_path.exists():
+            from tokenizers import Tokenizer
+
+            encoder.tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+        return encoder
+
+    @classmethod
+    def _load_sharded(cls, index_path: Path, dtype: str) -> T5Encoder:
+        """Load T5 encoder from sharded SafeTensors using Python library."""
+        import json
+
+        from safetensors import safe_open
+
+        base_dir = index_path.parent
+
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+
+        weight_map = index.get("weight_map", {})
+
+        # Get unique shard files
+        shard_files = sorted(set(weight_map.values()))
+
+        # Detect config from weight names
+        hidden_size = 4096
+        num_layers = 24
+        for name in weight_map.keys():
+            if "block" in name:
+                try:
+                    layer_num = int(name.split("block.")[1].split(".")[0])
+                    num_layers = max(num_layers, layer_num + 1)
+                except (IndexError, ValueError):
+                    pass
+
+        print(f"Loading T5 encoder from {len(shard_files)} shards...")
+
+        # Load weights from each shard
+        weights = {}
+        np_dtype = np.float16 if dtype == "float16" else np.float32
+
+        for shard_file in shard_files:
+            shard_path = base_dir / shard_file
+            print(f"  Loading {shard_file}...")
+
+            with safe_open(str(shard_path), framework="numpy") as f:
+                for name in f.keys():
+                    tensor = f.get_tensor(name)
+                    # Convert to target dtype
+                    if tensor.dtype != np_dtype:
+                        tensor = tensor.astype(np_dtype)
+                    weights[name] = from_numpy(tensor)
+
+                    # Detect hidden size from embed_tokens
+                    if "embed_tokens.weight" in name:
+                        hidden_size = tensor.shape[1]
+
+        print(f"Loaded {len(weights)} weights (hidden_size={hidden_size}, layers={num_layers})")
+
+        encoder = cls(
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            weights=weights,
+        )
+
+        # Load tokenizer
+        tokenizer_path = base_dir / "tokenizer.json"
+        if not tokenizer_path.exists():
+            tokenizer_path = base_dir.parent / "tokenizer" / "tokenizer.json"
         if tokenizer_path.exists():
             from tokenizers import Tokenizer
 
@@ -298,7 +384,148 @@ class T5XXLEncoder(T5Encoder):
         super().__init__(**kwargs)
 
 
+class HFT5Encoder:
+    """T5 Text Encoder using HuggingFace Transformers.
+
+    This provides proper T5 encoding using the transformers library.
+    """
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        max_length: int = 512,
+        device: str = "cuda",
+        dtype: str = "float16",
+    ):
+        """Initialize HuggingFace T5 encoder.
+
+        Args:
+            model_path: Path to T5 model directory.
+            max_length: Maximum sequence length.
+            device: Device to run on ('cuda' or 'cpu').
+            dtype: Model dtype ('float16', 'float32', 'bfloat16').
+        """
+        import torch
+        from transformers import T5EncoderModel, T5Tokenizer
+
+        self.max_length = max_length
+        self.device = device
+
+        # Map dtype string to torch dtype
+        dtype_map = {
+            "float16": torch.float16,
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+        }
+        torch_dtype = dtype_map.get(dtype, torch.float16)
+
+        print(f"Loading T5 model from {model_path}...")
+
+        # Find tokenizer path (may be in parent/tokenizer or same dir)
+        model_path = Path(model_path)
+        tokenizer_path = model_path
+        if not (model_path / "spiece.model").exists():
+            # Check parent directory for tokenizer
+            parent_tokenizer = model_path.parent / "tokenizer"
+            if parent_tokenizer.exists():
+                tokenizer_path = parent_tokenizer
+
+        self.tokenizer = T5Tokenizer.from_pretrained(str(tokenizer_path))
+
+        # Check if CUDA is compatible with this GPU
+        actual_device = device
+        if device == "cuda" and torch.cuda.is_available():
+            try:
+                # Test if PyTorch supports this GPU
+                torch.zeros(1, device="cuda")
+            except RuntimeError as e:
+                if "no kernel image" in str(e):
+                    print("Warning: PyTorch doesn't support this GPU, using CPU")
+                    actual_device = "cpu"
+                else:
+                    raise
+
+        self.device = actual_device
+        self.model = T5EncoderModel.from_pretrained(
+            str(model_path),
+            torch_dtype=torch_dtype if actual_device == "cuda" else torch.float32,
+            device_map=actual_device if actual_device == "cuda" else None,
+        )
+        if actual_device == "cpu":
+            self.model = self.model.to("cpu").float()
+        elif self.model.device.type != "cuda":
+            self.model = self.model.to("cuda")
+        self.model.eval()
+
+        self.hidden_size = self.model.config.d_model
+        print(f"T5 encoder loaded (hidden_size={self.hidden_size})")
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_path: str | Path,
+        dtype: str = "float16",
+        device: str = "cuda",
+    ) -> HFT5Encoder:
+        """Load T5 encoder from pretrained path.
+
+        Args:
+            model_path: Path to model directory.
+            dtype: Weight dtype.
+            device: Device to use.
+
+        Returns:
+            Loaded T5 encoder.
+        """
+        return cls(model_path=model_path, dtype=dtype, device=device)
+
+    def encode(
+        self,
+        text: str | list[str],
+        max_length: int | None = None,
+    ) -> GPUArray:
+        """Encode text to embeddings.
+
+        Args:
+            text: Input text(s).
+            max_length: Maximum length.
+
+        Returns:
+            Hidden states [B, seq_len, hidden_size].
+        """
+        import torch
+
+        if max_length is None:
+            max_length = self.max_length
+
+        if isinstance(text, str):
+            text = [text]
+
+        # Tokenize
+        inputs = self.tokenizer(
+            text,
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        input_ids = inputs["input_ids"].to(self.device)
+        attention_mask = inputs["attention_mask"].to(self.device)
+
+        # Forward pass
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            hidden_states = outputs.last_hidden_state
+
+        # Convert to numpy
+        hidden_np = hidden_states.cpu().float().numpy()
+
+        return from_numpy(hidden_np)
+
+
 __all__ = [
     "T5Encoder",
     "T5XXLEncoder",
+    "HFT5Encoder",
 ]

@@ -24,7 +24,7 @@ from pygpukit.diffusion.models.vae import VAE
 from pygpukit.diffusion.scheduler.euler import EulerDiscreteScheduler
 from pygpukit.diffusion.scheduler.rectified_flow import FlowMatchingScheduler
 from pygpukit.diffusion.text_encoders.clip import CLIPTextEncoder
-from pygpukit.diffusion.text_encoders.t5 import T5Encoder
+from pygpukit.diffusion.text_encoders.t5 import HFT5Encoder, T5Encoder
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -240,13 +240,18 @@ class Text2ImagePipeline:
         t5_path = path / "text_encoder"
         text_encoder_2 = None
         if t5_path.exists():
-            # Check if it's a single file or sharded
-            single_file = t5_path / "model.safetensors"
-            if single_file.exists():
-                text_encoder_2 = T5Encoder.from_safetensors(t5_path, dtype=dtype)
-            else:
-                # Sharded T5 models not yet supported, use random embeddings
-                print("Note: Sharded T5 encoder detected, using random embeddings")
+            # Try HuggingFace T5 encoder first (proper transformer)
+            try:
+                text_encoder_2 = HFT5Encoder.from_pretrained(t5_path, dtype=dtype)
+            except Exception as e:
+                print(f"Warning: HuggingFace T5 failed: {e}")
+                # Fallback to simple T5 encoder
+                try:
+                    text_encoder_2 = T5Encoder.from_safetensors(t5_path, dtype=dtype)
+                    print(f"Loaded T5 encoder with {len(text_encoder_2.weights)} weights")
+                except Exception as e2:
+                    print(f"Warning: Failed to load T5 encoder: {e2}")
+                    print("Using random text embeddings")
 
         scheduler = EulerDiscreteScheduler()
 
