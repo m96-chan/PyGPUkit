@@ -30,7 +30,14 @@ from pygpukit.tts.kokoro.loader import (
 from pygpukit.tts.kokoro.text import KokoroTokenizer, normalize_text, split_sentences
 
 if TYPE_CHECKING:
-    from pygpukit.tts.kokoro.layers import Decoder, ISTFTNet, PLBERTEncoder, StyleEncoder
+    from pygpukit.tts.kokoro.layers import (
+        ALBERTEncoder,
+        Decoder,
+        ISTFTNet,
+        KokoroTextEncoder,
+        PLBERTEncoder,
+        StyleEncoder,
+    )
 
 
 @dataclass
@@ -100,9 +107,12 @@ class KokoroModel:
 
         # Build model components lazily
         self._plbert: PLBERTEncoder | None = None
+        self._albert: ALBERTEncoder | None = None
+        self._text_encoder: KokoroTextEncoder | None = None
         self._style_encoder: StyleEncoder | None = None
         self._decoder: Decoder | None = None
         self._vocoder: ISTFTNet | None = None
+        self._bert_encoder_proj = None  # bert_encoder linear projection (Linear layer)
 
         # Default voice
         self._current_voice: str | None = None
@@ -208,50 +218,164 @@ class KokoroModel:
 
     def _build_components(self) -> None:
         """Build model components from weights (lazy initialization)."""
-        if self._plbert is not None:
+        if self._albert is not None:
             return  # Already built
 
-        from pygpukit.tts.kokoro.layers import build_plbert_from_weights
+        from pygpukit.tts.kokoro.layers import (
+            Linear,
+            build_albert_from_weights,
+            build_text_encoder_from_weights,
+        )
 
-        # Build PLBERT encoder
-        # Note: Actual weight prefix may vary depending on checkpoint format
-        # This is a placeholder - actual implementation needs weight inspection
+        # Build ALBERT encoder (Kokoro uses ALBERT, not standard BERT)
         try:
-            self._plbert = build_plbert_from_weights(self.config, self.weights, prefix="bert")
-        except (KeyError, ValueError):
-            # Weights might use different naming
-            self._plbert = None
+            self._albert = build_albert_from_weights(
+                self.weights,
+                prefix="bert",
+                num_hidden_layers=self.config.plbert_num_hidden_layers,
+                num_attention_heads=self.config.plbert_num_attention_heads,
+                hidden_size=self.config.plbert_hidden_size,
+            )
+        except KeyError as e:
+            # Log missing weights for debugging
+            import warnings
 
-        # TODO: Build other components (style encoder, decoder, vocoder)
-        # These require inspecting actual Kokoro weight structure
+            warnings.warn(f"Failed to build ALBERT encoder: {e}", stacklevel=2)
+            self._albert = None
+
+        # Build text encoder (CNN + BiLSTM)
+        try:
+            self._text_encoder = build_text_encoder_from_weights(
+                self.weights,
+                prefix="text_encoder",
+            )
+        except KeyError as e:
+            import warnings
+
+            warnings.warn(f"Failed to build text encoder: {e}", stacklevel=2)
+            self._text_encoder = None
+
+        # Build bert_encoder projection layer
+        try:
+            proj_weight = self.weights.get("bert_encoder.weight")
+            proj_bias = self.weights.get("bert_encoder.bias")
+            if proj_weight is not None:
+                self._bert_encoder_proj = Linear(proj_weight, proj_bias)
+        except KeyError:
+            self._bert_encoder_proj = None
+
+        # Note: Decoder and vocoder require more complex weight mapping
+        # that depends on the specific predictor and decoder structure.
+        # These will be implemented as the weight structure is verified.
 
     def _forward_simple(
         self,
         tokens: list[int],
         voice_embedding: GPUArray | None = None,
     ) -> GPUArray:
-        """Simple forward pass without full model components.
+        """Forward pass through Kokoro TTS model.
 
-        This is a placeholder implementation that demonstrates the API.
-        Full implementation requires matching Kokoro's exact weight structure.
+        Pipeline:
+        1. Convert tokens to input tensor
+        2. Run through ALBERT encoder
+        3. Project through bert_encoder
+        4. Apply text encoder (CNN + BiLSTM)
+        5. Apply style conditioning from voice embedding
+        6. Generate audio via decoder + vocoder
+
+        Note: Full decoder/vocoder implementation requires additional weight mapping.
+        Currently implements the text encoding pipeline with placeholder audio generation.
         """
-        # For now, generate placeholder audio
-        # Actual implementation would:
-        # 1. Embed tokens
-        # 2. Run through PLBERT
-        # 3. Apply style
-        # 4. Decode to mel
-        # 5. Vocode to audio
+        # Build components if not already done
+        self._build_components()
 
-        # Placeholder: generate silence with some noise
-        duration_per_token = 0.1  # 100ms per token
-        total_duration = len(tokens) * duration_per_token
+        # Convert tokens to input array
+        input_ids = np.array([tokens], dtype=np.int32)  # [1, seq_len]
+        input_ids_gpu = from_numpy(input_ids)
+
+        # Run through ALBERT encoder if available
+        hidden_states = None
+        if self._albert is not None:
+            try:
+                hidden_states = self._albert(input_ids_gpu)  # [1, seq_len, hidden_size]
+
+                # Project through bert_encoder if available
+                if self._bert_encoder_proj is not None:
+                    hidden_states = self._bert_encoder_proj(hidden_states)
+            except Exception as e:
+                import warnings
+
+                warnings.warn(f"ALBERT forward failed: {e}, using text encoder fallback", stacklevel=2)
+                hidden_states = None
+
+        # Run through text encoder if available
+        text_features = None
+        if self._text_encoder is not None:
+            try:
+                text_features = self._text_encoder(input_ids_gpu)  # [1, seq_len, hidden_dim]
+            except Exception as e:
+                import warnings
+
+                warnings.warn(f"Text encoder forward failed: {e}", stacklevel=2)
+                text_features = None
+
+        # Combine ALBERT and text encoder outputs if both available
+        if hidden_states is not None and text_features is not None:
+            # Combine features (style conditioning would be applied here)
+            combined = hidden_states.to_numpy() + text_features.to_numpy()
+            combined = from_numpy(combined.astype(np.float32))
+        elif hidden_states is not None:
+            combined = hidden_states
+        elif text_features is not None:
+            combined = text_features
+        else:
+            # Fallback: use token embeddings directly if no encoder is available
+            import warnings
+
+            warnings.warn(
+                "No encoder available. TTS output will be placeholder audio. "
+                "Ensure model weights are correctly loaded.",
+                stacklevel=2,
+            )
+            # Generate placeholder based on text length
+            duration_per_token = 0.08  # 80ms per token (typical TTS rate)
+            total_duration = len(tokens) * duration_per_token
+            num_samples = int(total_duration * self.config.sample_rate)
+
+            # Generate silence instead of beep for placeholder
+            audio = np.zeros(num_samples, dtype=np.float32)
+            return from_numpy(audio)
+
+        # Apply voice/style conditioning
+        # TODO: Implement proper style encoder when decoder weights are mapped
+        # For now, voice embedding is reserved for future use
+        _ = voice_embedding
+
+        # Get sequence length and estimate audio duration
+        seq_len = len(tokens)
+        duration_per_token = 0.08  # 80ms per token (typical TTS rate)
+        total_duration = seq_len * duration_per_token
         num_samples = int(total_duration * self.config.sample_rate)
 
-        # Generate placeholder audio (sine wave for testing)
-        t = np.linspace(0, total_duration, num_samples, dtype=np.float32)
-        frequency = 440.0  # A4 note
-        audio = 0.1 * np.sin(2 * np.pi * frequency * t)
+        # TODO: Implement decoder and vocoder forward pass
+        # The decoder converts text features + style to mel spectrogram
+        # The vocoder (ISTFTNet) converts mel to waveform
+        #
+        # For now, generate placeholder audio proportional to text features
+        # This ensures the API works while decoder/vocoder are being implemented.
+        #
+        # Full implementation requires:
+        # 1. Duration predictor to get per-phoneme durations
+        # 2. Decoder with AdaIN style conditioning
+        # 3. ISTFTNet vocoder for waveform synthesis
+
+        # Generate placeholder audio (silence) - NOT the 440Hz beep
+        # The actual audio generation requires decoder/vocoder implementation
+        audio = np.zeros(num_samples, dtype=np.float32)
+
+        # Add a very quiet noise floor to indicate audio was "generated"
+        # This distinguishes from complete silence and helps with debugging
+        audio += np.random.randn(num_samples).astype(np.float32) * 0.001
 
         return from_numpy(audio)
 
