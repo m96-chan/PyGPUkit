@@ -151,11 +151,14 @@ class CLIPTextEncoder:
 
         batch_size = len(text)
 
+        input_ids: np.ndarray
+        attention_mask: np.ndarray
+
         if self.tokenizer is not None:
             # Use HuggingFace tokenizer
             encoded = self.tokenizer.encode_batch(text)
-            input_ids = []
-            attention_mask = []
+            ids_list: list[list[int]] = []
+            mask_list: list[list[int]] = []
 
             for enc in encoded:
                 ids = list(enc.ids)
@@ -173,11 +176,11 @@ class CLIPTextEncoder:
                     ids = ids + [0] * pad_len
                     mask = mask + [0] * pad_len
 
-                input_ids.append(ids)
-                attention_mask.append(mask)
+                ids_list.append(ids)
+                mask_list.append(mask)
 
-            input_ids = np.array(input_ids, dtype=np.int64)
-            attention_mask = np.array(attention_mask, dtype=np.int64)
+            input_ids = np.array(ids_list, dtype=np.int64)
+            attention_mask = np.array(mask_list, dtype=np.int64)
         else:
             # Simple fallback tokenization (space-based)
             input_ids = np.zeros((batch_size, max_length), dtype=np.int64)
