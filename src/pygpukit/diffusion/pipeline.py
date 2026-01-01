@@ -24,7 +24,7 @@ from pygpukit.diffusion.models.vae import VAE
 from pygpukit.diffusion.scheduler.euler import EulerDiscreteScheduler
 from pygpukit.diffusion.scheduler.rectified_flow import FlowMatchingScheduler
 from pygpukit.diffusion.text_encoders.clip import CLIPTextEncoder
-from pygpukit.diffusion.text_encoders.t5 import HFT5Encoder, T5Encoder
+from pygpukit.diffusion.text_encoders.t5 import T5Encoder
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -240,18 +240,12 @@ class Text2ImagePipeline:
         t5_path = path / "text_encoder"
         text_encoder_2 = None
         if t5_path.exists():
-            # Try HuggingFace T5 encoder first (proper transformer)
             try:
-                text_encoder_2 = HFT5Encoder.from_pretrained(t5_path, dtype=dtype)
+                text_encoder_2 = T5Encoder.from_safetensors(t5_path, dtype=dtype)
+                print(f"Loaded T5 encoder with {len(text_encoder_2.weights)} weights")
             except Exception as e:
-                print(f"Warning: HuggingFace T5 failed: {e}")
-                # Fallback to simple T5 encoder
-                try:
-                    text_encoder_2 = T5Encoder.from_safetensors(t5_path, dtype=dtype)
-                    print(f"Loaded T5 encoder with {len(text_encoder_2.weights)} weights")
-                except Exception as e2:
-                    print(f"Warning: Failed to load T5 encoder: {e2}")
-                    print("Using random text embeddings")
+                print(f"Warning: Failed to load T5 encoder: {e}")
+                print("Using random text embeddings")
 
         scheduler = EulerDiscreteScheduler()
 
