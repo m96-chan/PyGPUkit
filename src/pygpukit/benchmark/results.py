@@ -57,7 +57,7 @@ class BenchmarkReport:
     gpu: GPUInfo
     results: list[BenchmarkResult] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    version: str = "0.2.18"
+    version: str = "0.2.19"
 
     def add(self, result: BenchmarkResult) -> None:
         self.results.append(result)

@@ -270,7 +270,9 @@ class FluxTransformer:
         # [B, txt_seq_len, 4096] -> [B, txt_seq_len, hidden_size]
         txt_2d = encoder_hidden_states.reshape(B * txt_seq_len, self.config.joint_attention_dim)
         txt = gpu_linear(
-            txt_2d, self.weights["context_embedder.weight"], self.weights.get("context_embedder.bias")
+            txt_2d,
+            self.weights["context_embedder.weight"],
+            self.weights.get("context_embedder.bias"),
         )
         txt = txt.reshape(B, txt_seq_len, self.config.hidden_size)
 
