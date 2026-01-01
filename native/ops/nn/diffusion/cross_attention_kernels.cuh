@@ -332,5 +332,3 @@ __global__ void cross_attention_f16_kernel(
 }  // namespace nn
 }  // namespace ops
 }  // namespace pygpukit
-
-#endif  // PYGPUKIT_CROSS_ATTENTION_KERNELS_CUH

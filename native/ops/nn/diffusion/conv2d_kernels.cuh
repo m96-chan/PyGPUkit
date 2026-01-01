@@ -266,5 +266,3 @@ __global__ void conv2d_1x1_bf16_kernel(
 }  // namespace nn
 }  // namespace ops
 }  // namespace pygpukit
-
-#endif  // PYGPUKIT_CONV2D_KERNELS_CUH
