@@ -41,3 +41,4 @@
 #include "elementwise/inplace.inl"
 #include "cast/cast.inl"
 #include "recurrent/lstm.inl"
+#include "diffusion/diffusion.inl"

@@ -165,9 +165,7 @@ def rope_init_ntk_aware(
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        cos_native, sin_native = native.rope_init_ntk_aware(
-            max_seq_len, head_dim, base, scale
-        )
+        cos_native, sin_native = native.rope_init_ntk_aware(max_seq_len, head_dim, base, scale)
         return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
     else:
         return _rope_init_ntk_aware_cpu(max_seq_len, head_dim, base, scale)
@@ -346,9 +344,7 @@ def rope_init_linear(
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        cos_native, sin_native = native.rope_init_linear(
-            max_seq_len, head_dim, base, scale
-        )
+        cos_native, sin_native = native.rope_init_linear(max_seq_len, head_dim, base, scale)
         return GPUArray._wrap_native(cos_native), GPUArray._wrap_native(sin_native)
     else:
         return _rope_init_linear_cpu(max_seq_len, head_dim, base, scale)
@@ -469,9 +465,7 @@ def pope_inplace(
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        native.pope_inplace(
-            q._get_native(), k._get_native(), encoding._get_native(), start_pos
-        )
+        native.pope_inplace(q._get_native(), k._get_native(), encoding._get_native(), start_pos)
     else:
         _pope_inplace_cpu(q, k, encoding, start_pos)
 
@@ -543,9 +537,7 @@ def alibi_init_slopes(num_heads: int) -> GPUArray:
 def _alibi_init_slopes_cpu(num_heads: int) -> GPUArray:
     """CPU implementation of ALiBi slopes initialization."""
     # m_h = 2^(-8 * (h+1) / num_heads)
-    slopes = np.array(
-        [2 ** (-8 * (h + 1) / num_heads) for h in range(num_heads)], dtype=np.float32
-    )
+    slopes = np.array([2 ** (-8 * (h + 1) / num_heads) for h in range(num_heads)], dtype=np.float32)
     return from_numpy(slopes)
 
 
@@ -575,9 +567,7 @@ def alibi_compute_bias(
         from pygpukit.core.backend import get_native_module
 
         native = get_native_module()
-        bias_native = native.alibi_compute_bias(
-            seq_len, num_heads, slopes._get_native(), causal
-        )
+        bias_native = native.alibi_compute_bias(seq_len, num_heads, slopes._get_native(), causal)
         return GPUArray._wrap_native(bias_native)
     else:
         return _alibi_compute_bias_cpu(seq_len, num_heads, slopes, causal)

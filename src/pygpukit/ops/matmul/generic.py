@@ -325,7 +325,11 @@ def _batched_matmul_native(
     *,
     out: GPUArray | None = None,
 ) -> GPUArray:
-    """Native cuBLASLt strided batched GEMM implementation."""
+    """Native batched GEMM implementation.
+
+    First tries cuBLASLt strided batched GEMM.
+    Falls back to loop of 2D matmul if CUTLASS fails (e.g., SM120).
+    """
     from pygpukit.core.backend import get_native_module
     from pygpukit.core.dtypes import float32
 
@@ -366,14 +370,49 @@ def _batched_matmul_native(
             strideC,
         )
     except RuntimeError:
-        warnings.warn(
-            "batched_matmul: CUTLASS kernel failed, using CPU fallback (slow)",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return _batched_matmul_cpu(a, b, out=out)
+        # CUTLASS failed (e.g., SM120 not supported)
+        # Fall back to loop of 2D matmul on GPU
+        return _batched_matmul_loop(a, b, M, N, K, batch_count, out_shape, out=out)
 
     return out
+
+
+def _batched_matmul_loop(
+    a: GPUArray,
+    b: GPUArray,
+    M: int,
+    N: int,
+    K: int,
+    batch_count: int,
+    out_shape: tuple[int, ...],
+    *,
+    out: GPUArray | None = None,
+) -> GPUArray:
+    """Batched matmul via loop of 2D matmul (GPU).
+
+    Less efficient than strided batched GEMM but works on all architectures.
+    Each batch is processed on GPU, only input/output transfer via numpy.
+    """
+    # Transfer to CPU once
+    a_np = a.to_numpy().reshape(batch_count, M, K)
+    b_np = b.to_numpy().reshape(batch_count, K, N)
+    out_np = np.zeros((batch_count, M, N), dtype=np.float32)
+
+    # Process each batch on GPU
+    for i in range(batch_count):
+        a_i = from_numpy(a_np[i].astype(np.float32))
+        b_i = from_numpy(b_np[i].astype(np.float32))
+        c_i = _matmul_native(a_i, b_i)
+        out_np[i] = c_i.to_numpy()
+
+    # Transfer result back to GPU
+    result = from_numpy(out_np.reshape(out_shape))
+    if out is not None:
+        from pygpukit.ops.elementwise import copy_to
+
+        copy_to(result, out)
+        return out
+    return result
 
 
 __all__ = [

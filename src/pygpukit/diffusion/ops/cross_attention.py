@@ -1,0 +1,175 @@
+"""Cross-Attention for diffusion models.
+
+Cross-attention enables conditioning on text embeddings.
+Unlike causal self-attention, cross-attention is bidirectional
+and uses different sequence lengths for Q (image) and K/V (text).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from pygpukit.core.array import GPUArray
+from pygpukit.core.backend import NativeBackend, get_backend
+from pygpukit.core.factory import from_numpy
+
+
+def cross_attention(
+    query: GPUArray,
+    key: GPUArray,
+    value: GPUArray,
+    scale: float = 0.0,
+    mask: GPUArray | None = None,
+) -> GPUArray:
+    """Cross-Attention (non-causal).
+
+    Computes attention where query comes from one modality (e.g., image)
+    and key/value come from another modality (e.g., text).
+
+    Args:
+        query: Query tensor [B, H, N_q, D] (image features)
+        key: Key tensor [B, H, N_kv, D] (text features)
+        value: Value tensor [B, H, N_kv, D] (text features)
+        scale: Attention scale. If <= 0, uses 1/sqrt(D).
+        mask: Optional attention mask [B, N_q, N_kv] or [N_q, N_kv].
+
+    Returns:
+        Output tensor [B, H, N_q, D].
+
+    Note:
+        Unlike sdpa_causal, this is bidirectional (no causal mask).
+        N_q can differ from N_kv.
+    """
+    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+        raise ValueError("cross_attention expects 4D inputs [B, H, N, D]")
+
+    B, H, N_q, D = query.shape
+    _, _, N_kv, _ = key.shape
+
+    if key.shape != value.shape:
+        raise ValueError("key and value must have same shape")
+    if key.shape[0] != B or key.shape[1] != H or key.shape[3] != D:
+        raise ValueError("key/value batch, heads, or head_dim mismatch with query")
+
+    backend = get_backend()
+
+    if isinstance(backend, NativeBackend) and backend.is_available():
+        return _cross_attention_native(query, key, value, scale, mask)
+    else:
+        return _cross_attention_cpu(query, key, value, scale, mask)
+
+
+def _cross_attention_cpu(
+    query: GPUArray,
+    key: GPUArray,
+    value: GPUArray,
+    scale: float,
+    mask: GPUArray | None,
+) -> GPUArray:
+    """CPU implementation of cross-attention."""
+    q = query.to_numpy()
+    k = key.to_numpy()
+    v = value.to_numpy()
+
+    _, _, _, D = q.shape
+
+    if scale <= 0:
+        scale = 1.0 / np.sqrt(D)
+
+    # Compute attention scores: [B, H, N_q, N_kv]
+    # q @ k^T
+    scores = np.matmul(q, k.transpose(0, 1, 3, 2)) * scale
+
+    # Apply mask if provided
+    if mask is not None:
+        mask_np = mask.to_numpy()
+        # Broadcast mask to [B, H, N_q, N_kv]
+        if mask_np.ndim == 2:
+            mask_np = mask_np[np.newaxis, np.newaxis, :, :]
+        elif mask_np.ndim == 3:
+            mask_np = mask_np[:, np.newaxis, :, :]
+        scores = scores + mask_np
+
+    # Softmax over key dimension
+    scores_max = scores.max(axis=-1, keepdims=True)
+    exp_scores = np.exp(scores - scores_max)
+    weights = exp_scores / exp_scores.sum(axis=-1, keepdims=True)
+
+    # Weighted sum of values: [B, H, N_q, D]
+    output = np.matmul(weights, v)
+
+    return from_numpy(output.astype(q.dtype))
+
+
+def _cross_attention_native(
+    query: GPUArray,
+    key: GPUArray,
+    value: GPUArray,
+    scale: float,
+    mask: GPUArray | None,
+) -> GPUArray:
+    """Native CUDA implementation of cross-attention."""
+    # Native kernel expects 3D: [n_heads, seq_len, head_dim]
+    # Python API uses 4D: [B, H, N, D]
+    # For B > 1, fall back to CPU. For B == 1, squeeze and use native.
+    if mask is not None:
+        # Mask not supported in native kernel yet
+        return _cross_attention_cpu(query, key, value, scale, mask)
+
+    B = query.shape[0]
+    if B != 1:
+        # Batch dimension not supported in native kernel yet
+        return _cross_attention_cpu(query, key, value, scale, mask)
+
+    try:
+        from pygpukit._pygpukit_native import cross_attention as native_cross_attn
+
+        # Squeeze batch dimension: [1, H, N, D] -> [H, N, D]
+        q_np = query.to_numpy().squeeze(0)
+        k_np = key.to_numpy().squeeze(0)
+        v_np = value.to_numpy().squeeze(0)
+
+        from pygpukit.core.factory import from_numpy
+
+        q_3d = from_numpy(q_np)
+        k_3d = from_numpy(k_np)
+        v_3d = from_numpy(v_np)
+
+        result = native_cross_attn(q_3d._array, k_3d._array, v_3d._array, scale)
+        result_arr = GPUArray._from_native(result)
+
+        # Unsqueeze batch dimension: [H, N, D] -> [1, H, N, D]
+        result_np = result_arr.to_numpy()
+        result_np = result_np[np.newaxis, :, :, :]
+        return from_numpy(result_np)
+    except (ImportError, AttributeError):
+        # Native kernel not available, fall back to CPU
+        return _cross_attention_cpu(query, key, value, scale, mask)
+
+
+def self_attention(
+    query: GPUArray,
+    key: GPUArray,
+    value: GPUArray,
+    scale: float = 0.0,
+) -> GPUArray:
+    """Self-Attention (non-causal, bidirectional).
+
+    Same as cross_attention but typically Q, K, V come from the same source.
+
+    Args:
+        query: Query tensor [B, H, N, D]
+        key: Key tensor [B, H, N, D]
+        value: Value tensor [B, H, N, D]
+        scale: Attention scale.
+
+    Returns:
+        Output tensor [B, H, N, D].
+    """
+    return cross_attention(query, key, value, scale, mask=None)
+
+
+__all__ = [
+    "cross_attention",
+    "self_attention",
+]
