@@ -358,7 +358,7 @@ GPUArray col2im(const GPUArray& input,
                      static_cast<size_t>(W)}, input.dtype());
 
     // Zero initialize output for accumulation
-    cudaMemset(result.data(), 0, result.size_bytes());
+    cudaMemset(result.data(), 0, result.nbytes());
 
     int total = N * C * H * W;
     int threads = 256;
