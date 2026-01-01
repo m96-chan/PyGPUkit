@@ -126,6 +126,62 @@ image.save("output.png")
 | **GPU-native ops** | Transpose, batched matmul, RoPE on GPU |
 | **RoPE frequencies** | Cached on GPU for efficient reuse |
 
+### Lazy Model Loading with Streaming
+Memory-efficient model loading strategies for large models:
+
+```python
+from pygpukit.llm import QwenModel, StreamingStrategy
+
+# Progressive loading - load layers as needed
+model = QwenModel.from_safetensors(
+    "path/to/model",
+    streaming=StreamingStrategy.PROGRESSIVE
+)
+
+# Layer-by-layer streaming for memory-constrained environments
+model = QwenModel.from_safetensors(
+    "path/to/model",
+    streaming=StreamingStrategy.LAYER_BY_LAYER
+)
+```
+
+| Strategy | Description |
+|----------|-------------|
+| `EAGER` | Load all weights at once (default) |
+| `PROGRESSIVE` | Load weights progressively during first forward |
+| `LAYER_BY_LAYER` | Stream one layer at a time, minimal memory |
+
+### cuBLAS Dynamic Loader
+Runtime cuBLAS/cuBLASLt loading without compile-time CUDA Toolkit dependency:
+
+| Feature | Description |
+|---------|-------------|
+| **Dynamic DLL loading** | Searches CUDA_PATH, system PATH |
+| **Version detection** | Auto-selects cublasLt64_13/12/11.dll |
+| **Graceful fallback** | Uses native kernels if cuBLAS unavailable |
+
+### C++ Kernel Profiler
+Built-in CUDA kernel profiling with minimal overhead:
+
+```python
+from pygpukit import enable_profiling, get_profile_stats
+
+enable_profiling(True)
+# ... run your code ...
+stats = get_profile_stats()
+for name, info in stats.items():
+    print(f"{name}: {info['avg_ms']:.3f} ms ({info['count']} calls)")
+```
+
+### HuggingFace T5 Encoder Support
+T5 text encoder with sharded safetensors for FLUX/SD3:
+
+| Feature | Description |
+|---------|-------------|
+| **Sharded loading** | Supports `model-00001-of-00002.safetensors` format |
+| **T5EncoderModel** | Full T5 encoder implementation |
+| **Automatic detection** | Finds encoder in model directories |
+
 ### DiT Architecture Support
 Diffusion Transformer (DiT) components for PixArt and similar models:
 
@@ -137,7 +193,7 @@ Diffusion Transformer (DiT) components for PixArt and similar models:
 | `dit/adaln.py` | Adaptive LayerNorm modulation |
 | `dit/ffn.py` | GEGLU feed-forward network |
 
-### New GPU Operations for Diffusion
+### New GPU Operations
 | Operation | Description |
 |-----------|-------------|
 | `transpose_4d_0213` | GPU-native 4D transpose [B,S,H,D] -> [B,H,S,D] |
@@ -145,6 +201,9 @@ Diffusion Transformer (DiT) components for PixArt and similar models:
 | `gpu_batched_matmul` | Batched matrix multiplication |
 | `gpu_softmax` | GPU-native softmax |
 | `gpu_apply_rope` | Apply rotary position embedding |
+| `cross_attention` | Cross-attention for text conditioning |
+| `conv2d` | 2D convolution for VAE/UNet |
+| `group_norm` | Group normalization |
 
 ---
 
@@ -644,7 +703,7 @@ PyGPUkit/
 | **v0.2.16** | **MoE support** (Mixtral), Thinking models (Qwen3), W8A8/W4A4 GEMV, W8A16/Int8/Int4 GEMM, Kernel restructure |
 | **v0.2.17** | **Triton backend** MVP, hybrid execution (Triton + Native CUDA), TritonArray wrapper |
 | **v0.2.18** | **Codebase refactoring**, Kokoro TTS, Positional encoding (PoPE/ALiBi/YaRN/NTK), ReLU², Unified benchmark, BF16 GEMV (98% BW), W8A16 fix |
-| **v0.2.19** | **FLUX.1 image generation**, DiT architecture, GPU-native diffusion ops, Flow matching scheduler |
+| **v0.2.19** | **FLUX.1 image generation**, Lazy model loading (streaming), cuBLAS dynamic loader, C++ kernel profiler, T5 encoder, DiT architecture, GPU-native diffusion ops |
 
 ### Planned
 
