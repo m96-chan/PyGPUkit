@@ -12,7 +12,7 @@ from pygpukit.core.factory import from_numpy
 
 # Check if new TTS layers are available (they may not be in older installations)
 try:
-    from pygpukit.tts.kokoro.layers import WeightNormConv1d
+    from pygpukit.tts.kokoro.layers import WeightNormConv1d  # noqa: F401
 
     HAS_TTS_LAYERS = True
 except ImportError:
