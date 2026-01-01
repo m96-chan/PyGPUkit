@@ -99,9 +99,14 @@ def _group_norm_native(
     eps: float,
 ) -> GPUArray:
     """Native CUDA implementation of GroupNorm."""
-    # TODO: Implement native CUDA kernel for GroupNorm
-    # For now, fall back to CPU implementation
-    return _group_norm_cpu(input, gamma, beta, num_groups, eps)
+    try:
+        from pygpukit._pygpukit_native import group_norm as native_group_norm
+
+        result = native_group_norm(input._array, gamma._array, beta._array, num_groups, eps)
+        return GPUArray._from_native(result)
+    except (ImportError, AttributeError):
+        # Native kernel not available, fall back to CPU
+        return _group_norm_cpu(input, gamma, beta, num_groups, eps)
 
 
 def group_norm_silu(

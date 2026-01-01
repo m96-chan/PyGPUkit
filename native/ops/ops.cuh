@@ -602,5 +602,95 @@ std::tuple<GPUArray, GPUArray, GPUArray> lstm_bidirectional(
     const GPUArray& b_ih_bwd, const GPUArray& b_hh_bwd
 );
 
+// ============================================================================
+// Diffusion Model Operations (SD3, Flux, PixArt)
+// ============================================================================
+
+// GroupNorm: y = (x - mean) / sqrt(var + eps) * gamma + beta
+// input: [N, C, H, W], gamma/beta: [C], normalize over (C/num_groups, H, W)
+GPUArray group_norm(
+    const GPUArray& input,
+    const GPUArray& gamma,
+    const GPUArray& beta,
+    int num_groups,
+    float eps = 1e-5f
+);
+
+// AdaLN: y = (x - mean) / sqrt(var + eps) * (1 + scale) + shift
+// input: [B, N, D], scale/shift: [B, D] (per-sample modulation from timestep embedding)
+GPUArray adaln(
+    const GPUArray& input,
+    const GPUArray& scale,
+    const GPUArray& shift,
+    float eps = 1e-5f
+);
+
+// AdaLN-Zero: y = residual + gate * ((x - mean) / sqrt(var + eps) * (1 + scale) + shift)
+// input: [B, N, D], scale/shift/gate: [B, D], residual: [B, N, D]
+GPUArray adaln_zero(
+    const GPUArray& input,
+    const GPUArray& scale,
+    const GPUArray& shift,
+    const GPUArray& gate,
+    const GPUArray& residual,
+    float eps = 1e-5f
+);
+
+// Cross-Attention (no causal mask) for text-to-image conditioning
+// Q: [n_heads, q_len, head_dim] (from image latents)
+// K: [n_heads, kv_len, head_dim] (from text embeddings)
+// V: [n_heads, kv_len, head_dim] (from text embeddings)
+// Output: [n_heads, q_len, head_dim]
+GPUArray cross_attention(
+    const GPUArray& Q,
+    const GPUArray& K,
+    const GPUArray& V,
+    float scale = 0.0f
+);
+
+// Conv2D 1x1 (pointwise convolution, common in VAE/UNet)
+// input: [N, C_in, H, W], weight: [C_out, C_in], bias: [C_out] or nullptr
+// output: [N, C_out, H, W]
+GPUArray conv2d_1x1(
+    const GPUArray& input,
+    const GPUArray& weight,
+    const GPUArray* bias = nullptr
+);
+
+// Conv2D 3x3 direct (optimized for small kernels)
+// input: [N, C_in, H, W], weight: [C_out, C_in, 3, 3], bias: [C_out] or nullptr
+GPUArray conv2d_3x3(
+    const GPUArray& input,
+    const GPUArray& weight,
+    const GPUArray* bias = nullptr,
+    int pad_h = 1,
+    int pad_w = 1,
+    int stride_h = 1,
+    int stride_w = 1
+);
+
+// im2col for general convolution (use with GEMM for Conv2D)
+// input: [N, C, H, W]
+// output: [N, C*K_h*K_w, H_out*W_out]
+GPUArray im2col(
+    const GPUArray& input,
+    int K_h, int K_w,
+    int pad_h, int pad_w,
+    int stride_h, int stride_w,
+    int dil_h = 1, int dil_w = 1
+);
+
+// col2im for transposed convolution (deconvolution)
+// input: [N, C*K_h*K_w, H_in*W_in]
+// output: [N, C, H, W]
+GPUArray col2im(
+    const GPUArray& input,
+    int C, int H, int W,
+    int K_h, int K_w,
+    int pad_h, int pad_w,
+    int stride_h, int stride_w,
+    int dil_h = 1, int dil_w = 1
+);
+
 } // namespace ops
 } // namespace pygpukit

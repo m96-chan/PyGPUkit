@@ -81,8 +81,14 @@ def _adaln_native(
     eps: float,
 ) -> GPUArray:
     """Native CUDA implementation of AdaLN."""
-    # TODO: Implement native CUDA kernel
-    return _adaln_cpu(x, scale, shift, eps)
+    try:
+        from pygpukit._pygpukit_native import adaln as native_adaln
+
+        result = native_adaln(x._array, scale._array, shift._array, eps)
+        return GPUArray._from_native(result)
+    except (ImportError, AttributeError):
+        # Native kernel not available, fall back to CPU
+        return _adaln_cpu(x, scale, shift, eps)
 
 
 def adaln_zero(
@@ -167,8 +173,16 @@ def _adaln_zero_native(
     eps: float,
 ) -> GPUArray:
     """Native CUDA implementation of AdaLN-Zero."""
-    # TODO: Implement native CUDA kernel
-    return _adaln_zero_cpu(x, scale, shift, gate, residual, eps)
+    try:
+        from pygpukit._pygpukit_native import adaln_zero as native_adaln_zero
+
+        result = native_adaln_zero(
+            x._array, scale._array, shift._array, gate._array, residual._array, eps
+        )
+        return GPUArray._from_native(result)
+    except (ImportError, AttributeError):
+        # Native kernel not available, fall back to CPU
+        return _adaln_zero_cpu(x, scale, shift, gate, residual, eps)
 
 
 def modulation(

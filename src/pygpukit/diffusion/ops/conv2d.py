@@ -149,7 +149,48 @@ def _conv2d_native(
     groups: int,
 ) -> GPUArray:
     """Native CUDA implementation of conv2d."""
-    # TODO: Implement native CUDA kernel (use CUTLASS or cuDNN)
+    # Check if we can use optimized kernels
+    _, C_in_per_group, K_h, K_w = weight.shape
+    stride_h, stride_w = stride
+    pad_h, pad_w = padding
+    dil_h, dil_w = dilation
+
+    # Optimized path for 1x1 conv (no padding, no dilation, stride=1, groups=1)
+    if K_h == 1 and K_w == 1 and groups == 1 and dil_h == 1 and dil_w == 1:
+        if stride_h == 1 and stride_w == 1 and pad_h == 0 and pad_w == 0:
+            try:
+                from pygpukit._pygpukit_native import conv2d_1x1 as native_conv2d_1x1
+
+                # Reshape weight from [C_out, C_in, 1, 1] to [C_out, C_in]
+                w_np = weight.to_numpy().squeeze(-1).squeeze(-1)
+                w_2d = from_numpy(w_np)
+
+                if bias is not None:
+                    result = native_conv2d_1x1(input._array, w_2d._array, bias._array)
+                else:
+                    result = native_conv2d_1x1(input._array, w_2d._array, None)
+                return GPUArray._from_native(result)
+            except (ImportError, AttributeError):
+                pass
+
+    # Optimized path for 3x3 conv (dilation=1, groups=1)
+    if K_h == 3 and K_w == 3 and groups == 1 and dil_h == 1 and dil_w == 1:
+        try:
+            from pygpukit._pygpukit_native import conv2d_3x3 as native_conv2d_3x3
+
+            if bias is not None:
+                result = native_conv2d_3x3(
+                    input._array, weight._array, bias._array, pad_h, pad_w, stride_h, stride_w
+                )
+            else:
+                result = native_conv2d_3x3(
+                    input._array, weight._array, None, pad_h, pad_w, stride_h, stride_w
+                )
+            return GPUArray._from_native(result)
+        except (ImportError, AttributeError):
+            pass
+
+    # Fall back to CPU for other cases
     return _conv2d_cpu(input, weight, bias, stride, padding, dilation, groups)
 
 

@@ -109,8 +109,42 @@ def _cross_attention_native(
     mask: GPUArray | None,
 ) -> GPUArray:
     """Native CUDA implementation of cross-attention."""
-    # TODO: Implement native CUDA kernel for cross-attention
-    return _cross_attention_cpu(query, key, value, scale, mask)
+    # Native kernel expects 3D: [n_heads, seq_len, head_dim]
+    # Python API uses 4D: [B, H, N, D]
+    # For B > 1, fall back to CPU. For B == 1, squeeze and use native.
+    if mask is not None:
+        # Mask not supported in native kernel yet
+        return _cross_attention_cpu(query, key, value, scale, mask)
+
+    B = query.shape[0]
+    if B != 1:
+        # Batch dimension not supported in native kernel yet
+        return _cross_attention_cpu(query, key, value, scale, mask)
+
+    try:
+        from pygpukit._pygpukit_native import cross_attention as native_cross_attn
+
+        # Squeeze batch dimension: [1, H, N, D] -> [H, N, D]
+        q_np = query.to_numpy().squeeze(0)
+        k_np = key.to_numpy().squeeze(0)
+        v_np = value.to_numpy().squeeze(0)
+
+        from pygpukit.core.factory import from_numpy
+
+        q_3d = from_numpy(q_np)
+        k_3d = from_numpy(k_np)
+        v_3d = from_numpy(v_np)
+
+        result = native_cross_attn(q_3d._array, k_3d._array, v_3d._array, scale)
+        result_arr = GPUArray._from_native(result)
+
+        # Unsqueeze batch dimension: [H, N, D] -> [1, H, N, D]
+        result_np = result_arr.to_numpy()
+        result_np = result_np[np.newaxis, :, :, :]
+        return from_numpy(result_np)
+    except (ImportError, AttributeError):
+        # Native kernel not available, fall back to CPU
+        return _cross_attention_cpu(query, key, value, scale, mask)
 
 
 def self_attention(
