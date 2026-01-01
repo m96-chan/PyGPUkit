@@ -205,9 +205,7 @@ class TestFluxKernels:
         mean = x_np.mean(axis=-1, keepdims=True)
         var = x_np.var(axis=-1, keepdims=True)
         normalized = (x_np - mean) / np.sqrt(var + 1e-5)
-        expected = (
-            normalized * (1 + scale_np[:, np.newaxis, :]) + shift_np[:, np.newaxis, :]
-        )
+        expected = normalized * (1 + scale_np[:, np.newaxis, :]) + shift_np[:, np.newaxis, :]
 
         # GPU implementation
         x_gpu = from_numpy(x_np)
