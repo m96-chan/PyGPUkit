@@ -416,7 +416,6 @@ class FluxTransformer:
         scale, shift = np.split(mod_np, 2, axis=-1)
 
         # Apply normalization
-        x_np = x.to_numpy()
         x_norm = layer_norm(x)
         x_norm_np = x_norm.to_numpy() if isinstance(x_norm, GPUArray) else x_norm
         x_mod = x_norm_np * (1.0 + scale[:, None, :]) + shift[:, None, :]

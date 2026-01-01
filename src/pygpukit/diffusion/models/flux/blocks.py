@@ -16,11 +16,8 @@ from pygpukit.diffusion.models.flux.attention import (
     single_attention,
 )
 from pygpukit.diffusion.models.flux.ops import (
-    gpu_add,
-    gpu_broadcast_mul,
     gpu_gelu,
     gpu_linear,
-    gpu_modulate,
     gpu_silu,
 )
 
