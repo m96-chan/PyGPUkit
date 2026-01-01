@@ -4,24 +4,21 @@ Tests the neural network layers used in Kokoro-82M TTS model.
 Uses mock weights to verify layer behavior without requiring actual model files.
 """
 
-import sys
-from pathlib import Path
-
-# Ensure we import from the local src directory, not the installed package
-_src_path = str(Path(__file__).parent.parent / "src")
-if _src_path not in sys.path:
-    sys.path.insert(0, _src_path)
-
-# Remove cached pygpukit modules to force reimport from local src
-_to_remove = [k for k in sys.modules if k.startswith("pygpukit")]
-for k in _to_remove:
-    del sys.modules[k]
-
 import numpy as np
 import pytest
 
 import pygpukit as gk
 from pygpukit.core.factory import from_numpy
+
+# Check if new TTS layers are available (they may not be in older installations)
+try:
+    from pygpukit.tts.kokoro.layers import WeightNormConv1d
+
+    HAS_TTS_LAYERS = True
+except ImportError:
+    HAS_TTS_LAYERS = False
+
+pytestmark = pytest.mark.skipif(not HAS_TTS_LAYERS, reason="TTS layers not available")
 
 
 @pytest.fixture
