@@ -19,7 +19,7 @@ from pygpukit.diffusion.config import (
     PIXART_SIGMA_SPEC,
     SD3_MEDIUM_SPEC,
 )
-from pygpukit.diffusion.models.dit import DiT
+from pygpukit.diffusion.models.dit import DiT, PixArtTransformer
 from pygpukit.diffusion.models.vae import VAE
 from pygpukit.diffusion.scheduler.euler import EulerDiscreteScheduler
 from pygpukit.diffusion.scheduler.rectified_flow import FlowMatchingScheduler
@@ -114,15 +114,21 @@ class Text2ImagePipeline:
         if any("flux" in f.name.lower() for f in path.glob("*.safetensors")):
             return "flux"
 
+        # Check for PixArt indicators (before SD3 - more specific)
+        if any("pixart" in f.name.lower() for f in path.glob("*.safetensors")):
+            return "pixart"
+        if "pixart" in path.name.lower():
+            return "pixart"
+        # PixArt diffusers format has specific structure
+        if (path / "transformer" / "diffusion_pytorch_model.safetensors").exists():
+            if (path / "text_encoder").exists():
+                return "pixart"
+
         # Check for SD3 indicators
         if (path / "sd3_medium.safetensors").exists():
             return "sd3"
         if any("sd3" in f.name.lower() for f in path.glob("*.safetensors")):
             return "sd3"
-
-        # Check for PixArt indicators
-        if any("pixart" in f.name.lower() for f in path.glob("*.safetensors")):
-            return "pixart"
 
         # Default to SD3
         return "sd3"
@@ -230,7 +236,7 @@ class Text2ImagePipeline:
         transformer_path = path / "transformer"
         if not transformer_path.exists():
             transformer_path = path
-        transformer = DiT.from_safetensors(transformer_path, spec=PIXART_SIGMA_SPEC, dtype=dtype)
+        transformer = PixArtTransformer.from_safetensors(transformer_path, dtype=dtype)
 
         vae_path = path / "vae"
         if not vae_path.exists():
@@ -247,7 +253,15 @@ class Text2ImagePipeline:
                 print(f"Warning: Failed to load T5 encoder: {e}")
                 print("Using random text embeddings")
 
-        scheduler = EulerDiscreteScheduler()
+        # PixArt-Sigma uses epsilon prediction with scaled_linear betas
+        scheduler = EulerDiscreteScheduler(
+            num_train_timesteps=1000,
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            prediction_type="epsilon",
+            timestep_spacing="leading",
+        )
 
         return cls(
             transformer=transformer,
@@ -466,7 +480,6 @@ class Text2ImagePipeline:
         from pygpukit.diffusion.config import (
             FLUX_SCHNELL_SPEC,
             FLUX_VAE_SPEC,
-            PIXART_SIGMA_SPEC,
             SD3_MEDIUM_SPEC,
             SD3_VAE_SPEC,
             SDXL_VAE_SPEC,

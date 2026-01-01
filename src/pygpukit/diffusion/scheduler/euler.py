@@ -48,6 +48,10 @@ class EulerDiscreteScheduler(BaseScheduler):
         # Compute sigmas for Euler
         self._compute_sigmas()
 
+        # Initialize sigmas_inference with default (will be updated by set_timesteps)
+        self.sigmas_inference = self.sigmas.copy()
+        self.init_noise_sigma = self.sigmas_inference[0]
+
     def _compute_sigmas(self) -> None:
         """Compute sigma values for Euler method."""
         self.sigmas = np.sqrt((1 - self.alphas_cumprod) / self.alphas_cumprod)
@@ -62,21 +66,28 @@ class EulerDiscreteScheduler(BaseScheduler):
         self.num_inference_steps = num_inference_steps
 
         if self.timestep_spacing == "linspace":
-            timesteps = np.linspace(0, self.num_train_timesteps - 1, num_inference_steps)
+            # Linspace from max to 0 (matches diffusers)
+            timesteps = np.linspace(self.num_train_timesteps - 1, 0, num_inference_steps)
         elif self.timestep_spacing == "leading":
             step_ratio = self.num_train_timesteps // num_inference_steps
             timesteps = np.arange(0, num_inference_steps) * step_ratio
+            timesteps = np.flip(timesteps)
         elif self.timestep_spacing == "trailing":
-            step_ratio = self.num_train_timesteps // num_inference_steps
-            timesteps = np.arange(self.num_train_timesteps, 0, -step_ratio)[:num_inference_steps]
+            step_ratio = self.num_train_timesteps / num_inference_steps
+            timesteps = np.round(np.arange(self.num_train_timesteps, 0, -step_ratio))[
+                :num_inference_steps
+            ]
         else:
             raise ValueError(f"Unknown timestep_spacing: {self.timestep_spacing}")
 
-        self.timesteps = np.flip(timesteps).astype(np.float32).copy()
+        self.timesteps = timesteps.astype(np.float32).copy()
 
         # Interpolate sigmas for inference timesteps
         sigmas = np.interp(self.timesteps, np.arange(len(self.sigmas) - 1), self.sigmas[:-1])
         self.sigmas_inference = np.concatenate([sigmas, np.array([0.0])])
+
+        # Store init_noise_sigma for compatibility
+        self.init_noise_sigma = self.sigmas_inference[0]
 
     def step(
         self,
