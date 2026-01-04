@@ -399,7 +399,9 @@ inline bool is_sm90_supported() {
     cudaGetDevice(&device_id);
     cudaDeviceProp props;
     cudaGetDeviceProperties(&props, device_id);
-    return (props.major * 10 + props.minor) >= 90;
+    int sm = props.major * 10 + props.minor;
+    // SM90-99 (Hopper) only - SM120 uses different tensor core architecture (tcgen05)
+    return sm >= 90 && sm < 100;
 }
 
 }  // namespace cutlass_gemm_sm90

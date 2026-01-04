@@ -39,7 +39,9 @@ class TestWeightNormConv1d:
 
         # Create mock weights
         weight_g = from_numpy(np.ones((out_channels, 1, 1), dtype=np.float32) * 2.0)
-        weight_v = from_numpy(np.random.randn(out_channels, in_channels, kernel_size).astype(np.float32))
+        weight_v = from_numpy(
+            np.random.randn(out_channels, in_channels, kernel_size).astype(np.float32)
+        )
 
         conv = WeightNormConv1d(weight_g=weight_g, weight_v=weight_v)
 
@@ -60,7 +62,9 @@ class TestWeightNormConv1d:
         padding = 1
 
         weight_g = from_numpy(np.ones((out_channels, 1, 1), dtype=np.float32))
-        weight_v = from_numpy(np.random.randn(out_channels, in_channels, kernel_size).astype(np.float32))
+        weight_v = from_numpy(
+            np.random.randn(out_channels, in_channels, kernel_size).astype(np.float32)
+        )
         bias = from_numpy(np.zeros(out_channels, dtype=np.float32))
 
         conv = WeightNormConv1d(weight_g=weight_g, weight_v=weight_v, bias=bias, padding=padding)
@@ -291,7 +295,9 @@ class TestKokoroTextEncoder:
         for _ in range(3):
             conv = WeightNormConv1d(
                 weight_g=from_numpy(np.ones((cnn_channels, 1, 1), dtype=np.float32)),
-                weight_v=from_numpy(np.random.randn(cnn_channels, in_ch, 5).astype(np.float32) * 0.02),
+                weight_v=from_numpy(
+                    np.random.randn(cnn_channels, in_ch, 5).astype(np.float32) * 0.02
+                ),
                 padding=2,
             )
             norm = InstanceNorm1d(
@@ -303,13 +309,21 @@ class TestKokoroTextEncoder:
 
         # BiLSTM
         lstm = LSTM(
-            W_ih=from_numpy(np.random.randn(4 * lstm_hidden, cnn_channels).astype(np.float32) * 0.02),
-            W_hh=from_numpy(np.random.randn(4 * lstm_hidden, lstm_hidden).astype(np.float32) * 0.02),
+            W_ih=from_numpy(
+                np.random.randn(4 * lstm_hidden, cnn_channels).astype(np.float32) * 0.02
+            ),
+            W_hh=from_numpy(
+                np.random.randn(4 * lstm_hidden, lstm_hidden).astype(np.float32) * 0.02
+            ),
             b_ih=from_numpy(np.zeros(4 * lstm_hidden, dtype=np.float32)),
             b_hh=from_numpy(np.zeros(4 * lstm_hidden, dtype=np.float32)),
             bidirectional=True,
-            W_ih_reverse=from_numpy(np.random.randn(4 * lstm_hidden, cnn_channels).astype(np.float32) * 0.02),
-            W_hh_reverse=from_numpy(np.random.randn(4 * lstm_hidden, lstm_hidden).astype(np.float32) * 0.02),
+            W_ih_reverse=from_numpy(
+                np.random.randn(4 * lstm_hidden, cnn_channels).astype(np.float32) * 0.02
+            ),
+            W_hh_reverse=from_numpy(
+                np.random.randn(4 * lstm_hidden, lstm_hidden).astype(np.float32) * 0.02
+            ),
             b_ih_reverse=from_numpy(np.zeros(4 * lstm_hidden, dtype=np.float32)),
             b_hh_reverse=from_numpy(np.zeros(4 * lstm_hidden, dtype=np.float32)),
         )

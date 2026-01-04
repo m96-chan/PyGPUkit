@@ -624,18 +624,15 @@ inline cudaError_t gemm_tf32(
     // Runtime SM dispatch with tiered kernel selection
     int sm_tier = get_sm_tier();
 
-    // SM120 (Blackwell GeForce): Use CUTLASS 2.x (SM86) as fallback
-    // CUTLASS 4.x native SM120 kernels only support FP8, not FP32/FP16/BF16
-    // SM100/SM90 kernels also don't work on SM120 (different tensor core gen)
-
-    // SM100 (Blackwell datacenter: B200 only, NOT SM120)
+    // SM100 (Blackwell datacenter: B200 only)
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
     if (sm_tier >= 100 && sm_tier < 120) {
         return cutlass_gemm_sm100::gemm_tf32_sm100(A, B, C, M, N, K, alpha, beta, stream);
     }
 #endif
 
-    // SM90-99 (Hopper: H100 only)
+    // SM90-99 (Hopper only - NOT SM120)
+    // SM120 cannot use SM90 WGMMA kernels - different tensor core architecture (tcgen05)
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
     if (sm_tier >= 90 && sm_tier < 100) {
         return cutlass_gemm_sm90::gemm_tf32_sm90(A, B, C, M, N, K, alpha, beta, stream);
@@ -643,12 +640,12 @@ inline cudaError_t gemm_tf32(
 #endif
 
     // CUTLASS 2.x API for SM80-89 AND SM120+ (Blackwell GeForce fallback)
+    // SM120 uses SM86 kernel as fallback since CUTLASS 4.x SM120 only supports FP8
     // Transpose trick: C^T (NxM col) = B^T (NxK col) @ A^T (KxM col)
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
-    // SM120+ uses SM86 kernel (5-stage, works on Blackwell)
     if (sm_tier >= 120 || sm_tier == 89) {
-        // SM120 (Blackwell GeForce) / SM89 (Ada): Use SM86 5-stage for stability
+        // SM120 (Blackwell GeForce) / SM89 (Ada): Use SM86 5-stage
         return run_gemm<TF32Gemm_Sm86>(
             problem_size, B, N, A, K, C, N, C, N, alpha, beta, stream);
     } else if (sm_tier >= 86) {
@@ -678,14 +675,15 @@ inline cudaError_t gemm_fp16(
     // Runtime SM dispatch with tiered kernel selection
     int sm_tier = get_sm_tier();
 
-    // SM100 (Blackwell datacenter: B200 only, NOT SM120)
+    // SM100 (Blackwell datacenter: B200 only)
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
     if (sm_tier >= 100 && sm_tier < 120) {
         return cutlass_gemm_sm100::gemm_fp16_sm100(A, B, C, M, N, K, alpha, beta, stream);
     }
 #endif
 
-    // SM90-99 (Hopper: H100 only)
+    // SM90-99 (Hopper only - NOT SM120)
+    // SM120 cannot use SM90 WGMMA kernels - different tensor core architecture (tcgen05)
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
     if (sm_tier >= 90 && sm_tier < 100) {
         return cutlass_gemm_sm90::gemm_fp16_sm90(A, B, C, M, N, K, alpha, beta, stream);
@@ -693,6 +691,7 @@ inline cudaError_t gemm_fp16(
 #endif
 
     // CUTLASS 2.x API for SM80-89 AND SM120+ (Blackwell GeForce fallback)
+    // SM120 uses SM86 kernel as fallback since CUTLASS 4.x SM120 only supports FP8
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
     if (sm_tier >= 120 || sm_tier == 89) {
@@ -726,14 +725,15 @@ inline cudaError_t gemm_bf16(
     // Runtime SM dispatch with tiered kernel selection
     int sm_tier = get_sm_tier();
 
-    // SM100 (Blackwell datacenter: B200 only, NOT SM120)
+    // SM100 (Blackwell datacenter: B200 only)
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
     if (sm_tier >= 100 && sm_tier < 120) {
         return cutlass_gemm_sm100::gemm_bf16_sm100(A, B, C, M, N, K, alpha, beta, stream);
     }
 #endif
 
-    // SM90-99 (Hopper: H100 only)
+    // SM90-99 (Hopper only - NOT SM120)
+    // SM120 cannot use SM90 WGMMA kernels - different tensor core architecture (tcgen05)
 #if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
     if (sm_tier >= 90 && sm_tier < 100) {
         return cutlass_gemm_sm90::gemm_bf16_sm90(A, B, C, M, N, K, alpha, beta, stream);
@@ -741,6 +741,7 @@ inline cudaError_t gemm_bf16(
 #endif
 
     // CUTLASS 2.x API for SM80-89 AND SM120+ (Blackwell GeForce fallback)
+    // SM120 uses SM86 kernel as fallback since CUTLASS 4.x SM120 only supports FP8
     cutlass::gemm::GemmCoord problem_size(N, M, K);
 
     if (sm_tier >= 120 || sm_tier == 89) {
