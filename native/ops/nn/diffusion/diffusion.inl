@@ -12,6 +12,7 @@
 #include "adaln_kernels.cuh"
 #include "cross_attention_kernels.cuh"
 #include "conv2d_kernels.cuh"
+#include "flux_kernels.cuh"
 #include "../../common/error.cuh"
 #include "../../../core/memory.hpp"
 
@@ -484,6 +485,328 @@ GPUArray conv2d_3x3(const GPUArray& input, const GPUArray& weight, const GPUArra
     }
 
     sync_and_check("conv2d_3x3 kernel failed");
+    return result;
+}
+
+// ============================================================================
+// FLUX-specific operations
+// ============================================================================
+
+GPUArray layer_norm_simple(const GPUArray& input, float eps) {
+    // input: [B, N, D] or [total_rows, D]
+    if (input.ndim() != 2 && input.ndim() != 3) {
+        throw std::runtime_error("layer_norm_simple expects 2D or 3D input");
+    }
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("layer_norm_simple currently only supports float32");
+    }
+
+    int total_rows, D;
+    if (input.ndim() == 3) {
+        int B = static_cast<int>(input.shape()[0]);
+        int N = static_cast<int>(input.shape()[1]);
+        D = static_cast<int>(input.shape()[2]);
+        total_rows = B * N;
+    } else {
+        total_rows = static_cast<int>(input.shape()[0]);
+        D = static_cast<int>(input.shape()[1]);
+    }
+
+    GPUArray result(input.shape(), input.dtype());
+
+    int threads = 256;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    nn::layer_norm_simple_f32_kernel<<<total_rows, threads, 0, stream>>>(
+        static_cast<const float*>(input.data()),
+        static_cast<float*>(result.data()),
+        total_rows, D, eps);
+
+    sync_and_check("layer_norm_simple kernel failed");
+    return result;
+}
+
+GPUArray modulate(const GPUArray& input, const GPUArray& scale, const GPUArray& shift) {
+    // input: [B, N, D], scale/shift: [B, D]
+    if (input.ndim() != 3) {
+        throw std::runtime_error("modulate expects 3D input [B, N, D]");
+    }
+    if (scale.ndim() != 2 || shift.ndim() != 2) {
+        throw std::runtime_error("modulate expects 2D scale and shift [B, D]");
+    }
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("modulate currently only supports float32");
+    }
+
+    int B = static_cast<int>(input.shape()[0]);
+    int N = static_cast<int>(input.shape()[1]);
+    int D = static_cast<int>(input.shape()[2]);
+
+    GPUArray result(input.shape(), input.dtype());
+
+    int total = B * N * D;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    nn::modulate_f32_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const float*>(input.data()),
+        static_cast<const float*>(scale.data()),
+        static_cast<const float*>(shift.data()),
+        static_cast<float*>(result.data()),
+        B, N, D);
+
+    sync_and_check("modulate kernel failed");
+    return result;
+}
+
+GPUArray gated_residual(const GPUArray& residual, const GPUArray& gate, const GPUArray& value) {
+    // residual: [B, N, D], gate: [B, D], value: [B, N, D]
+    if (residual.ndim() != 3 || value.ndim() != 3) {
+        throw std::runtime_error("gated_residual expects 3D residual and value");
+    }
+    if (gate.ndim() != 2) {
+        throw std::runtime_error("gated_residual expects 2D gate [B, D]");
+    }
+    if (residual.dtype() != DataType::Float32) {
+        throw std::runtime_error("gated_residual currently only supports float32");
+    }
+
+    int B = static_cast<int>(residual.shape()[0]);
+    int N = static_cast<int>(residual.shape()[1]);
+    int D = static_cast<int>(residual.shape()[2]);
+
+    GPUArray result(residual.shape(), residual.dtype());
+
+    int total = B * N * D;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    nn::gated_residual_f32_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const float*>(residual.data()),
+        static_cast<const float*>(gate.data()),
+        static_cast<const float*>(value.data()),
+        static_cast<float*>(result.data()),
+        B, N, D);
+
+    sync_and_check("gated_residual kernel failed");
+    return result;
+}
+
+GPUArray scale_tensor(const GPUArray& input, float scale) {
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("scale_tensor currently only supports float32");
+    }
+
+    GPUArray result(input.shape(), input.dtype());
+
+    int total = static_cast<int>(input.size());
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    nn::scale_tensor_f32_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const float*>(input.data()),
+        static_cast<float*>(result.data()),
+        scale, total);
+
+    sync_and_check("scale_tensor kernel failed");
+    return result;
+}
+
+GPUArray concat_axis1(const GPUArray& a, const GPUArray& b) {
+    // 3D: [B, N1, D] + [B, N2, D] -> [B, N1+N2, D]
+    // 4D: [B, N1, H, D] + [B, N2, H, D] -> [B, N1+N2, H, D]
+    if (a.ndim() != b.ndim()) {
+        throw std::runtime_error("concat_axis1: a and b must have same ndim");
+    }
+    if (a.dtype() != DataType::Float32 || b.dtype() != DataType::Float32) {
+        throw std::runtime_error("concat_axis1 currently only supports float32");
+    }
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    if (a.ndim() == 3) {
+        // 3D case: [B, N, D]
+        int B = static_cast<int>(a.shape()[0]);
+        int N1 = static_cast<int>(a.shape()[1]);
+        int D = static_cast<int>(a.shape()[2]);
+        int N2 = static_cast<int>(b.shape()[1]);
+
+        if (b.shape()[0] != static_cast<size_t>(B) || b.shape()[2] != static_cast<size_t>(D)) {
+            throw std::runtime_error("concat_axis1: shape mismatch (B or D)");
+        }
+
+        GPUArray result({static_cast<size_t>(B), static_cast<size_t>(N1 + N2), static_cast<size_t>(D)}, a.dtype());
+
+        int total = B * (N1 + N2) * D;
+        int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+
+        nn::concat_axis1_f32_kernel<<<blocks, threads, 0, stream>>>(
+            static_cast<const float*>(a.data()),
+            static_cast<const float*>(b.data()),
+            static_cast<float*>(result.data()),
+            B, N1, N2, D);
+
+        sync_and_check("concat_axis1 (3D) kernel failed");
+        return result;
+    } else if (a.ndim() == 4) {
+        // 4D case: [B, N, H, D]
+        int B = static_cast<int>(a.shape()[0]);
+        int N1 = static_cast<int>(a.shape()[1]);
+        int H = static_cast<int>(a.shape()[2]);
+        int D = static_cast<int>(a.shape()[3]);
+        int N2 = static_cast<int>(b.shape()[1]);
+
+        if (b.shape()[0] != static_cast<size_t>(B) ||
+            b.shape()[2] != static_cast<size_t>(H) ||
+            b.shape()[3] != static_cast<size_t>(D)) {
+            throw std::runtime_error("concat_axis1: shape mismatch (B, H, or D)");
+        }
+
+        GPUArray result({static_cast<size_t>(B), static_cast<size_t>(N1 + N2),
+                         static_cast<size_t>(H), static_cast<size_t>(D)}, a.dtype());
+
+        int total = B * (N1 + N2) * H * D;
+        int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+
+        nn::concat_axis1_4d_f32_kernel<<<blocks, threads, 0, stream>>>(
+            static_cast<const float*>(a.data()),
+            static_cast<const float*>(b.data()),
+            static_cast<float*>(result.data()),
+            B, N1, N2, H, D);
+
+        sync_and_check("concat_axis1 (4D) kernel failed");
+        return result;
+    } else {
+        throw std::runtime_error("concat_axis1 only supports 3D and 4D inputs");
+    }
+}
+
+std::pair<GPUArray, GPUArray> split_axis1(const GPUArray& input, int split_size) {
+    // 3D: [B, N, D] -> ([B, split_size, D], [B, N-split_size, D])
+    // 4D: [B, N, H, D] -> ([B, split_size, H, D], [B, N-split_size, H, D])
+    if (input.dtype() != DataType::Float32) {
+        throw std::runtime_error("split_axis1 currently only supports float32");
+    }
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    if (input.ndim() == 3) {
+        // 3D case
+        int B = static_cast<int>(input.shape()[0]);
+        int N = static_cast<int>(input.shape()[1]);
+        int D = static_cast<int>(input.shape()[2]);
+
+        if (split_size > N) {
+            throw std::runtime_error("split_axis1: split_size > N");
+        }
+
+        int N1 = split_size;
+        int N2 = N - split_size;
+
+        GPUArray first({static_cast<size_t>(B), static_cast<size_t>(N1), static_cast<size_t>(D)}, input.dtype());
+        GPUArray second({static_cast<size_t>(B), static_cast<size_t>(N2), static_cast<size_t>(D)}, input.dtype());
+
+        int threads = 256;
+
+        // Copy first part
+        int total1 = B * N1 * D;
+        int blocks1 = (total1 + threads - 1) / threads;
+        nn::copy_slice_axis1_f32_kernel<<<blocks1, threads, 0, stream>>>(
+            static_cast<const float*>(input.data()),
+            static_cast<float*>(first.data()),
+            B, N, N1, D, 0);
+
+        // Copy second part
+        int total2 = B * N2 * D;
+        int blocks2 = (total2 + threads - 1) / threads;
+        nn::copy_slice_axis1_f32_kernel<<<blocks2, threads, 0, stream>>>(
+            static_cast<const float*>(input.data()),
+            static_cast<float*>(second.data()),
+            B, N, N2, D, N1);
+
+        sync_and_check("split_axis1 (3D) kernel failed");
+        return std::make_pair(std::move(first), std::move(second));
+    } else if (input.ndim() == 4) {
+        // 4D case
+        int B = static_cast<int>(input.shape()[0]);
+        int N = static_cast<int>(input.shape()[1]);
+        int H = static_cast<int>(input.shape()[2]);
+        int D = static_cast<int>(input.shape()[3]);
+
+        if (split_size > N) {
+            throw std::runtime_error("split_axis1: split_size > N");
+        }
+
+        int N1 = split_size;
+        int N2 = N - split_size;
+
+        GPUArray first({static_cast<size_t>(B), static_cast<size_t>(N1),
+                        static_cast<size_t>(H), static_cast<size_t>(D)}, input.dtype());
+        GPUArray second({static_cast<size_t>(B), static_cast<size_t>(N2),
+                         static_cast<size_t>(H), static_cast<size_t>(D)}, input.dtype());
+
+        int threads = 256;
+
+        // Copy first part
+        int total1 = B * N1 * H * D;
+        int blocks1 = (total1 + threads - 1) / threads;
+        nn::copy_slice_axis1_4d_f32_kernel<<<blocks1, threads, 0, stream>>>(
+            static_cast<const float*>(input.data()),
+            static_cast<float*>(first.data()),
+            B, N, N1, H, D, 0);
+
+        // Copy second part
+        int total2 = B * N2 * H * D;
+        int blocks2 = (total2 + threads - 1) / threads;
+        nn::copy_slice_axis1_4d_f32_kernel<<<blocks2, threads, 0, stream>>>(
+            static_cast<const float*>(input.data()),
+            static_cast<float*>(second.data()),
+            B, N, N2, H, D, N1);
+
+        sync_and_check("split_axis1 (4D) kernel failed");
+        return std::make_pair(std::move(first), std::move(second));
+    } else {
+        throw std::runtime_error("split_axis1 only supports 3D and 4D inputs");
+    }
+}
+
+GPUArray apply_rope(const GPUArray& x, const GPUArray& cos_freq, const GPUArray& sin_freq) {
+    // x: [B, N, H, D], cos/sin: [N, D]
+    if (x.ndim() != 4) {
+        throw std::runtime_error("apply_rope expects 4D input [B, N, H, D]");
+    }
+    if (cos_freq.ndim() != 2 || sin_freq.ndim() != 2) {
+        throw std::runtime_error("apply_rope expects 2D cos/sin [N, D]");
+    }
+    if (x.dtype() != DataType::Float32) {
+        throw std::runtime_error("apply_rope currently only supports float32");
+    }
+
+    int B = static_cast<int>(x.shape()[0]);
+    int N = static_cast<int>(x.shape()[1]);
+    int H = static_cast<int>(x.shape()[2]);
+    int D = static_cast<int>(x.shape()[3]);
+
+    GPUArray result(x.shape(), x.dtype());
+
+    int total = B * N * H * D;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cudaStream_t stream = internal::get_capture_stream();
+
+    nn::apply_rope_f32_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const float*>(x.data()),
+        static_cast<const float*>(cos_freq.data()),
+        static_cast<const float*>(sin_freq.data()),
+        static_cast<float*>(result.data()),
+        B, N, H, D);
+
+    sync_and_check("apply_rope kernel failed");
     return result;
 }
 

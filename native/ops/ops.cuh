@@ -692,5 +692,48 @@ GPUArray col2im(
     int dil_h = 1, int dil_w = 1
 );
 
+// ============================================================================
+// FLUX-specific Operations
+// ============================================================================
+
+// LayerNorm without learnable parameters
+// input: [B, N, D] or [rows, D]
+GPUArray layer_norm_simple(const GPUArray& input, float eps = 1e-6f);
+
+// Modulate: y = x * (1 + scale) + shift
+// input: [B, N, D], scale/shift: [B, D]
+GPUArray modulate(
+    const GPUArray& input,
+    const GPUArray& scale,
+    const GPUArray& shift
+);
+
+// Gated residual: y = residual + gate * value
+// residual/value: [B, N, D], gate: [B, D]
+GPUArray gated_residual(
+    const GPUArray& residual,
+    const GPUArray& gate,
+    const GPUArray& value
+);
+
+// Scale tensor: y = x * scale
+GPUArray scale_tensor(const GPUArray& input, float scale);
+
+// Concat along axis 1: [B, N1, ...] + [B, N2, ...] -> [B, N1+N2, ...]
+// Supports 3D [B, N, D] and 4D [B, N, H, D]
+GPUArray concat_axis1(const GPUArray& a, const GPUArray& b);
+
+// Split along axis 1: [B, N, ...] -> ([B, split_size, ...], [B, N-split_size, ...])
+// Supports 3D [B, N, D] and 4D [B, N, H, D]
+std::pair<GPUArray, GPUArray> split_axis1(const GPUArray& input, int split_size);
+
+// Apply RoPE (Rotary Position Embedding)
+// x: [B, N, H, D], cos/sin: [N, D]
+GPUArray apply_rope(
+    const GPUArray& x,
+    const GPUArray& cos_freq,
+    const GPUArray& sin_freq
+);
+
 } // namespace ops
 } // namespace pygpukit

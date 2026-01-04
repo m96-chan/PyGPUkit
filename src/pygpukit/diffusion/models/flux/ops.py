@@ -18,6 +18,14 @@ from pygpukit.ops.nn.norm import rmsnorm
 from pygpukit.ops.reduction import softmax
 from pygpukit.ops.tensor import transpose_3d_012, transpose_4d_0213
 
+# Import native module for FLUX-specific kernels
+try:
+    import pygpukit._pygpukit_native as _native
+
+    _HAS_NATIVE_FLUX = True
+except ImportError:
+    _HAS_NATIVE_FLUX = False
+
 
 def gpu_linear(
     x: GPUArray,
@@ -102,7 +110,11 @@ def gpu_layer_norm(
         This is a simplified version without gamma/beta parameters,
         used in FLUX for intermediate normalization steps.
     """
-    # Fall back to numpy for now - can be optimized with custom kernel
+    if _HAS_NATIVE_FLUX and x.ndim in (2, 3):
+        result = _native.layer_norm_simple(x._native, eps)
+        return GPUArray._wrap_native(result)
+
+    # Fall back to numpy
     x_np = x.to_numpy()
     mean = np.mean(x_np, axis=-1, keepdims=True)
     var = np.var(x_np, axis=-1, keepdims=True)
@@ -149,10 +161,12 @@ def gpu_scale(x: GPUArray, scale: float) -> GPUArray:
 
     Returns:
         Scaled tensor.
-
-    Note:
-        Currently falls back to numpy. Can be optimized with custom kernel.
     """
+    if _HAS_NATIVE_FLUX:
+        result = _native.scale_tensor(x._native, scale)
+        return GPUArray._wrap_native(result)
+
+    # Fall back to numpy
     x_np = x.to_numpy()
     return from_numpy((x_np * scale).astype(x_np.dtype))
 
@@ -243,6 +257,11 @@ def gpu_modulate(
     Returns:
         Modulated output [batch, seq_len, features].
     """
+    if _HAS_NATIVE_FLUX and x.ndim == 3 and scale.ndim == 2:
+        result = _native.modulate(x._native, scale._native, shift._native)
+        return GPUArray._wrap_native(result)
+
+    # Fall back to numpy
     x_np = x.to_numpy()
     scale_np = scale.to_numpy()
     shift_np = shift.to_numpy()
@@ -271,6 +290,11 @@ def gpu_apply_rope(
     Returns:
         Rotated tensor [batch, seq_len, num_heads, head_dim].
     """
+    if _HAS_NATIVE_FLUX and x.ndim == 4 and cos.ndim == 2:
+        result = _native.apply_rope(x._native, cos._native, sin._native)
+        return GPUArray._wrap_native(result)
+
+    # Fall back to numpy
     x_np = x.to_numpy()
     cos_np = cos.to_numpy() if isinstance(cos, GPUArray) else cos
     sin_np = sin.to_numpy() if isinstance(sin, GPUArray) else sin
@@ -295,12 +319,19 @@ def gpu_concat_axis1(a: GPUArray, b: GPUArray) -> GPUArray:
     """Concatenate two tensors along axis 1.
 
     Args:
-        a: First tensor [batch, seq_a, features].
-        b: Second tensor [batch, seq_b, features].
+        a: First tensor [batch, seq_a, ...].
+        b: Second tensor [batch, seq_b, ...].
 
     Returns:
-        Concatenated tensor [batch, seq_a + seq_b, features].
+        Concatenated tensor [batch, seq_a + seq_b, ...].
+
+    Supports 3D [B, N, D] and 4D [B, N, H, D] tensors.
     """
+    if _HAS_NATIVE_FLUX and a.ndim in (3, 4) and a.ndim == b.ndim:
+        result = _native.concat_axis1(a._native, b._native)
+        return GPUArray._wrap_native(result)
+
+    # Fall back to numpy
     a_np = a.to_numpy()
     b_np = b.to_numpy()
     result = np.concatenate([a_np, b_np], axis=1)
@@ -314,16 +345,27 @@ def gpu_split_axis1(
     """Split tensor along axis 1.
 
     Args:
-        x: Input tensor [batch, seq_len, features].
+        x: Input tensor [batch, seq_len, ...].
         split_size: Size of first split.
 
     Returns:
-        Tuple of (first [batch, split_size, features],
-                  second [batch, seq_len - split_size, features]).
+        Tuple of (first [batch, split_size, ...],
+                  second [batch, seq_len - split_size, ...]).
+
+    Supports 3D [B, N, D] and 4D [B, N, H, D] tensors.
     """
+    if _HAS_NATIVE_FLUX and x.ndim in (3, 4):
+        first_native, second_native = _native.split_axis1(x._native, split_size)
+        return GPUArray._wrap_native(first_native), GPUArray._wrap_native(second_native)
+
+    # Fall back to numpy
     x_np = x.to_numpy()
-    first = x_np[:, :split_size, :]
-    second = x_np[:, split_size:, :]
+    if x.ndim == 3:
+        first = x_np[:, :split_size, :]
+        second = x_np[:, split_size:, :]
+    else:  # 4D
+        first = x_np[:, :split_size, :, :]
+        second = x_np[:, split_size:, :, :]
     return from_numpy(first.astype(np.float32)), from_numpy(second.astype(np.float32))
 
 

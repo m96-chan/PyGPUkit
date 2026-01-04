@@ -73,4 +73,51 @@ void init_nn_diffusion(py::module_& m) {
           py::arg("dil_h") = 1, py::arg("dil_w") = 1,
           "col2im for transposed convolution\n"
           "input: [N, C*K_h*K_w, H_in*W_in] -> output: [N, C, H, W]");
+
+    // ========================================================================
+    // FLUX-specific operations
+    // ========================================================================
+
+    // LayerNorm simple (no learnable params)
+    m.def("layer_norm_simple", &ops::layer_norm_simple,
+          py::arg("input"), py::arg("eps") = 1e-6f,
+          "Layer normalization without learnable parameters\n"
+          "input: [B, N, D] or [rows, D]");
+
+    // Modulate
+    m.def("modulate", &ops::modulate,
+          py::arg("input"), py::arg("scale"), py::arg("shift"),
+          "Modulate: y = x * (1 + scale) + shift\n"
+          "input: [B, N, D], scale/shift: [B, D]");
+
+    // Gated residual
+    m.def("gated_residual", &ops::gated_residual,
+          py::arg("residual"), py::arg("gate"), py::arg("value"),
+          "Gated residual: y = residual + gate * value\n"
+          "residual/value: [B, N, D], gate: [B, D]");
+
+    // Scale tensor
+    m.def("scale_tensor", &ops::scale_tensor,
+          py::arg("input"), py::arg("scale"),
+          "Scale tensor: y = x * scale");
+
+    // Concat axis 1 (3D and 4D)
+    m.def("concat_axis1", &ops::concat_axis1,
+          py::arg("a"), py::arg("b"),
+          "Concatenate along axis 1\n"
+          "3D: [B, N1, D] + [B, N2, D] -> [B, N1+N2, D]\n"
+          "4D: [B, N1, H, D] + [B, N2, H, D] -> [B, N1+N2, H, D]");
+
+    // Split axis 1 (3D and 4D)
+    m.def("split_axis1", &ops::split_axis1,
+          py::arg("input"), py::arg("split_size"),
+          "Split along axis 1\n"
+          "3D: [B, N, D] -> ([B, split_size, D], [B, N-split_size, D])\n"
+          "4D: [B, N, H, D] -> ([B, split_size, H, D], [B, N-split_size, H, D])");
+
+    // Apply RoPE
+    m.def("apply_rope", &ops::apply_rope,
+          py::arg("x"), py::arg("cos_freq"), py::arg("sin_freq"),
+          "Apply Rotary Position Embedding\n"
+          "x: [B, N, H, D], cos/sin: [N, D]");
 }
