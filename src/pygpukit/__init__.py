@@ -3,7 +3,7 @@
 __version__ = "0.2.19"
 
 # LLM support (safetensors loader)
-from pygpukit import llm, ops, profiling
+from pygpukit import llm, ops, pipeline, profiling
 from pygpukit.core.array import GPUArray
 from pygpukit.core.device import (
     DeviceInfo,
@@ -193,6 +193,8 @@ __all__ = [
     "sum_axis",
     # LLM support
     "llm",
+    # Pipeline
+    "pipeline",
     # CUDA Graph
     "CudaGraph",
     # CUDA Event
