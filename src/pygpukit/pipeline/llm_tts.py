@@ -244,15 +244,21 @@ class LLMToTTSPipeline:
 
         end_time = time.perf_counter()
 
-        # Get audio from result
-        if isinstance(result.audio, GPUArray):
+        # Get audio from result (AudioBuffer or GPUArray)
+        if hasattr(result.audio, "data"):
+            # AudioBuffer: data is GPUArray
+            audio = result.audio.data.to_numpy()
+            sample_rate = result.audio.sample_rate
+        elif isinstance(result.audio, GPUArray):
             audio = result.audio.to_numpy()
+            sample_rate = 24000  # Kokoro default
         else:
-            audio = result.audio
+            audio = np.asarray(result.audio, dtype=np.float32)
+            sample_rate = 24000
 
         return TTSChunk(
             audio=audio,
-            sample_rate=result.sample_rate,
+            sample_rate=sample_rate,
             text=text,
             start_time=start_time,
             end_time=end_time,

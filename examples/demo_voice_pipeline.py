@@ -28,6 +28,19 @@ from pathlib import Path
 import numpy as np
 
 
+def resolve_model_path(path: str) -> str:
+    """Resolve model directory to safetensors file path."""
+    p = Path(path)
+    if p.is_dir():
+        index_file = p / "model.safetensors.index.json"
+        if index_file.exists():
+            return str(index_file)
+        single_file = p / "model.safetensors"
+        if single_file.exists():
+            return str(single_file)
+    return str(p)
+
+
 def load_audio(path: str, target_sr: int = 16000) -> np.ndarray:
     """Load audio file and resample to target sample rate."""
     import scipy.io.wavfile as wav
@@ -129,7 +142,7 @@ def demo_with_audio_file(
     start = time.perf_counter()
 
     from pygpukit.asr import WhisperModel
-    from pygpukit.llm import QwenModel
+    from pygpukit.llm import load_model_from_safetensors
     from pygpukit.pipeline import VoicePipeline
     from pygpukit.tts.kokoro import KokoroModel
 
@@ -137,7 +150,7 @@ def demo_with_audio_file(
     whisper = WhisperModel.from_pretrained(whisper_path)
 
     print(f"  Loading LLM from {llm_path}...")
-    llm = QwenModel.from_safetensors(llm_path)
+    llm = load_model_from_safetensors(resolve_model_path(llm_path))
 
     print(f"  Loading TTS from {tts_path}...")
     tts = KokoroModel.from_pretrained(tts_path)

@@ -23,6 +23,19 @@ from pathlib import Path
 import numpy as np
 
 
+def resolve_model_path(path: str) -> str:
+    """Resolve model directory to safetensors file path."""
+    p = Path(path)
+    if p.is_dir():
+        index_file = p / "model.safetensors.index.json"
+        if index_file.exists():
+            return str(index_file)
+        single_file = p / "model.safetensors"
+        if single_file.exists():
+            return str(single_file)
+    return str(p)
+
+
 def save_wav(audio: np.ndarray, sample_rate: int, path: str) -> None:
     """Save audio to WAV file."""
     # Normalize to int16
@@ -102,13 +115,13 @@ def main() -> None:
     print("\nLoading models...")
     start = time.perf_counter()
 
-    from pygpukit.llm import QwenModel
+    from pygpukit.llm import load_model_from_safetensors
     from pygpukit.pipeline import LLMToTTSPipeline
     from pygpukit.tts.kokoro import KokoroModel
 
     # Load LLM
     print(f"  Loading LLM from {llm_path}...")
-    llm = QwenModel.from_safetensors(str(llm_path))
+    llm = load_model_from_safetensors(resolve_model_path(str(llm_path)))
 
     # Load TTS
     print(f"  Loading TTS from {tts_path}...")
