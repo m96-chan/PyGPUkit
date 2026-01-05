@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import re
 import time
-from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -43,10 +43,12 @@ class TTSChunk:
         return (self.end_time - self.start_time) * 1000
 
 
-class StreamingTTSCallback(ABC):
-    """Abstract callback for streaming TTS output."""
+class StreamingTTSCallback:
+    """Callback for streaming TTS output.
 
-    @abstractmethod
+    Override methods to handle events. All methods have default no-op implementations.
+    """
+
     def on_audio_chunk(self, chunk: TTSChunk) -> None:
         """Called when a new audio chunk is available.
 
