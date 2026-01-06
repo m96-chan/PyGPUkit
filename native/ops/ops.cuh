@@ -735,5 +735,47 @@ GPUArray apply_rope(
     const GPUArray& sin_freq
 );
 
+// ============================================================================
+// Convolution Operations
+// ============================================================================
+
+// Conv1d: 1D convolution
+// input: [batch, in_channels, length]
+// weight: [out_channels, in_channels, kernel_size]
+// bias: [out_channels] (optional)
+// output: [batch, out_channels, out_length]
+void conv1d(
+    const GPUArray& input,
+    const GPUArray& weight,
+    const GPUArray* bias,
+    GPUArray& output,
+    int stride,
+    int padding
+);
+
+GPUArray conv1d(
+    const GPUArray& input,
+    const GPUArray& weight,
+    const GPUArray* bias,
+    int stride,
+    int padding
+);
+
+// Convenience wrappers for pybind11
+GPUArray conv1d_no_bias(
+    const GPUArray& input,
+    const GPUArray& weight,
+    int stride,
+    int padding
+);
+
+GPUArray conv1d_with_bias(
+    const GPUArray& input,
+    const GPUArray& weight,
+    const GPUArray& bias,
+    int stride,
+    int padding
+);
+
 } // namespace ops
 } // namespace pygpukit

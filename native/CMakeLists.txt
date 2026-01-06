@@ -184,6 +184,7 @@ pybind11_add_module(${MODULE_NAME}
     # NN ops - Issue #133: Modular source files compiled as single translation unit
     # Dispatch functions are in subdirectories (*.inl) included by nn.cu
     ops/nn/nn.cu
+    ops/conv/conv1d.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu
     ops/batch/continuous_batching.cu
@@ -221,6 +222,7 @@ pybind11_add_module(${MODULE_NAME}
     bindings/nn/rope.cpp
     bindings/nn/recurrent.cpp
     bindings/nn/diffusion.cpp
+    bindings/nn/conv.cpp
     # Bindings - GEMM operations (by dtype combination)
     bindings/gemm/generic.cpp
     bindings/gemm/fp8xfp8_bf16.cpp
