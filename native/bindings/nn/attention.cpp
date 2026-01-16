@@ -39,4 +39,21 @@ void init_nn_attention(py::module_& m) {
           "SDPA with pointer-based context_len for CUDA Graph support.\n"
           "context_len_buf: GPU int32 buffer containing actual context_len.\n"
           "max_kv_len: Max context length (for shared memory allocation at graph capture).");
+
+    // Timed SDPA for benchmarking (kernel-only time via cudaEvent)
+    m.def("sdpa_causal_timed", [](const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                                   GPUArray& out, float scale) -> float {
+        float kernel_time_us = 0.0f;
+        ops::sdpa_causal_timed(Q, K, V, out, scale, &kernel_time_us);
+        return kernel_time_us;
+    }, py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("out"), py::arg("scale") = 0.0f,
+    "SDPA with kernel-only timing (for benchmarking).\n"
+    "Returns kernel execution time in microseconds (excludes host overhead).\n"
+    "Only supports BFloat16, requires SM90+ (TMA).");
+
+    // TMA cache utilities
+    m.def("print_tma_cache_stats", &ops::print_tma_cache_stats,
+          "Print TMA descriptor cache statistics (hits, misses, size).");
+    m.def("clear_tma_cache", &ops::clear_tma_cache,
+          "Clear all cached TMA descriptors.");
 }

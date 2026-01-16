@@ -280,6 +280,16 @@ void sdpa_causal_fixed_cache_ptr(const GPUArray& Q, const GPUArray& K, const GPU
                                    GPUArray& out, const GPUArray& context_len_buf,
                                    int max_kv_len, float scale = 0.0f);
 
+// SDPA with kernel-only timing (for benchmarking)
+// Returns kernel execution time in microseconds via kernel_time_us
+// Uses cudaEvent to measure ONLY kernel execution, excluding host overhead
+void sdpa_causal_timed(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                       GPUArray& out, float scale, float* kernel_time_us);
+
+// TMA descriptor cache statistics (for debugging/benchmarking)
+void print_tma_cache_stats();
+void clear_tma_cache();
+
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
 // ============================================================================

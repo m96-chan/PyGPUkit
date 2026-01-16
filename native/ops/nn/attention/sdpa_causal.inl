@@ -13,6 +13,7 @@
 #include "flash_attention_3_tma.cuh"
 #include "../../common/device.cuh"
 #include "../../common/tma_utils.cuh"
+#include "../../common/tma_descriptor_cache.cuh"
 #include <type_traits>
 
 namespace pygpukit {
@@ -105,8 +106,8 @@ static bool should_use_fa3(int head_dim, int seq_len) {
 // =============================================================================
 
 /**
- * Try to launch FA3 with TMA.
- * Creates TMA descriptors and launches the TMA kernel.
+ * Try to launch FA3 with TMA (cached descriptors).
+ * Uses TMA descriptor cache to avoid per-call overhead.
  *
  * Returns cudaSuccess if TMA launch succeeded, error code otherwise.
  */
@@ -133,24 +134,20 @@ static cudaError_t try_launch_fa3_tma(
         return cudaErrorNotSupported;
     }
 
-    // Create TMA descriptors for Q, K, V
-    // Tensor layout: [batch, num_heads, seq, head_dim] but we treat batch=1 for now
-    // For 3D input [num_heads, seq, head_dim]:
-    //   - dim0 = head_dim (innermost, contiguous)
-    //   - dim1 = seq_len
-    //   - dim2 = num_heads (outermost)
+    // Get cached TMA descriptors (device pointers)
+    // Cache key: (base_ptr, dimensions, strides, tile sizes, swizzle)
+    // On cache miss: creates host descriptor, allocates device memory, copies once
+    // On cache hit: returns existing device pointer immediately
 
-    tma::TmaDescriptor q_desc, k_desc, v_desc;
-    CUresult cu_result;
+    auto& cache = tma::TmaDescriptorCache::instance();
 
-    fprintf(stderr, "[DEBUG TMA] Creating Q descriptor...\n");
+    CUtensorMap* d_q_desc = nullptr;
+    CUtensorMap* d_k_desc = nullptr;
+    CUtensorMap* d_v_desc = nullptr;
+
     // Q: [num_heads, seq_q, head_dim]
-    // NOTE: Swizzle128B requires innermost box = 128 bytes = 64 BF16 elements
-    // Our HEAD_DIM=128 (256 bytes) doesn't match, so use SwizzleMode::None for now
-    // TODO: Either split head_dim into 2x64 loads, or use 2D descriptor per head
-    cu_result = tma::create_tma_descriptor_3d_bf16(
-        q_desc,
-        const_cast<Element*>(Q),  // base pointer
+    d_q_desc = cache.get_or_create_3d_bf16(
+        const_cast<Element*>(Q),
         head_dim,                 // dim0: head_dim
         seq_q,                    // dim1: seq_q
         num_heads,                // dim2: num_heads
@@ -158,18 +155,15 @@ static cudaError_t try_launch_fa3_tma(
         seq_q * head_dim,         // stride2: elements between heads
         Config::HEAD_DIM,         // tile0: full head_dim
         Config::TILE_Q,           // tile1: Q tile size
-        tma::SwizzleMode::None    // No swizzle until we fix tile dimensions
+        tma::SwizzleMode::None,
+        stream
     );
-    if (cu_result != CUDA_SUCCESS) {
-        fprintf(stderr, "[DEBUG TMA] Q descriptor FAILED: %d\n", cu_result);
+    if (!d_q_desc) {
         return cudaErrorUnknown;
     }
-    fprintf(stderr, "[DEBUG TMA] Q descriptor OK\n");
 
-    fprintf(stderr, "[DEBUG TMA] Creating K descriptor...\n");
     // K: [num_heads, seq_kv, head_dim]
-    cu_result = tma::create_tma_descriptor_3d_bf16(
-        k_desc,
+    d_k_desc = cache.get_or_create_3d_bf16(
         const_cast<Element*>(K),
         head_dim,
         seq_kv,
@@ -178,18 +172,15 @@ static cudaError_t try_launch_fa3_tma(
         seq_kv * head_dim,
         Config::HEAD_DIM,
         Config::TILE_KV,
-        tma::SwizzleMode::None
+        tma::SwizzleMode::None,
+        stream
     );
-    if (cu_result != CUDA_SUCCESS) {
-        fprintf(stderr, "[DEBUG TMA] K descriptor FAILED: %d\n", cu_result);
+    if (!d_k_desc) {
         return cudaErrorUnknown;
     }
-    fprintf(stderr, "[DEBUG TMA] K descriptor OK\n");
 
-    fprintf(stderr, "[DEBUG TMA] Creating V descriptor...\n");
     // V: [num_heads, seq_kv, head_dim]
-    cu_result = tma::create_tma_descriptor_3d_bf16(
-        v_desc,
+    d_v_desc = cache.get_or_create_3d_bf16(
         const_cast<Element*>(V),
         head_dim,
         seq_kv,
@@ -198,20 +189,18 @@ static cudaError_t try_launch_fa3_tma(
         seq_kv * head_dim,
         Config::HEAD_DIM,
         Config::TILE_KV,
-        tma::SwizzleMode::None
+        tma::SwizzleMode::None,
+        stream
     );
-    if (cu_result != CUDA_SUCCESS) {
-        fprintf(stderr, "[DEBUG TMA] V descriptor FAILED: %d\n", cu_result);
+    if (!d_v_desc) {
         return cudaErrorUnknown;
     }
-    fprintf(stderr, "[DEBUG TMA] V descriptor OK\n");
 
-    fprintf(stderr, "[DEBUG TMA] Launching kernel...\n");
-    // Launch TMA kernel
-    cudaError_t launch_err = launch_flash_attention_3_tma<Config>(
-        q_desc.tensor_map,
-        k_desc.tensor_map,
-        v_desc.tensor_map,
+    // Launch TMA kernel with cached device descriptors
+    return launch_flash_attention_3_tma_cached<Config>(
+        d_q_desc,
+        d_k_desc,
+        d_v_desc,
         output,
         batch_size,
         num_heads,
@@ -221,13 +210,6 @@ static cudaError_t try_launch_fa3_tma(
         causal,
         stream
     );
-    if (launch_err != cudaSuccess) {
-        fprintf(stderr, "[DEBUG TMA] Kernel launch FAILED: %s (%d)\n",
-                cudaGetErrorString(launch_err), (int)launch_err);
-    } else {
-        fprintf(stderr, "[DEBUG TMA] Kernel launch OK\n");
-    }
-    return launch_err;
 }
 
 // Flash Attention mode:
@@ -376,8 +358,6 @@ static void sdpa_causal_dispatch(
 
         switch (Q.dtype()) {
             case DataType::BFloat16:
-                fprintf(stderr, "[DEBUG] Attempting FA3 TMA launch: heads=%d, q=%d, kv=%d, hdim=%d\n",
-                        n_heads, q_len, kv_len, head_dim);
                 err = try_launch_fa3_tma<__nv_bfloat16>(
                     static_cast<const __nv_bfloat16*>(Q.data()),
                     static_cast<const __nv_bfloat16*>(K.data()),
@@ -393,11 +373,8 @@ static void sdpa_causal_dispatch(
                     stream
                 );
                 if (err == cudaSuccess) {
-                    fprintf(stderr, "[DEBUG] FA3 TMA launch SUCCESS\n");
                     return;
                 }
-                fprintf(stderr, "[DEBUG] FA3 TMA launch FAILED: %s (%d)\n",
-                        cudaGetErrorString(err), (int)err);
                 // Fall through if TMA launch failed
                 break;
 
@@ -712,6 +689,98 @@ void sdpa_causal_fixed_cache_ptr(
     }
 
     sync_and_check("sdpa_causal_fixed_cache_ptr kernel failed");
+}
+
+// =============================================================================
+// Timed SDPA (for benchmarking kernel-only time)
+// =============================================================================
+
+void sdpa_causal_timed(
+    const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+    GPUArray& out, float scale, float* kernel_time_us
+) {
+    using namespace nn::fa3::tma_kernel;
+    using Config = TmaFA3Config<120>;
+
+    // Validate inputs
+    if (Q.ndim() != 3 || K.ndim() != 3 || V.ndim() != 3 || out.ndim() != 3) {
+        throw std::runtime_error("sdpa_causal_timed expects 3D inputs [n_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("sdpa_causal_timed only supports BFloat16 (for FA3 TMA)");
+    }
+
+    int n_heads = Q.shape()[0];
+    int seq_q = Q.shape()[1];
+    int seq_kv = K.shape()[1];
+    int head_dim = Q.shape()[2];
+
+    // Check SM version
+    int sm = ops::get_sm_version();
+    if (sm < 90) {
+        throw std::runtime_error("sdpa_causal_timed requires SM90+ (TMA support)");
+    }
+
+    // Compute scale if not provided
+    if (scale <= 0.0f) {
+        scale = 1.0f / sqrtf((float)head_dim);
+    }
+
+    // Get cached TMA descriptors (device pointers)
+    auto& cache = tma::TmaDescriptorCache::instance();
+
+    CUtensorMap* d_q_desc = cache.get_or_create_3d_bf16(
+        const_cast<void*>(Q.data()),
+        head_dim, seq_q, n_heads,
+        head_dim, seq_q * head_dim,
+        Config::HEAD_DIM, Config::TILE_Q,
+        tma::SwizzleMode::None, nullptr
+    );
+    CUtensorMap* d_k_desc = cache.get_or_create_3d_bf16(
+        const_cast<void*>(K.data()),
+        head_dim, seq_kv, n_heads,
+        head_dim, seq_kv * head_dim,
+        Config::HEAD_DIM, Config::TILE_KV,
+        tma::SwizzleMode::None, nullptr
+    );
+    CUtensorMap* d_v_desc = cache.get_or_create_3d_bf16(
+        const_cast<void*>(V.data()),
+        head_dim, seq_kv, n_heads,
+        head_dim, seq_kv * head_dim,
+        Config::HEAD_DIM, Config::TILE_KV,
+        tma::SwizzleMode::None, nullptr
+    );
+
+    if (!d_q_desc || !d_k_desc || !d_v_desc) {
+        throw std::runtime_error("sdpa_causal_timed: failed to create TMA descriptors");
+    }
+
+    // Launch with timing
+    cudaError_t err = launch_flash_attention_3_tma_timed<Config>(
+        d_q_desc, d_k_desc, d_v_desc,
+        static_cast<__nv_bfloat16*>(out.data()),
+        1,  // batch_size
+        n_heads, seq_q, seq_kv,
+        scale, true,  // causal
+        nullptr,  // default stream
+        kernel_time_us
+    );
+
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("sdpa_causal_timed failed: ") + cudaGetErrorString(err));
+    }
+}
+
+// =============================================================================
+// TMA Cache Utilities
+// =============================================================================
+
+void print_tma_cache_stats() {
+    tma::TmaDescriptorCache::instance().print_stats();
+}
+
+void clear_tma_cache() {
+    tma::TmaDescriptorCache::instance().clear();
 }
 
 }  // namespace ops

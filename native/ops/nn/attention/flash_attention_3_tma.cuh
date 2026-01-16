@@ -248,26 +248,48 @@ __device__ __forceinline__ void consumer_compute_scores(
 // NO __syncthreads() inside - purely warp-synchronous.
 // This is the key optimization: 8 consumer warps process 8 rows simultaneously.
 
+// =============================================================================
+// Two-Phase Softmax to Avoid Union Race Condition
+// =============================================================================
+// CRITICAL: smem_scores (float) and smem_probs (bf16) share memory via union.
+// When multiple warps process different Q rows in parallel:
+// - Warp A reads smem_scores[row_A]
+// - Warp B writes smem_probs[row_B]
+// These can alias! E.g., smem_probs[row_B] bytes overlap smem_scores[row_A] bytes.
+//
+// FIX: Split into two phases:
+// Phase 1: ALL warps read scores, compute probs, store to REGISTERS
+// Phase 2: After sync, ALL warps write probs from registers to smem
+//
+// Register budget: 4 rows/warp * 2 elements/lane = 8 floats/lane = 32 bytes
+
 template<typename Config>
-__device__ __forceinline__ void consumer_parallel_softmax_and_rescale(
+__device__ __forceinline__ void consumer_softmax_phase1_read(
     typename Config::SharedMemory& smem,
     int kv_tile,
     int kv_len,
     int q_len,
     int warp_id,
-    int lane_id
+    int lane_id,
+    // Output: per-lane register storage for probs (max 4 rows * 2 elements = 8)
+    float* reg_probs,      // [MAX_ROWS_PER_WARP * ELEMS_PER_LANE]
+    float* reg_rescales,   // [MAX_ROWS_PER_WARP] - rescale factors per row
+    int* reg_q_indices,    // [MAX_ROWS_PER_WARP] - which q rows this warp handles
+    int& num_rows_handled
 ) {
     // Consumer warp index: warps 0-3 are producers, 4-11 are consumers
-    // Map to consumer index 0-7
     const int consumer_warp_idx = warp_id - Config::NUM_PRODUCER_WARPS;
-    if (consumer_warp_idx < 0) return;  // Not a consumer
+    if (consumer_warp_idx < 0) {
+        num_rows_handled = 0;
+        return;
+    }
 
     const int num_consumer_warps = Config::NUM_CONSUMER_WARPS;
+    constexpr int ELEMS_PER_LANE = (Config::TILE_KV + 31) / 32;  // 2 for TILE_KV=64
+
+    num_rows_handled = 0;
 
     // Each consumer warp handles different q rows in round-robin fashion
-    // Warp 0 handles rows 0, 8, 16, 24, ...
-    // Warp 1 handles rows 1, 9, 17, 25, ...
-    // etc.
     for (int q = consumer_warp_idx; q < q_len; q += num_consumer_warps) {
         float* row = smem.smem_scores + q * Config::TILE_KV;
 
@@ -282,33 +304,49 @@ __device__ __forceinline__ void consumer_parallel_softmax_and_rescale(
         for (int offset = 16; offset > 0; offset /= 2) {
             local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
         }
-        // Now all lanes have the same local_max for this row
+
+        // Store which q row we're handling
+        reg_q_indices[num_rows_handled] = q;
+
+        // === Handle fully masked rows ===
+        if (local_max == -INFINITY) {
+            // Mark with special rescale value to indicate zero-fill in phase 2
+            reg_rescales[num_rows_handled] = -INFINITY;
+            // Store zeros to registers
+            #pragma unroll
+            for (int e = 0; e < ELEMS_PER_LANE; ++e) {
+                reg_probs[num_rows_handled * ELEMS_PER_LANE + e] = 0.0f;
+            }
+            num_rows_handled++;
+            continue;
+        }
 
         // === Step 2: Online softmax update ===
         float old_max = smem.softmax_max[q];
         float new_max = fmaxf(old_max, local_max);
         float rescale = (kv_tile > 0) ? expf(old_max - new_max) : 1.0f;
+        reg_rescales[num_rows_handled] = rescale;
 
-        // === Step 3: Compute exp(x - new_max) and sum (warp-level) ===
-        // Write BF16 probs directly to smem_probs, skipping float intermediate
-        using Element = typename Config::Element;
-        Element* prob_row = smem.smem_probs + q * Config::TILE_KV;
-
+        // === Step 3: Compute exp(x - new_max) and sum, store probs to registers ===
         float local_sum = 0.0f;
         #pragma unroll
-        for (int kv = lane_id; kv < kv_len; kv += 32) {
-            float prob = expf(row[kv] - new_max);
-            prob_row[kv] = __float2bfloat16(prob);  // Write BF16 directly
-            local_sum += prob;
+        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
+            int kv = lane_id + e * 32;
+            float prob = 0.0f;
+            if (kv < kv_len) {
+                prob = expf(row[kv] - new_max);
+                local_sum += prob;
+            }
+            reg_probs[num_rows_handled * ELEMS_PER_LANE + e] = prob;
         }
+
         // Warp-level sum reduction
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             local_sum += __shfl_xor_sync(0xffffffff, local_sum, offset);
         }
-        // Now all lanes have the same local_sum for this row
 
-        // === Step 4: Update softmax state (lane 0 only writes to smem) ===
+        // === Step 4: Update softmax state (lane 0 only) ===
         if (lane_id == 0) {
             smem.softmax_max[q] = new_max;
             smem.softmax_sum[q] = smem.softmax_sum[q] * rescale + local_sum;
@@ -321,8 +359,39 @@ __device__ __forceinline__ void consumer_parallel_softmax_and_rescale(
                 smem.output_acc[q * Config::HEAD_DIM + d] *= rescale;
             }
         }
+
+        num_rows_handled++;
     }
-    // No __syncthreads() here - warp-local operations only
+}
+
+template<typename Config>
+__device__ __forceinline__ void consumer_softmax_phase2_write(
+    typename Config::SharedMemory& smem,
+    int warp_id,
+    int lane_id,
+    const float* reg_probs,
+    const int* reg_q_indices,
+    int num_rows_handled
+) {
+    const int consumer_warp_idx = warp_id - Config::NUM_PRODUCER_WARPS;
+    if (consumer_warp_idx < 0) return;
+
+    using Element = typename Config::Element;
+    constexpr int ELEMS_PER_LANE = (Config::TILE_KV + 31) / 32;
+
+    // Write probs from registers to smem_probs
+    for (int r = 0; r < num_rows_handled; ++r) {
+        int q = reg_q_indices[r];
+        Element* prob_row = smem.smem_probs + q * Config::TILE_KV;
+
+        #pragma unroll
+        for (int e = 0; e < ELEMS_PER_LANE; ++e) {
+            int kv = lane_id + e * 32;
+            if (kv < Config::TILE_KV) {
+                prob_row[kv] = __float2bfloat16(reg_probs[r * ELEMS_PER_LANE + e]);
+            }
+        }
+    }
 }
 
 // NOTE: This function is split into multiple parts to avoid __syncthreads() divergence
@@ -559,16 +628,34 @@ flash_attention_3_tma_kernel(
         }
         __syncthreads();
 
-        // === Warp-Parallel Online Softmax with Direct BF16 Output ===
-        // Each consumer warp handles DIFFERENT q rows in parallel.
-        // 8 consumer warps process 8 rows simultaneously, then iterate.
-        // Softmax writes BF16 probs directly to smem_probs (no float intermediate).
-        // This eliminates convert_scores_to_probs and saves 2 __syncthreads().
-        if (is_consumer) {
-            consumer_parallel_softmax_and_rescale<Config>(
-                smem, kv_tile, kv_len, q_len, warp_id, lane_id);
-        }
-        // Sync needed: consumer softmax wrote smem_probs, P@V matmul reads it
+        // === Two-Phase Softmax to Avoid Union Race Condition ===
+        // smem_scores (float) and smem_probs (bf16) share memory via union.
+        // Phase 1: ALL warps read scores, compute probs to REGISTERS
+        // Phase 2: After sync, ALL warps write probs from registers to smem
+        //
+        // Register storage: max 4 rows/warp * 2 elements/lane = 8 floats
+        constexpr int MAX_ROWS_PER_WARP = (Config::TILE_Q + Config::NUM_CONSUMER_WARPS - 1) / Config::NUM_CONSUMER_WARPS;
+        constexpr int ELEMS_PER_LANE = (Config::TILE_KV + 31) / 32;
+        float reg_probs[MAX_ROWS_PER_WARP * ELEMS_PER_LANE];
+        float reg_rescales[MAX_ROWS_PER_WARP];
+        int reg_q_indices[MAX_ROWS_PER_WARP];
+        int num_rows_handled = 0;
+
+        // Phase 1: Read scores and compute probs to registers
+        consumer_softmax_phase1_read<Config>(
+            smem, kv_tile, kv_len, q_len, warp_id, lane_id,
+            reg_probs, reg_rescales, reg_q_indices, num_rows_handled);
+
+        // CRITICAL SYNC: Ensure ALL score reads complete before ANY prob writes
+        // This prevents the union race condition between smem_scores and smem_probs
+        __syncthreads();
+
+        // Phase 2: Write probs from registers to smem_probs
+        consumer_softmax_phase2_write<Config>(
+            smem, warp_id, lane_id,
+            reg_probs, reg_q_indices, num_rows_handled);
+
+        // Sync needed: probs written, P@V matmul reads them
         __syncthreads();
 
         // Compute output: P @ V (only consumer warps do the matmul)
@@ -726,6 +813,151 @@ inline cudaError_t launch_flash_attention_3_tma(
 template cudaError_t launch_flash_attention_3_tma<TmaFA3Config<120>>(
     CUtensorMap, CUtensorMap, CUtensorMap,
     __nv_bfloat16*, int, int, int, int, float, bool, cudaStream_t);
+
+// =============================================================================
+// Optimized Launch (Cached Descriptors, No Per-Call Overhead)
+// =============================================================================
+
+/**
+ * Launch FA3 TMA kernel with pre-cached device descriptors.
+ * - No cudaMalloc/cudaFree per call
+ * - No cudaMemcpy per call
+ * - No cudaStreamSynchronize (caller decides when to sync)
+ *
+ * This is the fast path for repeated calls with same tensor shapes.
+ */
+template<typename Config>
+inline cudaError_t launch_flash_attention_3_tma_cached(
+    CUtensorMap* d_q_desc,   // Device pointer (cached)
+    CUtensorMap* d_k_desc,   // Device pointer (cached)
+    CUtensorMap* d_v_desc,   // Device pointer (cached)
+    typename Config::Element* output,
+    int batch_size,
+    int num_heads,
+    int seq_q,
+    int seq_kv,
+    float scale,
+    bool causal,
+    cudaStream_t stream,
+    bool verbose = false
+) {
+    int num_q_tiles = (seq_q + Config::TILE_Q - 1) / Config::TILE_Q;
+    dim3 grid(num_q_tiles, num_heads, batch_size);
+    dim3 block(Config::NUM_THREADS);
+
+    size_t smem_size = Config::SharedMemory::size();
+
+    if (verbose) {
+        fprintf(stderr, "[TMA CACHED] grid=(%d,%d,%d) block=%d smem=%zu\n",
+                grid.x, grid.y, grid.z, block.x, smem_size);
+    }
+
+    // Set shared memory configuration (cached after first call by CUDA runtime)
+    static bool smem_configured = false;
+    if (!smem_configured) {
+        cudaError_t attr_err = cudaFuncSetAttribute(
+            flash_attention_3_tma_kernel<Config>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            smem_size
+        );
+        if (attr_err != cudaSuccess) {
+            fprintf(stderr, "[TMA CACHED] cudaFuncSetAttribute FAILED: %s\n",
+                    cudaGetErrorString(attr_err));
+            return attr_err;
+        }
+        smem_configured = true;
+    }
+
+    // Launch kernel (no sync, no malloc, no memcpy)
+    flash_attention_3_tma_kernel<Config><<<grid, block, smem_size, stream>>>(
+        d_q_desc, d_k_desc, d_v_desc, output,
+        batch_size, num_heads, seq_q, seq_kv,
+        scale, causal
+    );
+
+    return cudaGetLastError();
+}
+
+// Explicit template instantiation
+template cudaError_t launch_flash_attention_3_tma_cached<TmaFA3Config<120>>(
+    CUtensorMap*, CUtensorMap*, CUtensorMap*,
+    __nv_bfloat16*, int, int, int, int, float, bool, cudaStream_t, bool);
+
+// =============================================================================
+// Kernel Timing with CUDA Events
+// =============================================================================
+
+/**
+ * Launch FA3 TMA kernel with CUDA event timing.
+ * Returns kernel execution time in microseconds.
+ *
+ * @param kernel_time_us  Output: kernel execution time in microseconds
+ * @return                cudaSuccess on success
+ */
+template<typename Config>
+inline cudaError_t launch_flash_attention_3_tma_timed(
+    CUtensorMap* d_q_desc,
+    CUtensorMap* d_k_desc,
+    CUtensorMap* d_v_desc,
+    typename Config::Element* output,
+    int batch_size,
+    int num_heads,
+    int seq_q,
+    int seq_kv,
+    float scale,
+    bool causal,
+    cudaStream_t stream,
+    float* kernel_time_us
+) {
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    int num_q_tiles = (seq_q + Config::TILE_Q - 1) / Config::TILE_Q;
+    dim3 grid(num_q_tiles, num_heads, batch_size);
+    dim3 block(Config::NUM_THREADS);
+    size_t smem_size = Config::SharedMemory::size();
+
+    // Set shared memory (cached after first call)
+    static bool smem_configured = false;
+    if (!smem_configured) {
+        cudaFuncSetAttribute(
+            flash_attention_3_tma_kernel<Config>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            smem_size
+        );
+        smem_configured = true;
+    }
+
+    // Record start event
+    cudaEventRecord(start, stream);
+
+    // Launch kernel
+    flash_attention_3_tma_kernel<Config><<<grid, block, smem_size, stream>>>(
+        d_q_desc, d_k_desc, d_v_desc, output,
+        batch_size, num_heads, seq_q, seq_kv,
+        scale, causal
+    );
+
+    // Record stop event
+    cudaEventRecord(stop, stream);
+    cudaEventSynchronize(stop);
+
+    // Calculate elapsed time
+    float ms;
+    cudaEventElapsedTime(&ms, start, stop);
+    *kernel_time_us = ms * 1000.0f;
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    return cudaGetLastError();
+}
+
+// Explicit template instantiation
+template cudaError_t launch_flash_attention_3_tma_timed<TmaFA3Config<120>>(
+    CUtensorMap*, CUtensorMap*, CUtensorMap*,
+    __nv_bfloat16*, int, int, int, int, float, bool, cudaStream_t, float*);
 
 }  // namespace tma_kernel
 }  // namespace fa3
