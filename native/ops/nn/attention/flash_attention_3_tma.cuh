@@ -200,11 +200,16 @@ __device__ __forceinline__ void consumer_compute_scores(
     constexpr int N_TILES = Config::TILE_KV / WMMA_N;
     constexpr int K_TILES = Config::HEAD_DIM / WMMA_K;
 
-    int warp_id = tid / 32;
-    int num_warps = num_threads / 32;
+    // Use consumer-relative warp index (0-7) instead of global warp_id (4-11)
+    // This ensures all tiles 0 to M_TILES*N_TILES-1 are covered
+    int global_warp_id = tid / 32;
+    int consumer_warp_idx = global_warp_id - Config::NUM_PRODUCER_WARPS;
+    if (consumer_warp_idx < 0) return;  // Producer warps should not call this
 
-    // Each warp handles some score tiles
-    for (int tile_idx = warp_id; tile_idx < M_TILES * N_TILES; tile_idx += num_warps) {
+    constexpr int num_consumer_warps = Config::NUM_CONSUMER_WARPS;
+
+    // Each consumer warp handles tiles in round-robin fashion
+    for (int tile_idx = consumer_warp_idx; tile_idx < M_TILES * N_TILES; tile_idx += num_consumer_warps) {
         int m_tile = tile_idx / N_TILES;
         int n_tile = tile_idx % N_TILES;
 
@@ -234,6 +239,90 @@ __device__ __forceinline__ void consumer_compute_scores(
         }
         store_matrix_sync(score_ptr, acc_frag, Config::TILE_KV, mem_row_major);
     }
+}
+
+// =============================================================================
+// Warp-Parallel Online Softmax
+// =============================================================================
+// Each consumer warp handles DIFFERENT q rows in parallel.
+// NO __syncthreads() inside - purely warp-synchronous.
+// This is the key optimization: 8 consumer warps process 8 rows simultaneously.
+
+template<typename Config>
+__device__ __forceinline__ void consumer_parallel_softmax_and_rescale(
+    typename Config::SharedMemory& smem,
+    int kv_tile,
+    int kv_len,
+    int q_len,
+    int warp_id,
+    int lane_id
+) {
+    // Consumer warp index: warps 0-3 are producers, 4-11 are consumers
+    // Map to consumer index 0-7
+    const int consumer_warp_idx = warp_id - Config::NUM_PRODUCER_WARPS;
+    if (consumer_warp_idx < 0) return;  // Not a consumer
+
+    const int num_consumer_warps = Config::NUM_CONSUMER_WARPS;
+
+    // Each consumer warp handles different q rows in round-robin fashion
+    // Warp 0 handles rows 0, 8, 16, 24, ...
+    // Warp 1 handles rows 1, 9, 17, 25, ...
+    // etc.
+    for (int q = consumer_warp_idx; q < q_len; q += num_consumer_warps) {
+        float* row = smem.smem_scores + q * Config::TILE_KV;
+
+        // === Step 1: Find row maximum (warp-level reduction) ===
+        float local_max = -INFINITY;
+        #pragma unroll
+        for (int kv = lane_id; kv < kv_len; kv += 32) {
+            local_max = fmaxf(local_max, row[kv]);
+        }
+        // Warp-level max reduction
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
+        }
+        // Now all lanes have the same local_max for this row
+
+        // === Step 2: Online softmax update ===
+        float old_max = smem.softmax_max[q];
+        float new_max = fmaxf(old_max, local_max);
+        float rescale = (kv_tile > 0) ? expf(old_max - new_max) : 1.0f;
+
+        // === Step 3: Compute exp(x - new_max) and sum (warp-level) ===
+        // Write BF16 probs directly to smem_probs, skipping float intermediate
+        using Element = typename Config::Element;
+        Element* prob_row = smem.smem_probs + q * Config::TILE_KV;
+
+        float local_sum = 0.0f;
+        #pragma unroll
+        for (int kv = lane_id; kv < kv_len; kv += 32) {
+            float prob = expf(row[kv] - new_max);
+            prob_row[kv] = __float2bfloat16(prob);  // Write BF16 directly
+            local_sum += prob;
+        }
+        // Warp-level sum reduction
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            local_sum += __shfl_xor_sync(0xffffffff, local_sum, offset);
+        }
+        // Now all lanes have the same local_sum for this row
+
+        // === Step 4: Update softmax state (lane 0 only writes to smem) ===
+        if (lane_id == 0) {
+            smem.softmax_max[q] = new_max;
+            smem.softmax_sum[q] = smem.softmax_sum[q] * rescale + local_sum;
+        }
+
+        // === Step 5: Rescale output accumulator if needed ===
+        if (kv_tile > 0 && rescale != 1.0f) {
+            #pragma unroll
+            for (int d = lane_id; d < Config::HEAD_DIM; d += 32) {
+                smem.output_acc[q * Config::HEAD_DIM + d] *= rescale;
+            }
+        }
+    }
+    // No __syncthreads() here - warp-local operations only
 }
 
 // NOTE: This function is split into multiple parts to avoid __syncthreads() divergence
@@ -289,11 +378,16 @@ __device__ __forceinline__ void consumer_compute_output_matmul(
     constexpr int N_TILES = Config::HEAD_DIM / WMMA_N;
     constexpr int K_TILES = Config::TILE_KV / WMMA_K;
 
-    int warp_id = tid / 32;
-    int num_warps = num_threads / 32;
+    // Use consumer-relative warp index (0-7) instead of global warp_id (4-11)
+    // This ensures all tiles 0 to M_TILES*N_TILES-1 are covered
+    int global_warp_id = tid / 32;
+    int consumer_warp_idx = global_warp_id - Config::NUM_PRODUCER_WARPS;
+    if (consumer_warp_idx < 0) return;  // Producer warps should not call this
 
-    // Each warp handles some output tiles (NO __syncthreads in here)
-    for (int tile_idx = warp_id; tile_idx < M_TILES * N_TILES; tile_idx += num_warps) {
+    constexpr int num_consumer_warps = Config::NUM_CONSUMER_WARPS;
+
+    // Each consumer warp handles output tiles in round-robin fashion (NO __syncthreads)
+    for (int tile_idx = consumer_warp_idx; tile_idx < M_TILES * N_TILES; tile_idx += num_consumer_warps) {
         int m_tile = tile_idx / N_TILES;
         int n_tile = tile_idx % N_TILES;
 
@@ -465,56 +559,20 @@ flash_attention_3_tma_kernel(
         }
         __syncthreads();
 
-        // Online softmax (only consumer warps)
+        // === Warp-Parallel Online Softmax with Direct BF16 Output ===
+        // Each consumer warp handles DIFFERENT q rows in parallel.
+        // 8 consumer warps process 8 rows simultaneously, then iterate.
+        // Softmax writes BF16 probs directly to smem_probs (no float intermediate).
+        // This eliminates convert_scores_to_probs and saves 2 __syncthreads().
         if (is_consumer) {
-            for (int q = 0; q < q_len; ++q) {
-                float* row = smem.smem_scores + q * Config::TILE_KV;
-
-                // Find max
-                float local_max = -INFINITY;
-                for (int kv = lane_id; kv < kv_len; kv += 32) {
-                    local_max = fmaxf(local_max, row[kv]);
-                }
-                for (int offset = 16; offset > 0; offset /= 2) {
-                    local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-                }
-
-                float old_max = smem.softmax_max[q];
-                float new_max = fmaxf(old_max, local_max);
-                float rescale = (kv_tile > 0) ? expf(old_max - new_max) : 1.0f;
-
-                // Compute exp and sum
-                float local_sum = 0.0f;
-                for (int kv = lane_id; kv < kv_len; kv += 32) {
-                    float prob = expf(row[kv] - new_max);
-                    row[kv] = prob;
-                    local_sum += prob;
-                }
-                for (int offset = 16; offset > 0; offset /= 2) {
-                    local_sum += __shfl_xor_sync(0xffffffff, local_sum, offset);
-                }
-
-                // Update state (lane 0 only)
-                if (lane_id == 0) {
-                    smem.softmax_max[q] = new_max;
-                    smem.softmax_sum[q] = smem.softmax_sum[q] * rescale + local_sum;
-                }
-
-                // Rescale output accumulator
-                if (kv_tile > 0 && rescale != 1.0f) {
-                    for (int d = lane_id; d < Config::HEAD_DIM; d += 32) {
-                        smem.output_acc[q * Config::HEAD_DIM + d] *= rescale;
-                    }
-                }
-            }
+            consumer_parallel_softmax_and_rescale<Config>(
+                smem, kv_tile, kv_len, q_len, warp_id, lane_id);
         }
+        // Sync needed: consumer softmax wrote smem_probs, P@V matmul reads it
         __syncthreads();
 
-        // Compute output: P @ V
-        // Step 1: Convert scores to probs (ALL threads participate to avoid sync divergence)
-        convert_scores_to_probs<Config>(smem, tid, Config::NUM_THREADS);
-
-        // Step 2: Compute P @ V (only consumer warps do the matmul)
+        // Compute output: P @ V (only consumer warps do the matmul)
+        // BF16 probs already in smem_probs from softmax above
         if (is_consumer) {
             consumer_compute_output_matmul<Config>(smem, read_stage, tid, Config::NUM_THREADS);
         }
