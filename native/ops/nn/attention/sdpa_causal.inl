@@ -5,11 +5,15 @@
  * - Standard SDPA (O(n^2) memory)
  * - Flash Attention 2 (O(n) memory, tiled computation)
  * - Flash Attention 3 (SM120+, MMA-based, warp specialization)
+ * - Flash Attention 3 TMA (SM90+, async TMA loading)
  * - Flash-Decoding (optimized for decode phase with q_len=1)
  */
 
 #include "flash_attention_3.cuh"
+#include "flash_attention_3_tma.cuh"
 #include "../../common/device.cuh"
+#include "../../common/tma_utils.cuh"
+#include <type_traits>
 
 namespace pygpukit {
 namespace ops {
@@ -30,6 +34,45 @@ static int get_fa3_mode() {
         }
     }
     return cached;
+}
+
+// PYGPUKIT_FA3_TMA: 0=off, 1=on (use TMA variant), -1=auto (default: on for SM90+)
+static int get_fa3_tma_mode() {
+    static int cached = -999;
+    if (cached == -999) {
+        const char* env = std::getenv("PYGPUKIT_FA3_TMA");
+        if (env) {
+            cached = std::atoi(env);
+        } else {
+            cached = -1;  // Auto mode by default
+        }
+    }
+    return cached;
+}
+
+// Check if FA3 TMA should be used
+static bool should_use_fa3_tma(int head_dim, int seq_len) {
+    int tma_mode = get_fa3_tma_mode();
+
+    // Force off
+    if (tma_mode == 0) return false;
+
+    // Check SM version (TMA requires SM90+)
+    static int sm_version = -1;
+    if (sm_version == -1) {
+        sm_version = ops::get_sm_version();
+    }
+
+    if (sm_version < 90) return false;
+
+    // Currently only support head_dim=128
+    if (head_dim != 128) return false;
+
+    // Force on
+    if (tma_mode == 1) return true;
+
+    // Auto mode: use TMA for sequences > 512 on SM90+
+    return seq_len > 512;
 }
 
 // Check if FA3 should be used
@@ -55,6 +98,116 @@ static bool should_use_fa3(int head_dim, int seq_len) {
 
     // Auto mode: use FA3 for sequences > 256 on SM120+
     return seq_len > 256;
+}
+
+// =============================================================================
+// FA3 TMA Launcher
+// =============================================================================
+
+/**
+ * Try to launch FA3 with TMA.
+ * Creates TMA descriptors and launches the TMA kernel.
+ *
+ * Returns cudaSuccess if TMA launch succeeded, error code otherwise.
+ */
+template<typename Element>
+static cudaError_t try_launch_fa3_tma(
+    const Element* Q,
+    const Element* K,
+    const Element* V,
+    Element* output,
+    int batch_size,
+    int num_heads,
+    int seq_q,
+    int seq_kv,
+    int head_dim,
+    float scale,
+    bool causal,
+    cudaStream_t stream
+) {
+    using namespace nn::fa3::tma_kernel;
+    using Config = TmaFA3Config<120>;
+
+    // Only support BF16 for now
+    if constexpr (!std::is_same_v<Element, __nv_bfloat16>) {
+        return cudaErrorNotSupported;
+    }
+
+    // Create TMA descriptors for Q, K, V
+    // Tensor layout: [batch, num_heads, seq, head_dim] but we treat batch=1 for now
+    // For 3D input [num_heads, seq, head_dim]:
+    //   - dim0 = head_dim (innermost, contiguous)
+    //   - dim1 = seq_len
+    //   - dim2 = num_heads (outermost)
+
+    tma::TmaDescriptor q_desc, k_desc, v_desc;
+    CUresult cu_result;
+
+    // Q: [num_heads, seq_q, head_dim]
+    cu_result = tma::create_tma_descriptor_3d_bf16(
+        q_desc,
+        const_cast<Element*>(Q),  // base pointer
+        head_dim,                 // dim0: head_dim
+        seq_q,                    // dim1: seq_q
+        num_heads,                // dim2: num_heads
+        head_dim,                 // stride1: elements between seq positions
+        seq_q * head_dim,         // stride2: elements between heads
+        Config::HEAD_DIM,         // tile0: full head_dim
+        Config::TILE_Q,           // tile1: Q tile size
+        tma::SwizzleMode::Swizzle128B
+    );
+    if (cu_result != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+
+    // K: [num_heads, seq_kv, head_dim]
+    cu_result = tma::create_tma_descriptor_3d_bf16(
+        k_desc,
+        const_cast<Element*>(K),
+        head_dim,
+        seq_kv,
+        num_heads,
+        head_dim,
+        seq_kv * head_dim,
+        Config::HEAD_DIM,
+        Config::TILE_KV,
+        tma::SwizzleMode::Swizzle128B
+    );
+    if (cu_result != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+
+    // V: [num_heads, seq_kv, head_dim]
+    cu_result = tma::create_tma_descriptor_3d_bf16(
+        v_desc,
+        const_cast<Element*>(V),
+        head_dim,
+        seq_kv,
+        num_heads,
+        head_dim,
+        seq_kv * head_dim,
+        Config::HEAD_DIM,
+        Config::TILE_KV,
+        tma::SwizzleMode::Swizzle128B
+    );
+    if (cu_result != CUDA_SUCCESS) {
+        return cudaErrorUnknown;
+    }
+
+    // Launch TMA kernel
+    return launch_flash_attention_3_tma<Config>(
+        q_desc.tensor_map,
+        k_desc.tensor_map,
+        v_desc.tensor_map,
+        output,
+        batch_size,
+        num_heads,
+        seq_q,
+        seq_kv,
+        scale,
+        causal,
+        stream
+    );
 }
 
 // Flash Attention mode:
@@ -190,6 +343,39 @@ static void sdpa_causal_dispatch(
                 return;
             default:
                 // Fall through to standard SDPA for unsupported dtypes
+                break;
+        }
+    }
+
+    // =========================================================================
+    // Flash Attention 3 TMA (SM90+, async TMA loading)
+    // =========================================================================
+    // Try TMA variant first if enabled and supported
+    if (should_use_fa3_tma(head_dim, kv_len)) {
+        cudaError_t err = cudaSuccess;
+
+        switch (Q.dtype()) {
+            case DataType::BFloat16:
+                err = try_launch_fa3_tma<__nv_bfloat16>(
+                    static_cast<const __nv_bfloat16*>(Q.data()),
+                    static_cast<const __nv_bfloat16*>(K.data()),
+                    static_cast<const __nv_bfloat16*>(V.data()),
+                    static_cast<__nv_bfloat16*>(result.data()),
+                    1,              // batch_size = 1
+                    n_heads,
+                    q_len,
+                    kv_len,
+                    head_dim,
+                    scale,
+                    true,           // causal = true
+                    stream
+                );
+                if (err == cudaSuccess) return;
+                // Fall through if TMA launch failed
+                break;
+
+            default:
+                // TMA only supports BF16 for now
                 break;
         }
     }

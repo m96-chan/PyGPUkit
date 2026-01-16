@@ -344,7 +344,8 @@ flash_attention_3_tma_kernel(
         if (warp_id == 0) {
             barrier_arrive_expect_tx(smem.barriers[0],
                 Config::TILE_Q * Config::HEAD_DIM * sizeof(Element));
-            tma_load_2d(&q_desc, smem.smem_q, &smem.barriers[0], q_start, head_idx);
+            // 3D coordinates: (dim0=0, dim1=q_start, dim2=head_idx)
+            tma_load_3d(&q_desc, smem.smem_q, &smem.barriers[0], 0, q_start, head_idx);
         }
     }
 
@@ -368,10 +369,11 @@ flash_attention_3_tma_kernel(
             }
 
             // Producer warp 0-1: K, warp 2-3: V
+            // 3D coordinates: (dim0=0, dim1=kv_start, dim2=head_idx)
             if (warp_id < 2) {
-                tma_load_2d(&k_desc, smem.smem_k[write_stage], &smem.barriers[write_stage], kv_start, head_idx);
+                tma_load_3d(&k_desc, smem.smem_k[write_stage], &smem.barriers[write_stage], 0, kv_start, head_idx);
             } else if (warp_id < 4) {
-                tma_load_2d(&v_desc, smem.smem_v[write_stage], &smem.barriers[write_stage], kv_start, head_idx);
+                tma_load_3d(&v_desc, smem.smem_v[write_stage], &smem.barriers[write_stage], 0, kv_start, head_idx);
             }
         }
         write_stage = (write_stage + 1) % Config::NUM_STAGES;
@@ -461,10 +463,11 @@ flash_attention_3_tma_kernel(
                 barrier_arrive_expect_tx(smem.barriers[write_stage], tx_bytes);
             }
 
+            // 3D coordinates: (dim0=0, dim1=next_kv_start, dim2=head_idx)
             if (warp_id < 2) {
-                tma_load_2d(&k_desc, smem.smem_k[write_stage], &smem.barriers[write_stage], next_kv_start, head_idx);
+                tma_load_3d(&k_desc, smem.smem_k[write_stage], &smem.barriers[write_stage], 0, next_kv_start, head_idx);
             } else if (warp_id < 4) {
-                tma_load_2d(&v_desc, smem.smem_v[write_stage], &smem.barriers[write_stage], next_kv_start, head_idx);
+                tma_load_3d(&v_desc, smem.smem_v[write_stage], &smem.barriers[write_stage], 0, next_kv_start, head_idx);
             }
 
             write_stage = (write_stage + 1) % Config::NUM_STAGES;
