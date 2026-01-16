@@ -154,6 +154,24 @@ GPUArray rmsnorm(const GPUArray& input, const GPUArray& gamma, float eps = 1e-5f
 // RMSNorm with output buffer (for CUDA Graph capture)
 void rmsnorm(const GPUArray& input, const GPUArray& gamma, GPUArray& out, float eps = 1e-5f);
 
+// L2 Norm (Llama4TextL2Norm): y = x * rsqrt(mean(x^2) + eps)
+// Unlike RMSNorm, no gamma scaling is applied.
+// Used for QK normalization in Llama 4 attention.
+GPUArray l2norm(const GPUArray& input, float eps = 1e-6f);
+void l2norm(const GPUArray& input, GPUArray& out, float eps = 1e-6f);
+
+// iRoPE Q scaling (Llama 4)
+// Formula: scale = log1p(floor((pos + 1) / floor_scale)) * attn_scale + 1.0
+// Q: [seq_len, num_heads, head_dim], positions: [seq_len]
+GPUArray irope_scale_q(const GPUArray& Q, const GPUArray& positions,
+                       float attn_scale = 0.1f, float floor_scale = 8192.0f);
+
+// SDPA with iRoPE temperature scaling (Llama 4)
+// Q: [n_heads, q_len, head_dim], K/V: [n_kv_heads, kv_len, head_dim]
+GPUArray sdpa_irope(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                    const GPUArray& positions, float attn_scale = 0.1f,
+                    float floor_scale = 8192.0f, int causal_offset = 0);
+
 // SiLU (Swish) activation: y = x * sigmoid(x)
 GPUArray silu(const GPUArray& input);
 

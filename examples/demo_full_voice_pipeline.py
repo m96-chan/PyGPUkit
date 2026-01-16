@@ -69,7 +69,7 @@ def save_wav(audio: np.ndarray, sample_rate: int, path: str) -> None:
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(audio_int16.tobytes())
 
-    print(f"Saved: {path} ({len(audio)/sample_rate:.2f}s)")
+    print(f"Saved: {path} ({len(audio) / sample_rate:.2f}s)")
 
 
 def demo_tts_only(tts_path: str, output_dir: str) -> None:
@@ -95,7 +95,7 @@ def demo_tts_only(tts_path: str, output_dir: str) -> None:
     Path(output_dir).mkdir(exist_ok=True)
 
     for i, text in enumerate(sentences):
-        print(f"\n[{i+1}/{len(sentences)}] Synthesizing: '{text[:40]}...'")
+        print(f"\n[{i + 1}/{len(sentences)}] Synthesizing: '{text[:40]}...'")
 
         start = time.perf_counter()
         result = tts.synthesize(text)
@@ -118,7 +118,7 @@ def demo_tts_only(tts_path: str, output_dir: str) -> None:
 
         print(f"  Duration: {duration:.2f}s, Time: {elapsed:.2f}s, RTF: {rtf:.2f}x")
 
-        output_path = f"{output_dir}/tts_demo_{i+1}.wav"
+        output_path = f"{output_dir}/tts_demo_{i + 1}.wav"
         save_wav(audio, sample_rate, output_path)
 
     print("\nTTS demo complete!")
@@ -174,7 +174,7 @@ def demo_llm_tts(llm_path: str, tts_path: str, output_dir: str) -> None:
     for i, chunk in enumerate(pipeline.generate_speech(prompt, max_new_tokens=64)):
         sample_rate = chunk.sample_rate
         audio_chunks.append(chunk.audio)
-        print(f"  Chunk {i+1}: '{chunk.text[:30]}...' ({chunk.duration_ms:.0f}ms)")
+        print(f"  Chunk {i + 1}: '{chunk.text[:30]}...' ({chunk.duration_ms:.0f}ms)")
 
     total_time = time.perf_counter() - start
 
@@ -184,7 +184,7 @@ def demo_llm_tts(llm_path: str, tts_path: str, output_dir: str) -> None:
         save_wav(audio, sample_rate, output_path)
 
         print(f"\nTotal time: {total_time:.2f}s")
-        print(f"Audio duration: {len(audio)/sample_rate:.2f}s")
+        print(f"Audio duration: {len(audio) / sample_rate:.2f}s")
 
     # Print stats
     stats = pipeline.stats
@@ -232,7 +232,9 @@ def demo_vad() -> None:
 
     # Process in chunks
     chunk_size = int(0.1 * sample_rate)  # 100ms chunks
-    print(f"Processing {len(audio)/sample_rate:.1f}s audio in {chunk_size/sample_rate*1000:.0f}ms chunks...")
+    print(
+        f"Processing {len(audio) / sample_rate:.1f}s audio in {chunk_size / sample_rate * 1000:.0f}ms chunks..."
+    )
 
     for i in range(0, len(audio), chunk_size):
         chunk = audio[i : i + chunk_size].astype(np.float32)
@@ -247,9 +249,7 @@ def demo_vad() -> None:
     print("\nVAD demo complete!")
 
 
-def demo_full_pipeline_simulate(
-    llm_path: str, tts_path: str, output_dir: str
-) -> None:
+def demo_full_pipeline_simulate(llm_path: str, tts_path: str, output_dir: str) -> None:
     """Demo 4: Full pipeline with simulated speech input."""
     print("=" * 60)
     print("Demo 4: Full Voice Pipeline (Simulated)")

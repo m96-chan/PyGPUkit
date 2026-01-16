@@ -16,7 +16,9 @@
 #include "gemm/bf16_bf16/generic/bf16_wmma.cuh"
 #include "gemm/bf16_bf16/generic/bf16_wmma_generic.cuh"
 #include "cublaslt.cuh"
+#if PYGPUKIT_HAS_CUTLASS
 #include "gemm/bf16_bf16/sm80/bf16_cutlass.cuh"
+#endif
 
 #include <cstdlib>
 #include <algorithm>

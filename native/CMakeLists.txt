@@ -223,6 +223,7 @@ pybind11_add_module(${MODULE_NAME}
     bindings/nn/recurrent.cpp
     bindings/nn/diffusion.cpp
     bindings/nn/conv.cpp
+    bindings/nn/llama4.cpp
     # Bindings - GEMM operations (by dtype combination)
     bindings/gemm/generic.cpp
     bindings/gemm/fp8xfp8_bf16.cpp

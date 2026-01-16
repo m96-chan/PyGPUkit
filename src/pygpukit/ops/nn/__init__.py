@@ -42,6 +42,13 @@ from pygpukit.ops.nn.norm import (
     rmsnorm,
 )
 
+# Llama4 specific operations
+from pygpukit.ops.nn.llama4 import (
+    irope_scale_q,
+    l2norm,
+    sdpa_irope,
+)
+
 # Recurrent operations
 from pygpukit.ops.nn.recurrent import (
     lstm_bidirectional,
@@ -75,6 +82,10 @@ __all__ = [
     # Normalization
     "layernorm",
     "rmsnorm",
+    "l2norm",
+    # Llama4
+    "irope_scale_q",
+    "sdpa_irope",
     # Attention
     "sdpa_causal",
     "sdpa_causal_fixed_cache",
