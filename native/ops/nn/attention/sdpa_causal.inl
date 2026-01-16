@@ -11,6 +11,7 @@
 
 #include "flash_attention_3.cuh"
 #include "flash_attention_3_tma.cuh"
+#include "flash_attention_3_sm120.cuh"
 #include "../../common/device.cuh"
 #include "../../common/tma_utils.cuh"
 #include "../../common/tma_descriptor_cache.cuh"
@@ -22,6 +23,29 @@ namespace ops {
 // =============================================================================
 // Flash Attention 3 Environment Control
 // =============================================================================
+
+// PYGPUKIT_FA3_SM120_VERSION: 0-4 to select SM120 config version
+// 0 = baseline (TILE_Q=32, TILE_KV=64, 2-stage, 4+8 warps)
+// 1 = TILE_Q=64
+// 2 = 3-stage pipeline
+// 3 = 2+10 warps
+// 4 = TILE_KV=128
+static int get_fa3_sm120_version() {
+    static int cached = -1;
+    if (cached == -1) {
+        const char* env = std::getenv("PYGPUKIT_FA3_SM120_VERSION");
+        if (env) {
+            cached = std::atoi(env);
+            if (cached < 0 || cached > 4) {
+                fprintf(stderr, "[FA3 SM120] Invalid version %d, using 0\n", cached);
+                cached = 0;
+            }
+        } else {
+            cached = 0;  // Default: baseline
+        }
+    }
+    return cached;
+}
 
 // PYGPUKIT_FA3: 0=off, 1=on (auto on SM120+), -1=auto (default)
 static int get_fa3_mode() {
@@ -102,17 +126,145 @@ static bool should_use_fa3(int head_dim, int seq_len) {
 }
 
 // =============================================================================
-// FA3 TMA Launcher
+// FA3 TMA Launcher (SM120 Version Dispatch)
 // =============================================================================
+
+/**
+ * Inner launcher template - uses specific SM120 config version.
+ */
+template<typename Element, typename Config>
+static cudaError_t try_launch_fa3_tma_impl(
+    const Element* Q,
+    const Element* K,
+    const Element* V,
+    Element* output,
+    int batch_size,
+    int num_heads,
+    int seq_q,
+    int seq_kv,
+    int head_dim,
+    float scale,
+    bool causal,
+    cudaStream_t stream
+) {
+    // Only support BF16 for now
+    if constexpr (!std::is_same_v<Element, __nv_bfloat16>) {
+        return cudaErrorNotSupported;
+    }
+
+    auto& cache = tma::TmaDescriptorCache::instance();
+
+    CUtensorMap* d_q_desc = nullptr;
+    CUtensorMap* d_k_desc = nullptr;
+    CUtensorMap* d_v_desc = nullptr;
+
+    // Q: [num_heads, seq_q, head_dim]
+    d_q_desc = cache.get_or_create_3d_bf16(
+        const_cast<Element*>(Q),
+        head_dim,
+        seq_q,
+        num_heads,
+        head_dim,
+        seq_q * head_dim,
+        Config::HEAD_DIM,
+        Config::TILE_Q,
+        tma::SwizzleMode::None,
+        stream
+    );
+    if (!d_q_desc) return cudaErrorUnknown;
+
+    // K: [num_heads, seq_kv, head_dim]
+    d_k_desc = cache.get_or_create_3d_bf16(
+        const_cast<Element*>(K),
+        head_dim,
+        seq_kv,
+        num_heads,
+        head_dim,
+        seq_kv * head_dim,
+        Config::HEAD_DIM,
+        Config::TILE_KV,
+        tma::SwizzleMode::None,
+        stream
+    );
+    if (!d_k_desc) return cudaErrorUnknown;
+
+    // V: [num_heads, seq_kv, head_dim]
+    d_v_desc = cache.get_or_create_3d_bf16(
+        const_cast<Element*>(V),
+        head_dim,
+        seq_kv,
+        num_heads,
+        head_dim,
+        seq_kv * head_dim,
+        Config::HEAD_DIM,
+        Config::TILE_KV,
+        tma::SwizzleMode::None,
+        stream
+    );
+    if (!d_v_desc) return cudaErrorUnknown;
+
+    // Use SM120 namespace for versioned launch
+    return nn::fa3_sm120::launch_flash_attention_3_tma_cached<Config>(
+        d_q_desc, d_k_desc, d_v_desc, output,
+        batch_size, num_heads, seq_q, seq_kv,
+        scale, causal, stream
+    );
+}
 
 /**
  * Try to launch FA3 with TMA (cached descriptors).
  * Uses TMA descriptor cache to avoid per-call overhead.
+ * Dispatches to SM120 config version based on environment variable.
  *
  * Returns cudaSuccess if TMA launch succeeded, error code otherwise.
  */
 template<typename Element>
 static cudaError_t try_launch_fa3_tma(
+    const Element* Q,
+    const Element* K,
+    const Element* V,
+    Element* output,
+    int batch_size,
+    int num_heads,
+    int seq_q,
+    int seq_kv,
+    int head_dim,
+    float scale,
+    bool causal,
+    cudaStream_t stream
+) {
+    using namespace nn::fa3_sm120;
+
+    // Dispatch based on SM120 version
+    int version = get_fa3_sm120_version();
+
+    switch (version) {
+        case 1:
+            return try_launch_fa3_tma_impl<Element, SM120Config<1>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+        case 2:
+            return try_launch_fa3_tma_impl<Element, SM120Config<2>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+        case 3:
+            return try_launch_fa3_tma_impl<Element, SM120Config<3>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+        case 4:
+            return try_launch_fa3_tma_impl<Element, SM120Config<4>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+        default:  // version 0 or unknown
+            return try_launch_fa3_tma_impl<Element, SM120Config<0>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+    }
+}
+
+// Legacy compatibility - keep the old code path for non-SM120 dispatch
+template<typename Element>
+static cudaError_t try_launch_fa3_tma_legacy(
     const Element* Q,
     const Element* K,
     const Element* V,
@@ -695,12 +847,65 @@ void sdpa_causal_fixed_cache_ptr(
 // Timed SDPA (for benchmarking kernel-only time)
 // =============================================================================
 
+/**
+ * Inner timed launcher template - uses specific SM120 config version.
+ */
+template<typename Config>
+static cudaError_t try_launch_fa3_tma_timed_impl(
+    const __nv_bfloat16* Q,
+    const __nv_bfloat16* K,
+    const __nv_bfloat16* V,
+    __nv_bfloat16* output,
+    int n_heads,
+    int seq_q,
+    int seq_kv,
+    int head_dim,
+    float scale,
+    float* kernel_time_us
+) {
+    auto& cache = tma::TmaDescriptorCache::instance();
+
+    CUtensorMap* d_q_desc = cache.get_or_create_3d_bf16(
+        const_cast<__nv_bfloat16*>(Q),
+        head_dim, seq_q, n_heads,
+        head_dim, seq_q * head_dim,
+        Config::HEAD_DIM, Config::TILE_Q,
+        tma::SwizzleMode::None, nullptr
+    );
+    CUtensorMap* d_k_desc = cache.get_or_create_3d_bf16(
+        const_cast<__nv_bfloat16*>(K),
+        head_dim, seq_kv, n_heads,
+        head_dim, seq_kv * head_dim,
+        Config::HEAD_DIM, Config::TILE_KV,
+        tma::SwizzleMode::None, nullptr
+    );
+    CUtensorMap* d_v_desc = cache.get_or_create_3d_bf16(
+        const_cast<__nv_bfloat16*>(V),
+        head_dim, seq_kv, n_heads,
+        head_dim, seq_kv * head_dim,
+        Config::HEAD_DIM, Config::TILE_KV,
+        tma::SwizzleMode::None, nullptr
+    );
+
+    if (!d_q_desc || !d_k_desc || !d_v_desc) {
+        return cudaErrorUnknown;
+    }
+
+    return nn::fa3_sm120::launch_flash_attention_3_tma_timed<Config>(
+        d_q_desc, d_k_desc, d_v_desc, output,
+        1,  // batch_size
+        n_heads, seq_q, seq_kv,
+        scale, true,  // causal
+        nullptr,  // default stream
+        kernel_time_us
+    );
+}
+
 void sdpa_causal_timed(
     const GPUArray& Q, const GPUArray& K, const GPUArray& V,
     GPUArray& out, float scale, float* kernel_time_us
 ) {
-    using namespace nn::fa3::tma_kernel;
-    using Config = TmaFA3Config<120>;
+    using namespace nn::fa3_sm120;
 
     // Validate inputs
     if (Q.ndim() != 3 || K.ndim() != 3 || V.ndim() != 3 || out.ndim() != 3) {
@@ -726,45 +931,52 @@ void sdpa_causal_timed(
         scale = 1.0f / sqrtf((float)head_dim);
     }
 
-    // Get cached TMA descriptors (device pointers)
-    auto& cache = tma::TmaDescriptorCache::instance();
+    // Dispatch based on SM120 version
+    int version = get_fa3_sm120_version();
+    cudaError_t err = cudaSuccess;
 
-    CUtensorMap* d_q_desc = cache.get_or_create_3d_bf16(
-        const_cast<void*>(Q.data()),
-        head_dim, seq_q, n_heads,
-        head_dim, seq_q * head_dim,
-        Config::HEAD_DIM, Config::TILE_Q,
-        tma::SwizzleMode::None, nullptr
-    );
-    CUtensorMap* d_k_desc = cache.get_or_create_3d_bf16(
-        const_cast<void*>(K.data()),
-        head_dim, seq_kv, n_heads,
-        head_dim, seq_kv * head_dim,
-        Config::HEAD_DIM, Config::TILE_KV,
-        tma::SwizzleMode::None, nullptr
-    );
-    CUtensorMap* d_v_desc = cache.get_or_create_3d_bf16(
-        const_cast<void*>(V.data()),
-        head_dim, seq_kv, n_heads,
-        head_dim, seq_kv * head_dim,
-        Config::HEAD_DIM, Config::TILE_KV,
-        tma::SwizzleMode::None, nullptr
-    );
-
-    if (!d_q_desc || !d_k_desc || !d_v_desc) {
-        throw std::runtime_error("sdpa_causal_timed: failed to create TMA descriptors");
+    switch (version) {
+        case 1:
+            err = try_launch_fa3_tma_timed_impl<SM120Config<1>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
+        case 2:
+            err = try_launch_fa3_tma_timed_impl<SM120Config<2>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
+        case 3:
+            err = try_launch_fa3_tma_timed_impl<SM120Config<3>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
+        case 4:
+            err = try_launch_fa3_tma_timed_impl<SM120Config<4>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
+        default:  // version 0 or unknown
+            err = try_launch_fa3_tma_timed_impl<SM120Config<0>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
     }
-
-    // Launch with timing
-    cudaError_t err = launch_flash_attention_3_tma_timed<Config>(
-        d_q_desc, d_k_desc, d_v_desc,
-        static_cast<__nv_bfloat16*>(out.data()),
-        1,  // batch_size
-        n_heads, seq_q, seq_kv,
-        scale, true,  // causal
-        nullptr,  // default stream
-        kernel_time_us
-    );
 
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("sdpa_causal_timed failed: ") + cudaGetErrorString(err));
