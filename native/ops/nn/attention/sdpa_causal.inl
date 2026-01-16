@@ -4,11 +4,58 @@
  * Supports:
  * - Standard SDPA (O(n^2) memory)
  * - Flash Attention 2 (O(n) memory, tiled computation)
+ * - Flash Attention 3 (SM120+, MMA-based, warp specialization)
  * - Flash-Decoding (optimized for decode phase with q_len=1)
  */
 
+#include "flash_attention_3.cuh"
+#include "../../common/device.cuh"
+
 namespace pygpukit {
 namespace ops {
+
+// =============================================================================
+// Flash Attention 3 Environment Control
+// =============================================================================
+
+// PYGPUKIT_FA3: 0=off, 1=on (auto on SM120+), -1=auto (default)
+static int get_fa3_mode() {
+    static int cached = -999;
+    if (cached == -999) {
+        const char* env = std::getenv("PYGPUKIT_FA3");
+        if (env) {
+            cached = std::atoi(env);
+        } else {
+            cached = -1;  // Auto mode by default
+        }
+    }
+    return cached;
+}
+
+// Check if FA3 should be used
+static bool should_use_fa3(int head_dim, int seq_len) {
+    int fa3_mode = get_fa3_mode();
+
+    // Force off
+    if (fa3_mode == 0) return false;
+
+    // Check SM version (FA3 requires SM120+)
+    static int sm_version = -1;
+    if (sm_version == -1) {
+        sm_version = ops::get_sm_version();
+    }
+
+    if (sm_version < 120) return false;
+
+    // Currently only support head_dim=128
+    if (head_dim != 128) return false;
+
+    // Force on
+    if (fa3_mode == 1) return true;
+
+    // Auto mode: use FA3 for sequences > 256 on SM120+
+    return seq_len > 256;
+}
 
 // Flash Attention mode:
 // - "0" or "false": Always use standard SDPA
@@ -143,6 +190,45 @@ static void sdpa_causal_dispatch(
                 return;
             default:
                 // Fall through to standard SDPA for unsupported dtypes
+                break;
+        }
+    }
+
+    // =========================================================================
+    // Flash Attention 3 (SM120+, MMA-based with warp specialization)
+    // =========================================================================
+    // FA3 uses 4D layout [batch, num_heads, seq, head_dim]
+    // Current SDPA uses 3D layout [n_heads, seq, head_dim]
+    // Treat as batch_size=1 for compatibility
+    if (should_use_fa3(head_dim, kv_len)) {
+        cudaError_t err = cudaSuccess;
+
+        switch (Q.dtype()) {
+            case DataType::BFloat16:
+                err = nn::fa3::launch_flash_attention_3<__nv_bfloat16>(
+                    static_cast<const __nv_bfloat16*>(Q.data()),
+                    static_cast<const __nv_bfloat16*>(K.data()),
+                    static_cast<const __nv_bfloat16*>(V.data()),
+                    static_cast<__nv_bfloat16*>(result.data()),
+                    1,              // batch_size = 1
+                    n_heads,
+                    q_len,
+                    kv_len,
+                    head_dim,
+                    scale,
+                    true,           // causal = true
+                    stream
+                );
+                if (err == cudaSuccess) return;
+                // Fall through if FA3 launch failed
+                break;
+
+            case DataType::Float16:
+                // TODO: Add FP16 support when implemented
+                break;
+
+            default:
+                // FA3 only supports BF16/FP16, fall through to FA2/SDPA
                 break;
         }
     }
