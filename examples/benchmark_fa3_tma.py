@@ -54,10 +54,17 @@ def run_benchmark(Q_gpu, K_gpu, V_gpu, mode, n_warmup=5, n_iters=20):
     return (elapsed / n_iters) * 1e6, out
 
 
+def calc_tflops(heads, seq_len, head_dim, time_us):
+    """Calculate TFLOPS for attention."""
+    # FLOPs: 4 * heads * seq^2 * head_dim (Q@K^T + softmax approx + P@V)
+    flops = 4 * heads * seq_len * seq_len * head_dim
+    return (flops / (time_us / 1e6)) / 1e12
+
+
 def main():
-    print("=" * 70)
-    print("Flash Attention 3: TMA vs Baseline Benchmark")
-    print("=" * 70)
+    print("=" * 90)
+    print("Flash Attention 3: TMA vs Baseline vs FA2 Benchmark")
+    print("=" * 90)
     print()
 
     # Benchmark configurations
@@ -68,8 +75,8 @@ def main():
         (32, 4096, 128),
     ]
 
-    print(f"{'Config':<25} {'Baseline (us)':<15} {'TMA (us)':<15} {'Speedup':<10}")
-    print("-" * 70)
+    print(f"{'Config':<20} {'FA2 (us)':<12} {'FA3 (us)':<12} {'TMA (us)':<12} {'FA3 TFLOPS':<12} {'TMA TFLOPS':<12}")
+    print("-" * 90)
 
     for heads, seq_len, head_dim in configs:
         np.random.seed(42)
@@ -82,27 +89,47 @@ def main():
         K_gpu = gk.from_numpy(K_np).astype(bf16)
         V_gpu = gk.from_numpy(V_np).astype(bf16)
 
-        # Benchmark baseline
-        baseline_time, out_baseline = run_benchmark(Q_gpu, K_gpu, V_gpu, "baseline")
+        # Benchmark FA2
+        try:
+            fa2_time, out_fa2 = run_benchmark(Q_gpu, K_gpu, V_gpu, "fa2")
+        except Exception as e:
+            fa2_time = float('nan')
+            out_fa2 = None
 
-        # Benchmark TMA
-        tma_time, out_tma = run_benchmark(Q_gpu, K_gpu, V_gpu, "tma")
+        # Benchmark FA3 baseline
+        try:
+            baseline_time, out_baseline = run_benchmark(Q_gpu, K_gpu, V_gpu, "baseline")
+        except Exception as e:
+            baseline_time = float('nan')
+            out_baseline = None
 
-        # Compute speedup
-        speedup = baseline_time / tma_time if tma_time > 0 else 0
+        # Benchmark FA3 TMA
+        try:
+            tma_time, out_tma = run_benchmark(Q_gpu, K_gpu, V_gpu, "tma")
+        except Exception as e:
+            tma_time = float('nan')
+            out_tma = None
+
+        # Calculate TFLOPS
+        fa3_tflops = calc_tflops(heads, seq_len, head_dim, baseline_time) if baseline_time else 0
+        tma_tflops = calc_tflops(heads, seq_len, head_dim, tma_time) if tma_time else 0
 
         config_str = f"[{heads}, {seq_len}, {head_dim}]"
-        print(f"{config_str:<25} {baseline_time:>12.1f}   {tma_time:>12.1f}   {speedup:>8.2f}x")
+        fa2_str = f"{fa2_time:>10.1f}" if not np.isnan(fa2_time) else "N/A".rjust(10)
+        fa3_str = f"{baseline_time:>10.1f}" if not np.isnan(baseline_time) else "N/A".rjust(10)
+        tma_str = f"{tma_time:>10.1f}" if not np.isnan(tma_time) else "N/A".rjust(10)
+        print(f"{config_str:<20} {fa2_str}   {fa3_str}   {tma_str}   {fa3_tflops:>10.2f}   {tma_tflops:>10.2f}")
 
-        # Verify correctness
-        fp32 = DataType.from_string("float32")
-        out_baseline_fp32 = out_baseline.astype(fp32).to_numpy()
-        out_tma_fp32 = out_tma.astype(fp32).to_numpy()
-        rel_error = np.abs(out_baseline_fp32 - out_tma_fp32).mean() / (
-            np.abs(out_baseline_fp32).mean() + 1e-6
-        )
-        if rel_error > 0.05:
-            print(f"  WARNING: High relative error: {rel_error:.4f}")
+        # Verify correctness (TMA vs FA3)
+        if out_baseline is not None and out_tma is not None:
+            fp32 = DataType.from_string("float32")
+            out_baseline_fp32 = out_baseline.astype(fp32).to_numpy()
+            out_tma_fp32 = out_tma.astype(fp32).to_numpy()
+            rel_error = np.abs(out_baseline_fp32 - out_tma_fp32).mean() / (
+                np.abs(out_baseline_fp32).mean() + 1e-6
+            )
+            if rel_error > 0.05:
+                print(f"  WARNING: TMA vs FA3 relative error: {rel_error:.4f}")
 
     print()
     print("Benchmark complete.")

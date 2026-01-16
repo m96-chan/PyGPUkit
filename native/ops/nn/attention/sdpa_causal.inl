@@ -143,7 +143,11 @@ static cudaError_t try_launch_fa3_tma(
     tma::TmaDescriptor q_desc, k_desc, v_desc;
     CUresult cu_result;
 
+    fprintf(stderr, "[DEBUG TMA] Creating Q descriptor...\n");
     // Q: [num_heads, seq_q, head_dim]
+    // NOTE: Swizzle128B requires innermost box = 128 bytes = 64 BF16 elements
+    // Our HEAD_DIM=128 (256 bytes) doesn't match, so use SwizzleMode::None for now
+    // TODO: Either split head_dim into 2x64 loads, or use 2D descriptor per head
     cu_result = tma::create_tma_descriptor_3d_bf16(
         q_desc,
         const_cast<Element*>(Q),  // base pointer
@@ -154,12 +158,15 @@ static cudaError_t try_launch_fa3_tma(
         seq_q * head_dim,         // stride2: elements between heads
         Config::HEAD_DIM,         // tile0: full head_dim
         Config::TILE_Q,           // tile1: Q tile size
-        tma::SwizzleMode::Swizzle128B
+        tma::SwizzleMode::None    // No swizzle until we fix tile dimensions
     );
     if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "[DEBUG TMA] Q descriptor FAILED: %d\n", cu_result);
         return cudaErrorUnknown;
     }
+    fprintf(stderr, "[DEBUG TMA] Q descriptor OK\n");
 
+    fprintf(stderr, "[DEBUG TMA] Creating K descriptor...\n");
     // K: [num_heads, seq_kv, head_dim]
     cu_result = tma::create_tma_descriptor_3d_bf16(
         k_desc,
@@ -171,12 +178,15 @@ static cudaError_t try_launch_fa3_tma(
         seq_kv * head_dim,
         Config::HEAD_DIM,
         Config::TILE_KV,
-        tma::SwizzleMode::Swizzle128B
+        tma::SwizzleMode::None
     );
     if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "[DEBUG TMA] K descriptor FAILED: %d\n", cu_result);
         return cudaErrorUnknown;
     }
+    fprintf(stderr, "[DEBUG TMA] K descriptor OK\n");
 
+    fprintf(stderr, "[DEBUG TMA] Creating V descriptor...\n");
     // V: [num_heads, seq_kv, head_dim]
     cu_result = tma::create_tma_descriptor_3d_bf16(
         v_desc,
@@ -188,14 +198,17 @@ static cudaError_t try_launch_fa3_tma(
         seq_kv * head_dim,
         Config::HEAD_DIM,
         Config::TILE_KV,
-        tma::SwizzleMode::Swizzle128B
+        tma::SwizzleMode::None
     );
     if (cu_result != CUDA_SUCCESS) {
+        fprintf(stderr, "[DEBUG TMA] V descriptor FAILED: %d\n", cu_result);
         return cudaErrorUnknown;
     }
+    fprintf(stderr, "[DEBUG TMA] V descriptor OK\n");
 
+    fprintf(stderr, "[DEBUG TMA] Launching kernel...\n");
     // Launch TMA kernel
-    return launch_flash_attention_3_tma<Config>(
+    cudaError_t launch_err = launch_flash_attention_3_tma<Config>(
         q_desc.tensor_map,
         k_desc.tensor_map,
         v_desc.tensor_map,
@@ -208,6 +221,13 @@ static cudaError_t try_launch_fa3_tma(
         causal,
         stream
     );
+    if (launch_err != cudaSuccess) {
+        fprintf(stderr, "[DEBUG TMA] Kernel launch FAILED: %s (%d)\n",
+                cudaGetErrorString(launch_err), (int)launch_err);
+    } else {
+        fprintf(stderr, "[DEBUG TMA] Kernel launch OK\n");
+    }
+    return launch_err;
 }
 
 // Flash Attention mode:
@@ -356,6 +376,8 @@ static void sdpa_causal_dispatch(
 
         switch (Q.dtype()) {
             case DataType::BFloat16:
+                fprintf(stderr, "[DEBUG] Attempting FA3 TMA launch: heads=%d, q=%d, kv=%d, hdim=%d\n",
+                        n_heads, q_len, kv_len, head_dim);
                 err = try_launch_fa3_tma<__nv_bfloat16>(
                     static_cast<const __nv_bfloat16*>(Q.data()),
                     static_cast<const __nv_bfloat16*>(K.data()),
@@ -370,7 +392,12 @@ static void sdpa_causal_dispatch(
                     true,           // causal = true
                     stream
                 );
-                if (err == cudaSuccess) return;
+                if (err == cudaSuccess) {
+                    fprintf(stderr, "[DEBUG] FA3 TMA launch SUCCESS\n");
+                    return;
+                }
+                fprintf(stderr, "[DEBUG] FA3 TMA launch FAILED: %s (%d)\n",
+                        cudaGetErrorString(err), (int)err);
                 // Fall through if TMA launch failed
                 break;
 

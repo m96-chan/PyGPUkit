@@ -45,9 +45,14 @@ struct TmaSharedMemory {
     alignas(1024) Element smem_k[NUM_STAGES][TILE_KV * HEAD_DIM];
     alignas(1024) Element smem_v[NUM_STAGES][TILE_KV * HEAD_DIM];
 
-    // Scores and output
-    alignas(128) float smem_scores[TILE_Q * TILE_KV];
-    alignas(128) Element smem_probs_bf16[TILE_Q * TILE_KV];
+    // Scores/Probs union - saves 8KB by reusing same memory
+    // smem_scores used during softmax computation (float precision)
+    // smem_probs used during P@V matmul (BF16 for WMMA)
+    // These are NEVER used simultaneously - conversion happens between phases
+    union alignas(128) {
+        float smem_scores[TILE_Q * TILE_KV];     // 16KB - softmax phase
+        Element smem_probs[TILE_Q * TILE_KV * 2]; // Padded to same size for union
+    };
 
     // Softmax state
     alignas(16) float softmax_max[TILE_Q];
@@ -57,7 +62,8 @@ struct TmaSharedMemory {
     alignas(128) float output_acc[TILE_Q * HEAD_DIM];
 
     // Pipeline barriers (one per stage)
-    alignas(8) uint64_t barriers[NUM_STAGES];
+    // mbarrier must be 64-byte aligned for optimal performance
+    alignas(64) uint64_t barriers[NUM_STAGES];
 
     static constexpr size_t size() {
         return sizeof(TmaSharedMemory);
@@ -70,11 +76,19 @@ struct TmaSharedMemory {
 
 template<int SM_VERSION>
 struct TmaFA3Config {
-    // Default configuration for SM120
-    static constexpr int TILE_Q = 64;
+    // Configuration for SM120a (RTX 5090) with 99KB smem limit
+    // Reduced TILE_Q to fit within hardware limit
+    static constexpr int TILE_Q = 32;    // Reduced from 64 to fit 99KB limit
     static constexpr int TILE_KV = 64;
     static constexpr int HEAD_DIM = 128;
-    static constexpr int NUM_STAGES = 4;
+    static constexpr int NUM_STAGES = 2;
+    // Smem calculation:
+    //   smem_q: 32 * 128 * 2 = 8KB
+    //   smem_k: 2 * 64 * 128 * 2 = 32KB
+    //   smem_v: 2 * 64 * 128 * 2 = 32KB
+    //   smem_scores: 32 * 64 * 4 = 8KB
+    //   output_acc: 32 * 128 * 4 = 16KB
+    //   Total: ~96KB < 99KB limit
 
     // Warp configuration
     static constexpr int NUM_PRODUCER_WARPS = 4;
@@ -222,14 +236,51 @@ __device__ __forceinline__ void consumer_compute_scores(
     }
 }
 
+// NOTE: This function is split into multiple parts to avoid __syncthreads() divergence
+// The conversion phase uses ALL threads (not just consumers) to avoid sync issues
+
 template<typename Config>
-__device__ __forceinline__ void consumer_compute_output(
+__device__ __forceinline__ void convert_scores_to_probs(
+    typename Config::SharedMemory& smem,
+    int tid,
+    int num_threads
+) {
+    using Element = typename Config::Element;
+    constexpr int SCORE_SIZE = Config::TILE_Q * Config::TILE_KV;
+    constexpr int ELEMS_PER_THREAD = (SCORE_SIZE + Config::NUM_THREADS - 1) / Config::NUM_THREADS;
+
+    Element local_probs[ELEMS_PER_THREAD];
+
+    // Pass 1: Read all float values into registers (ALL threads participate)
+    #pragma unroll
+    for (int e = 0; e < ELEMS_PER_THREAD; ++e) {
+        int i = tid + e * num_threads;
+        if (i < SCORE_SIZE) {
+            local_probs[e] = __float2bfloat16(smem.smem_scores[i]);
+        }
+    }
+    __syncthreads();  // ALL threads sync here
+
+    // Pass 2: Write BF16 values to shared memory (ALL threads participate)
+    #pragma unroll
+    for (int e = 0; e < ELEMS_PER_THREAD; ++e) {
+        int i = tid + e * num_threads;
+        if (i < SCORE_SIZE) {
+            smem.smem_probs[i] = local_probs[e];
+        }
+    }
+    __syncthreads();  // ALL threads sync here
+}
+
+template<typename Config>
+__device__ __forceinline__ void consumer_compute_output_matmul(
     typename Config::SharedMemory& smem,
     int stage,
     int tid,
     int num_threads
 ) {
     using namespace nvcuda::wmma;
+    using Element = typename Config::Element;
 
     constexpr int WMMA_M = 16;
     constexpr int WMMA_N = 16;
@@ -241,13 +292,7 @@ __device__ __forceinline__ void consumer_compute_output(
     int warp_id = tid / 32;
     int num_warps = num_threads / 32;
 
-    // Convert probs to BF16
-    for (int i = tid; i < Config::TILE_Q * Config::TILE_KV; i += num_threads) {
-        smem.smem_probs_bf16[i] = __float2bfloat16(smem.smem_scores[i]);
-    }
-    __syncthreads();
-
-    // Each warp handles some output tiles
+    // Each warp handles some output tiles (NO __syncthreads in here)
     for (int tile_idx = warp_id; tile_idx < M_TILES * N_TILES; tile_idx += num_warps) {
         int m_tile = tile_idx / N_TILES;
         int n_tile = tile_idx % N_TILES;
@@ -262,9 +307,9 @@ __device__ __forceinline__ void consumer_compute_output(
 
         #pragma unroll
         for (int k = 0; k < K_TILES; ++k) {
-            const __nv_bfloat16* p_ptr = smem.smem_probs_bf16 +
+            const Element* p_ptr = smem.smem_probs +
                 m_tile * WMMA_M * Config::TILE_KV + k * WMMA_K;
-            const __nv_bfloat16* v_ptr = smem.smem_v[stage] +
+            const Element* v_ptr = smem.smem_v[stage] +
                 k * WMMA_K * Config::HEAD_DIM + n_tile * WMMA_N;
 
             load_matrix_sync(p_frag, p_ptr, Config::TILE_KV);
@@ -283,9 +328,9 @@ __device__ __forceinline__ void consumer_compute_output(
 template<typename Config>
 __global__ void __launch_bounds__(Config::NUM_THREADS, 1)
 flash_attention_3_tma_kernel(
-    const __grid_constant__ CUtensorMap q_desc,
-    const __grid_constant__ CUtensorMap k_desc,
-    const __grid_constant__ CUtensorMap v_desc,
+    const CUtensorMap* __restrict__ q_desc_ptr,
+    const CUtensorMap* __restrict__ k_desc_ptr,
+    const CUtensorMap* __restrict__ v_desc_ptr,
     typename Config::Element* __restrict__ output,
     int batch_size,
     int num_heads,
@@ -319,6 +364,7 @@ flash_attention_3_tma_kernel(
             barrier_init(smem.barriers[s], 1);
         }
     }
+    __threadfence_block();  // Ensure barrier init is visible to all threads
     for (int i = tid; i < Config::TILE_Q * Config::HEAD_DIM; i += blockDim.x) {
         smem.output_acc[i] = 0.0f;
     }
@@ -339,18 +385,32 @@ flash_attention_3_tma_kernel(
         num_kv_tiles = min(num_kv_tiles, (max_kv_pos + Config::TILE_KV) / Config::TILE_KV);
     }
 
-    // === Producer: Load Q tile (all producer warps) ===
+    // === Producer: Load Q tile ===
     if (is_producer && elect_one_per_warp()) {
         if (warp_id == 0) {
             barrier_arrive_expect_tx(smem.barriers[0],
                 Config::TILE_Q * Config::HEAD_DIM * sizeof(Element));
             // 3D coordinates: (dim0=0, dim1=q_start, dim2=head_idx)
-            tma_load_3d(&q_desc, smem.smem_q, &smem.barriers[0], 0, q_start, head_idx);
+            tma_load_3d(q_desc_ptr, smem.smem_q, &smem.barriers[0], 0, q_start, head_idx);
         }
     }
+    __syncthreads();  // Ensure all threads see the barrier state
 
     // Wait for Q to be ready
     barrier_wait(smem.barriers[0], 0);
+
+    // Reinitialize barriers for KV pipeline (Q used barriers[0], need to reset for reuse)
+    // This is needed because mbarrier state persists after completion
+    __syncthreads();
+    if (tid == 0) {
+        // Invalidate old barriers and reinit for KV pipeline
+        for (int s = 0; s < Config::NUM_STAGES; ++s) {
+            barrier_invalidate(smem.barriers[s]);
+            barrier_init(smem.barriers[s], 1);
+        }
+    }
+    __threadfence_block();
+    __syncthreads();
 
     // === Main loop: Pipeline K/V loading with computation ===
     int read_stage = 0;
@@ -358,28 +418,26 @@ flash_attention_3_tma_kernel(
     int phase = 0;
 
     // Prefill pipeline
+    // Single warp (warp 0 lane 0) does ALL prefetch work: barrier setup + K load + V load
+    // This avoids race conditions between barrier setup and TMA loads
     int prefill_tiles = min(Config::NUM_STAGES - 1, num_kv_tiles);
     for (int t = 0; t < prefill_tiles; ++t) {
-        if (is_producer && elect_one_per_warp()) {
+        // Only warp 0 lane 0 does all the work
+        if (is_producer && warp_id == 0 && lane_id == 0) {
             int kv_start = t * Config::TILE_KV;
             uint32_t tx_bytes = Config::TILE_KV * Config::HEAD_DIM * sizeof(Element) * 2;
 
-            if (warp_id == 0) {
-                barrier_arrive_expect_tx(smem.barriers[write_stage], tx_bytes);
-            }
+            // Set up expected bytes FIRST
+            barrier_arrive_expect_tx(smem.barriers[write_stage], tx_bytes);
 
-            // Producer warp 0-1: K, warp 2-3: V
-            // 3D coordinates: (dim0=0, dim1=kv_start, dim2=head_idx)
-            if (warp_id < 2) {
-                tma_load_3d(&k_desc, smem.smem_k[write_stage], &smem.barriers[write_stage], 0, kv_start, head_idx);
-            } else if (warp_id < 4) {
-                tma_load_3d(&v_desc, smem.smem_v[write_stage], &smem.barriers[write_stage], 0, kv_start, head_idx);
-            }
+            // Then issue both TMA loads (they complete asynchronously)
+            tma_load_3d(k_desc_ptr, smem.smem_k[write_stage], &smem.barriers[write_stage], 0, kv_start, head_idx);
+            tma_load_3d(v_desc_ptr, smem.smem_v[write_stage], &smem.barriers[write_stage], 0, kv_start, head_idx);
         }
         write_stage = (write_stage + 1) % Config::NUM_STAGES;
     }
 
-    // Main loop
+    // Main loop: process KV tiles
     for (int kv_tile = 0; kv_tile < num_kv_tiles; ++kv_tile) {
         // Wait for current KV tile
         barrier_wait(smem.barriers[read_stage], phase);
@@ -389,24 +447,26 @@ flash_attention_3_tma_kernel(
         int kv_len = min(Config::TILE_KV, seq_kv - kv_start);
 
         // === Consumer: Compute attention ===
+        // Compute scores: Q @ K^T (only consumer warps)
         if (is_consumer) {
-            // Compute scores: Q @ K^T
             consumer_compute_scores<Config>(smem, read_stage, scale, tid, Config::NUM_THREADS);
-            __syncthreads();
+        }
+        __syncthreads();
 
-            // Apply causal mask
-            if (causal) {
-                for (int i = tid; i < Config::TILE_Q * Config::TILE_KV; i += blockDim.x) {
-                    int q_idx = i / Config::TILE_KV;
-                    int kv_idx = i % Config::TILE_KV;
-                    if (kv_start + kv_idx > q_start + q_idx) {
-                        smem.smem_scores[i] = -INFINITY;
-                    }
+        // Apply causal mask (all threads participate for even work distribution)
+        if (causal) {
+            for (int i = tid; i < Config::TILE_Q * Config::TILE_KV; i += blockDim.x) {
+                int q_idx = i / Config::TILE_KV;
+                int kv_idx = i % Config::TILE_KV;
+                if (kv_start + kv_idx > q_start + q_idx) {
+                    smem.smem_scores[i] = -INFINITY;
                 }
-                __syncthreads();
             }
+        }
+        __syncthreads();
 
-            // Online softmax (simplified - all threads)
+        // Online softmax (only consumer warps)
+        if (is_consumer) {
             for (int q = 0; q < q_len; ++q) {
                 float* row = smem.smem_scores + q * Config::TILE_KV;
 
@@ -447,33 +507,33 @@ flash_attention_3_tma_kernel(
                     }
                 }
             }
-            __syncthreads();
+        }
+        __syncthreads();
 
-            // Compute output: P @ V
-            consumer_compute_output<Config>(smem, read_stage, tid, Config::NUM_THREADS);
+        // Compute output: P @ V
+        // Step 1: Convert scores to probs (ALL threads participate to avoid sync divergence)
+        convert_scores_to_probs<Config>(smem, tid, Config::NUM_THREADS);
+
+        // Step 2: Compute P @ V (only consumer warps do the matmul)
+        if (is_consumer) {
+            consumer_compute_output_matmul<Config>(smem, read_stage, tid, Config::NUM_THREADS);
         }
 
         // === Producer: Prefetch next KV tile ===
+        // Single warp (warp 0 lane 0) does all prefetch to avoid races
         int next_tile = kv_tile + prefill_tiles;
-        if (next_tile < num_kv_tiles && is_producer && elect_one_per_warp()) {
+        if (next_tile < num_kv_tiles && is_producer && warp_id == 0 && lane_id == 0) {
             int next_kv_start = next_tile * Config::TILE_KV;
             uint32_t tx_bytes = Config::TILE_KV * Config::HEAD_DIM * sizeof(Element) * 2;
 
-            if (warp_id == 0) {
-                barrier_arrive_expect_tx(smem.barriers[write_stage], tx_bytes);
-            }
-
-            // 3D coordinates: (dim0=0, dim1=next_kv_start, dim2=head_idx)
-            if (warp_id < 2) {
-                tma_load_3d(&k_desc, smem.smem_k[write_stage], &smem.barriers[write_stage], 0, next_kv_start, head_idx);
-            } else if (warp_id < 4) {
-                tma_load_3d(&v_desc, smem.smem_v[write_stage], &smem.barriers[write_stage], 0, next_kv_start, head_idx);
-            }
+            barrier_arrive_expect_tx(smem.barriers[write_stage], tx_bytes);
+            tma_load_3d(k_desc_ptr, smem.smem_k[write_stage], &smem.barriers[write_stage], 0, next_kv_start, head_idx);
+            tma_load_3d(v_desc_ptr, smem.smem_v[write_stage], &smem.barriers[write_stage], 0, next_kv_start, head_idx);
 
             write_stage = (write_stage + 1) % Config::NUM_STAGES;
         }
 
-        // Advance read stage
+        // Advance read stage and phase
         read_stage = (read_stage + 1) % Config::NUM_STAGES;
         if (read_stage == 0) phase ^= 1;
 
@@ -500,9 +560,9 @@ flash_attention_3_tma_kernel(
 
 template<typename Config>
 inline cudaError_t launch_flash_attention_3_tma(
-    const CUtensorMap& q_desc,
-    const CUtensorMap& k_desc,
-    const CUtensorMap& v_desc,
+    CUtensorMap q_desc,
+    CUtensorMap k_desc,
+    CUtensorMap v_desc,
     typename Config::Element* output,
     int batch_size,
     int num_heads,
@@ -518,21 +578,96 @@ inline cudaError_t launch_flash_attention_3_tma(
 
     size_t smem_size = Config::SharedMemory::size();
 
+    fprintf(stderr, "[DEBUG TMA LAUNCH] grid=(%d,%d,%d) block=%d smem=%zu bytes\n",
+            grid.x, grid.y, grid.z, block.x, smem_size);
+
+    // Query device shared memory limit
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceProp props;
+    cudaGetDeviceProperties(&props, device);
+    fprintf(stderr, "[DEBUG TMA LAUNCH] Device max smem per block: %zu bytes\n",
+            props.sharedMemPerBlockOptin);
+
+    // Query kernel attributes before setting
+    cudaFuncAttributes func_attrs;
+    cudaError_t query_err = cudaFuncGetAttributes(&func_attrs, flash_attention_3_tma_kernel<Config>);
+    if (query_err != cudaSuccess) {
+        fprintf(stderr, "[DEBUG TMA LAUNCH] cudaFuncGetAttributes FAILED: %s\n",
+                cudaGetErrorString(query_err));
+        return query_err;
+    }
+    fprintf(stderr, "[DEBUG TMA LAUNCH] Kernel static smem: %zu, max threads: %d\n",
+            func_attrs.sharedSizeBytes, func_attrs.maxThreadsPerBlock);
+
     // Set shared memory configuration
-    cudaFuncSetAttribute(
+    cudaError_t attr_err = cudaFuncSetAttribute(
         flash_attention_3_tma_kernel<Config>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         smem_size
     );
+    if (attr_err != cudaSuccess) {
+        fprintf(stderr, "[DEBUG TMA LAUNCH] cudaFuncSetAttribute FAILED: %s\n",
+                cudaGetErrorString(attr_err));
+        return attr_err;
+    }
+
+    // Allocate device memory for tensor maps (TMA requires them in device-accessible memory)
+    CUtensorMap* d_q_desc;
+    CUtensorMap* d_k_desc;
+    CUtensorMap* d_v_desc;
+
+    cudaError_t alloc_err;
+    alloc_err = cudaMalloc(&d_q_desc, sizeof(CUtensorMap));
+    if (alloc_err != cudaSuccess) return alloc_err;
+    alloc_err = cudaMalloc(&d_k_desc, sizeof(CUtensorMap));
+    if (alloc_err != cudaSuccess) { cudaFree(d_q_desc); return alloc_err; }
+    alloc_err = cudaMalloc(&d_v_desc, sizeof(CUtensorMap));
+    if (alloc_err != cudaSuccess) { cudaFree(d_q_desc); cudaFree(d_k_desc); return alloc_err; }
+
+    // Copy tensor maps to device
+    cudaMemcpyAsync(d_q_desc, &q_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_k_desc, &k_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_v_desc, &v_desc, sizeof(CUtensorMap), cudaMemcpyHostToDevice, stream);
+
+    fprintf(stderr, "[DEBUG TMA LAUNCH] Tensor maps copied to device: q=%p k=%p v=%p\n",
+            (void*)d_q_desc, (void*)d_k_desc, (void*)d_v_desc);
 
     flash_attention_3_tma_kernel<Config><<<grid, block, smem_size, stream>>>(
-        q_desc, k_desc, v_desc, output,
+        d_q_desc, d_k_desc, d_v_desc, output,
         batch_size, num_heads, seq_q, seq_kv,
         scale, causal
     );
 
-    return cudaGetLastError();
+    cudaError_t launch_err = cudaGetLastError();
+    if (launch_err != cudaSuccess) {
+        fprintf(stderr, "[DEBUG TMA LAUNCH] Kernel launch failed: %s\n", cudaGetErrorString(launch_err));
+        cudaFree(d_q_desc);
+        cudaFree(d_k_desc);
+        cudaFree(d_v_desc);
+        return launch_err;
+    }
+
+    // Synchronize to wait for kernel completion and flush printf buffer
+    cudaStreamSynchronize(stream);
+
+    // Check for kernel execution errors AFTER sync
+    cudaError_t exec_err = cudaGetLastError();
+    if (exec_err != cudaSuccess) {
+        fprintf(stderr, "[DEBUG TMA LAUNCH] Kernel execution failed: %s\n", cudaGetErrorString(exec_err));
+    }
+
+    cudaFree(d_q_desc);
+    cudaFree(d_k_desc);
+    cudaFree(d_v_desc);
+
+    return exec_err;
 }
+
+// Explicit template instantiation
+template cudaError_t launch_flash_attention_3_tma<TmaFA3Config<120>>(
+    CUtensorMap, CUtensorMap, CUtensorMap,
+    __nv_bfloat16*, int, int, int, int, float, bool, cudaStream_t);
 
 }  // namespace tma_kernel
 }  // namespace fa3
