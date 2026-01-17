@@ -172,6 +172,8 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/gemm/int4_int4/sm120/int4_via_int8.cu
     ops/matmul/gemm/w4a16_bf16/sm120/nvf4_cutlass.cu
     ops/matmul/gemm/w4a16_bf16/sm120/nvf4_nvf4_cutlass.cu
+    # FP8 block-scale MMA (SM120 native PTX)
+    ops/matmul/gemm/fp8_block_scale/fp8_block_scale_mma.cu
     # GEMV kernels (Issue #122: Reorganized with w{weight}a{act}_{out} naming)
     ops/matmul/gemv/w4a16_bf16/sm120/nvf4.cu
     ops/matmul/gemv/w4a16_bf16/sm120/nvf4_kernels.cu

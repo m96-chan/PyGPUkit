@@ -36,6 +36,11 @@ extern "C" {
     cudaError_t pygpukit_gemm_fp8_fp8_sm120_v7(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
     cudaError_t pygpukit_gemm_fp8_fp8_sm120_v8(const uint8_t*, const uint8_t*, uint8_t*, int, int, int, float, float, cudaStream_t);
     void pygpukit_gemm_fp8_fp8_sm120_cleanup();
+
+    // FP8 block-scale MMA test (SM120)
+    bool pygpukit_fp8_block_scale_mma_available();
+    int pygpukit_get_sm_version();
+    int pygpukit_fp8_block_scale_mma_test();
 }
 
 void init_gemm_fp8xfp8_fp8(py::module_& m) {
@@ -170,4 +175,19 @@ void init_gemm_fp8xfp8_fp8(py::module_& m) {
         return py::make_tuple(sfa_size, sfb_size);
     }, py::arg("M"), py::arg("N"), py::arg("K"),
        "[Alias for gemm_fp8_fp8_get_scale_sizes] Get scale factor sizes for FP8 blockwise GEMM");
+
+    // ============================================================
+    // FP8 Block-Scale MMA Test (SM120)
+    // ============================================================
+    m.def("fp8_block_scale_mma_available", []() {
+        return pygpukit_fp8_block_scale_mma_available();
+    }, "Check if FP8 block-scale MMA is available (SM120+)");
+
+    m.def("get_sm_version", []() {
+        return pygpukit_get_sm_version();
+    }, "Get device SM version (e.g., 120 for SM120)");
+
+    m.def("fp8_block_scale_mma_test", []() {
+        return pygpukit_fp8_block_scale_mma_test();
+    }, "Run FP8 block-scale MMA test. Returns 0 on success, negative on failure.");
 }
