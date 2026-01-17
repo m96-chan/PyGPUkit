@@ -290,6 +290,14 @@ void sdpa_causal_timed(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
 void print_tma_cache_stats();
 void clear_tma_cache();
 
+// FA3 FP8: FP8 Q@K^T with block-scale MMA, BF16 P@V (SM120+)
+bool fa3_fp8_available();
+void sdpa_causal_fp8(const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+                     GPUArray& out, float scale);
+
+// FP8 MMA test function (for debugging C fragment layout)
+void test_fp8_mma_direct();
+
 // ============================================================================
 // Fused Operations (CUTLASS Epilogue Fusion)
 // ============================================================================

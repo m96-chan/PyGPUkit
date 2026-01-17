@@ -74,6 +74,11 @@ from pygpukit.ops.basic import (
     transpose,
     where,
 )
+from pygpukit.ops.nn.attention import (
+    fa3_fp8_available,
+    get_sm_version,
+    sdpa_causal_fp8,
+)
 
 # Try to import Rust types, fallback to Python implementations
 try:
@@ -203,4 +208,8 @@ __all__ = [
     "event_elapsed_us",
     # Profiling
     "profiling",
+    # FA3 FP8 (SM120+)
+    "fa3_fp8_available",
+    "get_sm_version",
+    "sdpa_causal_fp8",
 ]

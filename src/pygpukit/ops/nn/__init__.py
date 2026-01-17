@@ -24,9 +24,13 @@ from pygpukit.ops.nn.activation import (
 
 # Attention operations
 from pygpukit.ops.nn.attention import (
+    fa3_fp8_available,
+    get_sm_version,
     sdpa_causal,
     sdpa_causal_fixed_cache,
     sdpa_causal_fixed_cache_ptr,
+    sdpa_causal_fp8,
+    test_fp8_mma_direct,
 )
 
 # Linear operations
@@ -90,6 +94,11 @@ __all__ = [
     "sdpa_causal",
     "sdpa_causal_fixed_cache",
     "sdpa_causal_fixed_cache_ptr",
+    # FA3 FP8 (SM120+)
+    "fa3_fp8_available",
+    "get_sm_version",
+    "sdpa_causal_fp8",
+    "test_fp8_mma_direct",
     # RoPE
     "rope_inplace",
     "rope_inplace_f32table",

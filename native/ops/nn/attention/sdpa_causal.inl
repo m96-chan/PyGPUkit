@@ -12,6 +12,8 @@
 #include "flash_attention_3.cuh"
 #include "flash_attention_3_tma.cuh"
 #include "flash_attention_3_sm120.cuh"
+#include "flash_attention_3_fp8_sm120.cuh"
+#include "../../matmul/gemm/fp8_block_scale/test_mma_direct.cuh"
 #include "../../common/device.cuh"
 #include "../../common/tma_utils.cuh"
 #include "../../common/tma_descriptor_cache.cuh"
@@ -24,19 +26,21 @@ namespace ops {
 // Flash Attention 3 Environment Control
 // =============================================================================
 
-// PYGPUKIT_FA3_SM120_VERSION: 0-4 to select SM120 config version
+// PYGPUKIT_FA3_SM120_VERSION: 0-6 to select SM120 config version
 // 0 = baseline (TILE_Q=32, TILE_KV=64, 2-stage, 4+8 warps)
 // 1 = TILE_Q=64
 // 2 = 3-stage pipeline
 // 3 = 2+10 warps
-// 4 = TILE_KV=128
+// 4 = 4+12 warps (best for stability)
+// 5 = 2+14 warps (minimal producers)
+// 6 = 4+16 warps (max consumers)
 static int get_fa3_sm120_version() {
     static int cached = -1;
     if (cached == -1) {
         const char* env = std::getenv("PYGPUKIT_FA3_SM120_VERSION");
         if (env) {
             cached = std::atoi(env);
-            if (cached < 0 || cached > 4) {
+            if (cached < 0 || cached > 6) {
                 fprintf(stderr, "[FA3 SM120] Invalid version %d, using 0\n", cached);
                 cached = 0;
             }
@@ -253,6 +257,14 @@ static cudaError_t try_launch_fa3_tma(
                 head_dim, scale, causal, stream);
         case 4:
             return try_launch_fa3_tma_impl<Element, SM120Config<4>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+        case 5:
+            return try_launch_fa3_tma_impl<Element, SM120Config<5>>(
+                Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
+                head_dim, scale, causal, stream);
+        case 6:
+            return try_launch_fa3_tma_impl<Element, SM120Config<6>>(
                 Q, K, V, output, batch_size, num_heads, seq_q, seq_kv,
                 head_dim, scale, causal, stream);
         default:  // version 0 or unknown
@@ -968,6 +980,22 @@ void sdpa_causal_timed(
                 static_cast<__nv_bfloat16*>(out.data()),
                 n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
             break;
+        case 5:
+            err = try_launch_fa3_tma_timed_impl<SM120Config<5>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
+        case 6:
+            err = try_launch_fa3_tma_timed_impl<SM120Config<6>>(
+                static_cast<const __nv_bfloat16*>(Q.data()),
+                static_cast<const __nv_bfloat16*>(K.data()),
+                static_cast<const __nv_bfloat16*>(V.data()),
+                static_cast<__nv_bfloat16*>(out.data()),
+                n_heads, seq_q, seq_kv, head_dim, scale, kernel_time_us);
+            break;
         default:  // version 0 or unknown
             err = try_launch_fa3_tma_timed_impl<SM120Config<0>>(
                 static_cast<const __nv_bfloat16*>(Q.data()),
@@ -993,6 +1021,99 @@ void print_tma_cache_stats() {
 
 void clear_tma_cache() {
     tma::TmaDescriptorCache::instance().clear();
+}
+
+// =============================================================================
+// FA3 FP8 (SM120+, FP8 Q@K^T with block-scale MMA)
+// =============================================================================
+
+/**
+ * Check if FA3 FP8 is available on current device.
+ */
+bool fa3_fp8_available() {
+    int sm = ops::get_sm_version();
+    return sm >= 120;
+}
+
+/**
+ * FA3 FP8: FP8 Q@K^T with block-scale MMA, BF16 P@V
+ *
+ * Input Q, K, V are BF16 (auto-quantized to FP8 internally).
+ * ~50% memory bandwidth reduction for Q, K.
+ * ~0.25% expected error vs BF16 FA3.
+ */
+void sdpa_causal_fp8(
+    const GPUArray& Q, const GPUArray& K, const GPUArray& V,
+    GPUArray& out, float scale
+) {
+    // Validate inputs
+    if (Q.ndim() != 3 || K.ndim() != 3 || V.ndim() != 3 || out.ndim() != 3) {
+        throw std::runtime_error("sdpa_causal_fp8 expects 3D inputs [n_heads, seq_len, head_dim]");
+    }
+    if (Q.dtype() != DataType::BFloat16) {
+        throw std::runtime_error("sdpa_causal_fp8 only supports BFloat16 input");
+    }
+    if (Q.dtype() != K.dtype() || Q.dtype() != V.dtype() || Q.dtype() != out.dtype()) {
+        throw std::runtime_error("sdpa_causal_fp8: dtype mismatch");
+    }
+
+    int n_heads = Q.shape()[0];
+    int seq_q = Q.shape()[1];
+    int seq_kv = K.shape()[1];
+    int head_dim = Q.shape()[2];
+
+    if (head_dim != 128) {
+        throw std::runtime_error("sdpa_causal_fp8 only supports head_dim=128");
+    }
+
+    // Check SM version
+    int sm = ops::get_sm_version();
+    if (sm < 120) {
+        throw std::runtime_error("sdpa_causal_fp8 requires SM120+");
+    }
+
+    // Compute scale if not provided
+    if (scale <= 0.0f) {
+        scale = 1.0f / sqrtf((float)head_dim);
+    }
+
+    cudaStream_t stream = internal::get_capture_stream();
+
+    cudaError_t err = nn::fa3_fp8_sm120::flash_attention_3_fp8_sm120<>(
+        static_cast<const __nv_bfloat16*>(Q.data()),
+        static_cast<const __nv_bfloat16*>(K.data()),
+        static_cast<const __nv_bfloat16*>(V.data()),
+        static_cast<__nv_bfloat16*>(out.data()),
+        1,  // batch_size
+        n_heads,
+        seq_q,
+        seq_kv,
+        scale,
+        true,  // causal
+        stream
+    );
+
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("sdpa_causal_fp8 failed: ") + cudaGetErrorString(err));
+    }
+
+    sync_and_check("sdpa_causal_fp8 kernel failed");
+}
+
+/**
+ * Test FP8 MMA directly to debug C fragment layout.
+ */
+void test_fp8_mma_direct() {
+#if __CUDACC_VER_MAJOR__ >= 13
+    int sm = ops::get_sm_version();
+    if (sm < 120) {
+        fprintf(stderr, "test_fp8_mma_direct requires SM120+\n");
+        return;
+    }
+    matmul::fp8_mma_test::test_mma_direct();
+#else
+    fprintf(stderr, "test_fp8_mma_direct requires CUDA 13.x+\n");
+#endif
 }
 
 }  // namespace ops

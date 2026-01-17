@@ -194,13 +194,16 @@ __device__ __forceinline__ float ue8m0_to_float(uint8_t ue8m0) {
  *   flat_index = 32*t0 + t1 + 8*v0 + 128*v1
  *   For B[32,8] col-major: (k, n) = (flat_index%32, flat_index/32)
  *
- * CLayout = Layout<Shape<(4,8), (2,2)>, Stride<(32,1), (16,8)>>
- *   flat_index = 32*t0 + t1 + 16*v0 + 8*v1
- *   For C[16,8] row-major: row = 4*t0 + 2*v0 + v1, col = t1
- *   Simplified: d[v] = C[4*t0 + v, t1]
+ * CLayout = SM80_16x8_Row (CORRECT - use this, not CuTe layout!)
+ *   row0 = lane_id / 4        (0-7)
+ *   row1 = lane_id / 4 + 8    (8-15)
+ *   col0 = (lane_id % 4) * 2  (0, 2, 4, 6)
+ *   col1 = (lane_id % 4) * 2 + 1 (1, 3, 5, 7)
+ *   d[0] = C[row0, col0], d[1] = C[row0, col1]
+ *   d[2] = C[row1, col0], d[3] = C[row1, col1]
  * =============================================================================
  */
-__device__ void gemm_tile_fp8_block_scale_16x8x32(
+__device__ __forceinline__ void gemm_tile_fp8_block_scale_16x8x32(
     const __nv_fp8_e4m3* __restrict__ A,  // [16, 32] row-major
     const __nv_fp8_e4m3* __restrict__ B,  // [32, 8] col-major
     float* __restrict__ C,                 // [16, 8] row-major
@@ -315,22 +318,28 @@ __device__ void gemm_tile_fp8_block_scale_16x8x32(
     // ==========================================================================
     // Store D fragment back to C
     //
-    // CLayout = Layout<Shape<(4,8), (2,2)>, Stride<(32,1), (16,8)>>
-    //   For C[16,8] row-major:
-    //   d[0] (v0=0,v1=0): C[4*t0 + 0, t1]
-    //   d[1] (v0=0,v1=1): C[4*t0 + 1, t1]
-    //   d[2] (v0=1,v1=0): C[4*t0 + 2, t1]
-    //   d[3] (v0=1,v1=1): C[4*t0 + 3, t1]
+    // CORRECT C/D Fragment Layout (SM80_16x8_Row from CUTLASS):
+    //   row0 = lane_id / 4        (0-7)
+    //   row1 = lane_id / 4 + 8    (8-15)
+    //   col0 = (lane_id % 4) * 2  (0, 2, 4, 6)
+    //   col1 = (lane_id % 4) * 2 + 1 (1, 3, 5, 7)
+    //
+    //   d[0] = C[row0, col0]
+    //   d[1] = C[row0, col1]
+    //   d[2] = C[row1, col0]
+    //   d[3] = C[row1, col1]
     // ==========================================================================
 
     {
-        int row_base = 4 * t0;
-        int col = t1;
+        int row0 = lane_id / 4;
+        int row1 = lane_id / 4 + 8;
+        int col0 = (lane_id % 4) * 2;
+        int col1 = (lane_id % 4) * 2 + 1;
 
-        C[(row_base + 0) * ldc + col] = d_frag[0];
-        C[(row_base + 1) * ldc + col] = d_frag[1];
-        C[(row_base + 2) * ldc + col] = d_frag[2];
-        C[(row_base + 3) * ldc + col] = d_frag[3];
+        C[row0 * ldc + col0] = d_frag[0];
+        C[row0 * ldc + col1] = d_frag[1];
+        C[row1 * ldc + col0] = d_frag[2];
+        C[row1 * ldc + col1] = d_frag[3];
     }
 }
 
@@ -338,7 +347,7 @@ __device__ void gemm_tile_fp8_block_scale_16x8x32(
 // Test Kernel: Validate FP8 Block-Scale MMA Correctness
 // =============================================================================
 
-__global__ void test_fp8_block_scale_mma_kernel(
+static __global__ void test_fp8_block_scale_mma_kernel(
     const __nv_fp8_e4m3* __restrict__ A,  // [16, 32] row-major FP8
     const __nv_fp8_e4m3* __restrict__ B,  // [32, 8] col-major FP8
     float* __restrict__ C,                 // [16, 8] output
@@ -358,7 +367,7 @@ __global__ void test_fp8_block_scale_mma_kernel(
 }
 
 // Reference kernel: compute same result using scalar FP32 math
-__global__ void reference_fp8_matmul_kernel(
+static __global__ void reference_fp8_matmul_kernel(
     const __nv_fp8_e4m3* __restrict__ A,  // [16, 32] row-major FP8
     const __nv_fp8_e4m3* __restrict__ B,  // [32, 8] col-major FP8
     float* __restrict__ C,                 // [16, 8] output

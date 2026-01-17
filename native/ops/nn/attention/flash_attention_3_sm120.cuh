@@ -174,6 +174,42 @@ struct SM120Config<4> {
     using SharedMemory = TmaSharedMemory<Element, TILE_Q, TILE_KV, HEAD_DIM, NUM_STAGES>;
 };
 
+// Version 5: Minimal producers (2) + max consumers (14) = 16 warps
+// Test if TMA needs fewer producers since it's async
+template<>
+struct SM120Config<5> {
+    static constexpr int TILE_Q = 32;
+    static constexpr int TILE_KV = 64;
+    static constexpr int HEAD_DIM = 128;
+    static constexpr int NUM_STAGES = 2;
+    static constexpr int NUM_PRODUCER_WARPS = 2;   // Minimal for TMA
+    static constexpr int NUM_CONSUMER_WARPS = 14;  // Max consumers
+    static constexpr int NUM_WARPS = NUM_PRODUCER_WARPS + NUM_CONSUMER_WARPS;
+    static constexpr int NUM_THREADS = NUM_WARPS * 32;
+    static constexpr int TMA_TILE_D = HEAD_DIM;
+    static constexpr int TMA_TILE_S = TILE_KV;
+    using Element = __nv_bfloat16;
+    using SharedMemory = TmaSharedMemory<Element, TILE_Q, TILE_KV, HEAD_DIM, NUM_STAGES>;
+};
+
+// Version 6: More warps (20 total) - 4 producer + 16 consumer
+// Test if SM120 can handle more warps
+template<>
+struct SM120Config<6> {
+    static constexpr int TILE_Q = 32;
+    static constexpr int TILE_KV = 64;
+    static constexpr int HEAD_DIM = 128;
+    static constexpr int NUM_STAGES = 2;
+    static constexpr int NUM_PRODUCER_WARPS = 4;
+    static constexpr int NUM_CONSUMER_WARPS = 16;  // Even more consumers
+    static constexpr int NUM_WARPS = NUM_PRODUCER_WARPS + NUM_CONSUMER_WARPS;
+    static constexpr int NUM_THREADS = NUM_WARPS * 32;
+    static constexpr int TMA_TILE_D = HEAD_DIM;
+    static constexpr int TMA_TILE_S = TILE_KV;
+    using Element = __nv_bfloat16;
+    using SharedMemory = TmaSharedMemory<Element, TILE_Q, TILE_KV, HEAD_DIM, NUM_STAGES>;
+};
+
 // Alias for backward compatibility
 template<int SM_VERSION>
 using TmaFA3Config = SM120Config<0>;

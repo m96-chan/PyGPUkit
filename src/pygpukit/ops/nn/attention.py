@@ -235,8 +235,124 @@ def sdpa_causal_fixed_cache_ptr(
     )
 
 
+def fa3_fp8_available() -> bool:
+    """Check if FA3 FP8 (FP8 Q@K^T with block-scale MMA) is available.
+
+    Requires SM120+ (Blackwell GeForce RTX 5000 series).
+
+    Returns:
+        True if FA3 FP8 is available on the current device.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    return native.fa3_fp8_available()
+
+
+def get_sm_version() -> int:
+    """Get the SM (Streaming Multiprocessor) version of the current device.
+
+    Returns:
+        SM version as an integer (e.g., 120 for SM120).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    return native.get_sm_version()
+
+
+def sdpa_causal_fp8(
+    Q: GPUArray,
+    K: GPUArray,
+    V: GPUArray,
+    out: GPUArray,
+    scale: float = 0.0,
+) -> None:
+    """SDPA with FP8 Q@K^T using block-scale MMA (SM120+).
+
+    This is an optimized Flash Attention 3 variant that uses FP8 block-scale MMA
+    for Q@K^T computation, providing ~50% memory bandwidth reduction with only
+    ~0.25% expected error vs BF16 FA3.
+
+    The implementation:
+    - Quantizes Q and K to FP8 E4M3 internally (with per-32-element scales)
+    - Uses `mma.sync.aligned.block_scale.m16n8k32.f32.e4m3.e4m3` for Q@K^T
+    - Keeps V as BF16 and uses WMMA for P@V (FP8 V gives ~18% error)
+    - Uses TMA for efficient async loading
+
+    Args:
+        Q: Query tensor of shape [n_heads, q_len, head_dim], BFloat16.
+        K: Key tensor of shape [n_heads, kv_len, head_dim], BFloat16.
+        V: Value tensor of shape [n_heads, kv_len, head_dim], BFloat16.
+        out: Output buffer of shape [n_heads, q_len, head_dim], BFloat16.
+        scale: Scaling factor (typically 1/sqrt(head_dim)).
+               If <= 0, computed automatically from head_dim.
+
+    Raises:
+        RuntimeError: If FA3 FP8 is not available (requires SM120+).
+        ValueError: If shapes or dtypes don't match.
+
+    Note:
+        Requires SM120+ (RTX 5090 or newer). Use fa3_fp8_available() to check.
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+
+    if not native.fa3_fp8_available():
+        raise RuntimeError("FA3 FP8 requires SM120+ (Blackwell GeForce)")
+
+    _validate_float_dtype(Q, "sdpa_causal_fp8")
+
+    if Q.ndim != 3 or K.ndim != 3 or V.ndim != 3:
+        raise ValueError("sdpa_causal_fp8 expects 3D inputs [n_heads, seq_len, head_dim]")
+    if Q.dtype != K.dtype or Q.dtype != V.dtype:
+        raise ValueError("sdpa_causal_fp8: Q, K, V must have same dtype (BFloat16)")
+    if out.dtype != Q.dtype:
+        raise ValueError("sdpa_causal_fp8: out must have same dtype as Q")
+
+    n_heads, q_len, head_dim = Q.shape
+
+    if K.shape[0] != n_heads or V.shape[0] != n_heads:
+        raise ValueError("sdpa_causal_fp8: n_heads mismatch")
+    if K.shape[2] != head_dim or V.shape[2] != head_dim:
+        raise ValueError("sdpa_causal_fp8: head_dim mismatch")
+    if K.shape[1] != V.shape[1]:
+        raise ValueError("sdpa_causal_fp8: K and V seq_len mismatch")
+
+    if out.shape != (n_heads, q_len, head_dim):
+        raise ValueError(
+            f"out shape {out.shape} does not match expected {(n_heads, q_len, head_dim)}"
+        )
+
+    q_native = Q._get_native()
+    k_native = K._get_native()
+    v_native = V._get_native()
+    out_native = out._get_native()
+
+    native.sdpa_causal_fp8(q_native, k_native, v_native, out_native, scale)
+
+
+def test_fp8_mma_direct() -> None:
+    """Run direct FP8 MMA test to debug C fragment layout.
+
+    This test runs the FP8 block-scale MMA instruction with known sparse inputs
+    and prints the results to verify correct fragment loading and output layout.
+
+    Requires SM120+ (RTX 5090 or newer).
+    """
+    from pygpukit.core.backend import get_native_module
+
+    native = get_native_module()
+    native.test_fp8_mma_direct()
+
+
 __all__ = [
     "sdpa_causal",
     "sdpa_causal_fixed_cache",
     "sdpa_causal_fixed_cache_ptr",
+    "fa3_fp8_available",
+    "get_sm_version",
+    "sdpa_causal_fp8",
+    "test_fp8_mma_direct",
 ]

@@ -56,4 +56,25 @@ void init_nn_attention(py::module_& m) {
           "Print TMA descriptor cache statistics (hits, misses, size).");
     m.def("clear_tma_cache", &ops::clear_tma_cache,
           "Clear all cached TMA descriptors.");
+
+    // FA3 FP8: FP8 Q@K^T with block-scale MMA, BF16 P@V (SM120+)
+    m.def("fa3_fp8_available", &ops::fa3_fp8_available,
+          "Check if FA3 FP8 (FP8 Q@K^T with block-scale MMA) is available.\n"
+          "Requires SM120+ (Blackwell GeForce).");
+
+    m.def("sdpa_causal_fp8", &ops::sdpa_causal_fp8,
+          py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("out"), py::arg("scale") = 0.0f,
+          "SDPA with FP8 Q@K^T using block-scale MMA (SM120+).\n"
+          "Input Q, K, V must be BFloat16 (auto-quantized to FP8 internally).\n"
+          "V stays BF16 for precision. ~50% memory bandwidth reduction.\n"
+          "~0.25% expected error vs BF16 FA3.\n"
+          "Q: [n_heads, q_len, head_dim]\n"
+          "K: [n_heads, kv_len, head_dim]\n"
+          "V: [n_heads, kv_len, head_dim]\n"
+          "out: [n_heads, q_len, head_dim]\n"
+          "scale: 1/sqrt(head_dim), auto-computed if <= 0");
+
+    // Debug test function for FP8 MMA C fragment layout
+    m.def("test_fp8_mma_direct", &ops::test_fp8_mma_direct,
+          "Run direct FP8 MMA test to debug C fragment layout (SM120+).");
 }
