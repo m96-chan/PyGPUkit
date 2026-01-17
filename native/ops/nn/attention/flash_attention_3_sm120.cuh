@@ -675,9 +675,21 @@ flash_attention_3_tma_kernel(
     }
 
     // Main loop: process KV tiles
+    // SYNC ANALYSIS: 6 syncs per KV tile (attempted reduction failed)
+    // All syncs are required:
+    // (0) after barrier_wait - mbarrier is per-thread, need block sync
+    // (1) after compute_scores - scores must complete before mask
+    // (2) after mask - mask must complete before softmax reads
+    // (3) after softmax phase1 - scores read must complete before probs write (union)
+    // (4) after softmax phase2 - probs must be written before P@V reads
+    // (5) end of loop - prevents cross-iteration TMA/read race
     for (int kv_tile = 0; kv_tile < num_kv_tiles; ++kv_tile) {
-        // Wait for current KV tile
+        // Wait for current KV tile (TMA completion)
         barrier_wait(smem.barriers[read_stage], phase);
+        // SYNC after barrier_wait: Required because mbarrier is per-thread wait.
+        // Without this, fast threads could proceed to compute_scores while
+        // slow threads are still at barrier_wait. The barrier only guarantees
+        // data arrival, not thread synchronization.
         __syncthreads();
 
         int kv_start = kv_tile * Config::TILE_KV;
@@ -688,6 +700,7 @@ flash_attention_3_tma_kernel(
         if (is_consumer) {
             consumer_compute_scores<Config>(smem, read_stage, scale, tid, Config::NUM_THREADS);
         }
+        // SYNC 1/4: All smem_scores writes must complete before mask reads/writes
         __syncthreads();
 
         // Apply causal mask (all threads participate for even work distribution)
@@ -700,6 +713,7 @@ flash_attention_3_tma_kernel(
                 }
             }
         }
+        // SYNC 2/4: Mask writes must complete before softmax reads scores
         __syncthreads();
 
         // === Two-Phase Softmax to Avoid Union Race Condition ===
@@ -720,7 +734,7 @@ flash_attention_3_tma_kernel(
             smem, kv_tile, kv_len, q_len, warp_id, lane_id,
             reg_probs, reg_rescales, reg_q_indices, num_rows_handled);
 
-        // CRITICAL SYNC: Ensure ALL score reads complete before ANY prob writes
+        // SYNC 3/4 (CRITICAL): Ensure ALL score reads complete before ANY prob writes
         // This prevents the union race condition between smem_scores and smem_probs
         __syncthreads();
 
@@ -729,7 +743,7 @@ flash_attention_3_tma_kernel(
             smem, warp_id, lane_id,
             reg_probs, reg_q_indices, num_rows_handled);
 
-        // Sync needed: probs written, P@V matmul reads them
+        // SYNC 4/4: All probs must be written before P@V matmul reads them
         __syncthreads();
 
         // Compute output: P @ V (only consumer warps do the matmul)
@@ -752,14 +766,20 @@ flash_attention_3_tma_kernel(
             write_stage = (write_stage + 1) % Config::NUM_STAGES;
         }
 
-        // Advance read stage and phase
+        // Advance read stage and phase (local variables, no sync needed)
         read_stage = (read_stage + 1) % Config::NUM_STAGES;
         if (read_stage == 0) phase ^= 1;
 
+        // SYNC 5/5 (END OF LOOP): Required to prevent cross-iteration race
+        // Without this, fast threads could start next iteration's prefetch
+        // (writing to stage X) while slow threads are still reading stage X
+        // from the current iteration's P@V matmul.
         __syncthreads();
     }
 
     // === Finalize: Normalize and write output ===
+    // FINAL SYNC: Ensures all P@V writes from final iteration are complete
+    // before any thread reads output_acc for normalization
     __syncthreads();
 
     const int64_t out_offset = (int64_t)(batch_idx * num_heads + head_idx) * seq_q * Config::HEAD_DIM;
