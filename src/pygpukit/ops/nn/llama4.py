@@ -249,7 +249,7 @@ def _sdpa_irope_cpu(
                     scores[j] = float("-inf")
 
             # Softmax
-            scores_max = np.max(scores)
+            scores_max: float = np.max(scores)
             scores_exp = np.exp(scores - scores_max)
             scores_softmax = scores_exp / np.sum(scores_exp)
 
