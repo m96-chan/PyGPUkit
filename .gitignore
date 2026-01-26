@@ -150,3 +150,4 @@ test_gpu/
 .claude/memory.jsonl
 .claude/benchmarks.db
 .claude/logs/
+examples/security/*_benchmark.py

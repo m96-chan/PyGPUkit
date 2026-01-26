@@ -24,9 +24,20 @@ from pygpukit.ops.nn.activation import (
 
 # Attention operations
 from pygpukit.ops.nn.attention import (
+    fa3_fp8_available,
+    get_sm_version,
     sdpa_causal,
     sdpa_causal_fixed_cache,
     sdpa_causal_fixed_cache_ptr,
+    sdpa_causal_fp8,
+    test_fp8_mma_direct,
+)
+
+# Fused operations
+from pygpukit.ops.nn.fused import (
+    geglu,
+    rmsnorm_residual,
+    swiglu,
 )
 
 # Linear operations
@@ -34,6 +45,13 @@ from pygpukit.ops.nn.linear import (
     bias_add_inplace,
     slice_rows_range_ptr,
     split_qkv_batch,
+)
+
+# Llama4 specific operations
+from pygpukit.ops.nn.llama4 import (
+    irope_scale_q,
+    l2norm,
+    sdpa_irope,
 )
 
 # Normalization layers
@@ -75,10 +93,23 @@ __all__ = [
     # Normalization
     "layernorm",
     "rmsnorm",
+    "l2norm",
+    # Fused operations
+    "rmsnorm_residual",
+    "swiglu",
+    "geglu",
+    # Llama4
+    "irope_scale_q",
+    "sdpa_irope",
     # Attention
     "sdpa_causal",
     "sdpa_causal_fixed_cache",
     "sdpa_causal_fixed_cache_ptr",
+    # FA3 FP8 (SM120+)
+    "fa3_fp8_available",
+    "get_sm_version",
+    "sdpa_causal_fp8",
+    "test_fp8_mma_direct",
     # RoPE
     "rope_inplace",
     "rope_inplace_f32table",

@@ -183,7 +183,12 @@ __all__ = [
     "cast_f16_to_f32",
     # Audio (submodule)
     "audio",
+    # Convolution
+    "conv1d",
 ]
 
 # Import audio submodule
 from pygpukit.ops import audio
+
+# Import conv operations
+from pygpukit.ops.conv import conv1d

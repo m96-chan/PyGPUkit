@@ -172,6 +172,8 @@ pybind11_add_module(${MODULE_NAME}
     ops/matmul/gemm/int4_int4/sm120/int4_via_int8.cu
     ops/matmul/gemm/w4a16_bf16/sm120/nvf4_cutlass.cu
     ops/matmul/gemm/w4a16_bf16/sm120/nvf4_nvf4_cutlass.cu
+    # FP8 block-scale MMA (SM120 native PTX)
+    ops/matmul/gemm/fp8_block_scale/fp8_block_scale_mma.cu
     # GEMV kernels (Issue #122: Reorganized with w{weight}a{act}_{out} naming)
     ops/matmul/gemv/w4a16_bf16/sm120/nvf4.cu
     ops/matmul/gemv/w4a16_bf16/sm120/nvf4_kernels.cu
@@ -184,6 +186,7 @@ pybind11_add_module(${MODULE_NAME}
     # NN ops - Issue #133: Modular source files compiled as single translation unit
     # Dispatch functions are in subdirectories (*.inl) included by nn.cu
     ops/nn/nn.cu
+    ops/conv/conv1d.cu
     ops/quantize/quantize.cu
     ops/attention/paged_attention.cu
     ops/batch/continuous_batching.cu
@@ -221,6 +224,9 @@ pybind11_add_module(${MODULE_NAME}
     bindings/nn/rope.cpp
     bindings/nn/recurrent.cpp
     bindings/nn/diffusion.cpp
+    bindings/nn/conv.cpp
+    bindings/nn/llama4.cpp
+    bindings/nn/fused.cpp
     # Bindings - GEMM operations (by dtype combination)
     bindings/gemm/generic.cpp
     bindings/gemm/fp8xfp8_bf16.cpp

@@ -15,8 +15,6 @@ Architecture (Large-v3 / kotoba-whisper-v2.0):
 
 import math
 
-import numpy as np
-
 from ...core import GPUArray, from_numpy
 from ...ops.matmul import matmul
 from ...ops.nn import gelu, layernorm
@@ -62,7 +60,9 @@ def _conv1d(
     stride: int = 1,
     padding: int = 0,
 ) -> GPUArray:
-    """1D convolution using im2col + matmul.
+    """1D convolution.
+
+    Uses native GPU kernel when available, with CPU fallback.
 
     Args:
         x: Input [batch, in_channels, length]
@@ -74,42 +74,9 @@ def _conv1d(
     Returns:
         Output [batch, out_channels, out_length]
     """
-    # CPU fallback implementation using im2col
-    # TODO: Implement native GPU conv1d kernel
-    x_np = x.to_numpy()
-    w_np = weight.to_numpy()
-    b_np = bias.to_numpy() if bias is not None else None
+    from pygpukit.ops.conv import conv1d
 
-    batch, in_channels, length = x_np.shape
-    out_channels, _, kernel_size = w_np.shape
-
-    # Apply padding
-    if padding > 0:
-        x_np = np.pad(x_np, ((0, 0), (0, 0), (padding, padding)), mode="constant")
-
-    # Compute output length
-    out_length = (x_np.shape[2] - kernel_size) // stride + 1
-
-    # im2col: extract patches
-    # Shape: [batch, in_channels * kernel_size, out_length]
-    col = np.zeros((batch, in_channels * kernel_size, out_length), dtype=x_np.dtype)
-    for i in range(out_length):
-        start = i * stride
-        end = start + kernel_size
-        col[:, :, i] = x_np[:, :, start:end].reshape(batch, -1)
-
-    # matmul: weight [out_channels, in_channels * kernel_size] @ col
-    # Result: [batch, out_channels, out_length]
-    w_flat = w_np.reshape(out_channels, -1)  # [out_channels, in_channels * kernel_size]
-    out = np.zeros((batch, out_channels, out_length), dtype=x_np.dtype)
-    for b in range(batch):
-        out[b] = w_flat @ col[b]
-
-    # Add bias
-    if b_np is not None:
-        out = out + b_np.reshape(1, -1, 1)
-
-    return from_numpy(out)
+    return conv1d(x, weight, bias, stride=stride, padding=padding)
 
 
 class WhisperEncoderLayer:
