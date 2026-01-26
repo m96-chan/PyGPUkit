@@ -36,6 +36,7 @@ void init_ops_bindings(py::module_& m) {
     init_nn_diffusion(m);
     init_nn_conv(m);
     init_nn_llama4(m);
+    init_nn_fused(m);
 
     // Embedding operations
     init_embedding_lookup(m);

@@ -59,6 +59,13 @@ from pygpukit.ops.nn.recurrent import (
     lstm_forward,
 )
 
+# Fused operations
+from pygpukit.ops.nn.fused import (
+    geglu,
+    rmsnorm_residual,
+    swiglu,
+)
+
 # RoPE operations
 from pygpukit.ops.nn.rope import (
     alibi_add_bias,
@@ -87,6 +94,10 @@ __all__ = [
     "layernorm",
     "rmsnorm",
     "l2norm",
+    # Fused operations
+    "rmsnorm_residual",
+    "swiglu",
+    "geglu",
     # Llama4
     "irope_scale_q",
     "sdpa_irope",

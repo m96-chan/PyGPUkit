@@ -43,3 +43,4 @@
 #include "recurrent/lstm.inl"
 #include "diffusion/diffusion.inl"
 #include "llama4/llama4.inl"
+#include "fused/fused.inl"
