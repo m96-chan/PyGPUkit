@@ -47,7 +47,7 @@ class Llama4Config:
     @classmethod
     def from_json(cls, path: str | Path) -> Llama4Config:
         """Load config from HuggingFace config.json."""
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         text_config = data.get("text_config", data)
@@ -280,8 +280,10 @@ class Llama4Model:
 
         # Load config
         config = Llama4Config.from_json(model_path / "config.json")
-        print(f"Llama 4 config: {config.num_hidden_layers} layers, "
-              f"{config.num_attention_heads} heads, {config.hidden_size} hidden")
+        print(
+            f"Llama 4 config: {config.num_hidden_layers} layers, "
+            f"{config.num_attention_heads} heads, {config.hidden_size} hidden"
+        )
 
         # Load using PyGPUkit's safetensors loader
         index_path = model_path / "model.safetensors.index.json"

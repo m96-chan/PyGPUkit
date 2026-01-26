@@ -33,17 +33,18 @@ from pygpukit.ops.nn.attention import (
     test_fp8_mma_direct,
 )
 
+# Fused operations
+from pygpukit.ops.nn.fused import (
+    geglu,
+    rmsnorm_residual,
+    swiglu,
+)
+
 # Linear operations
 from pygpukit.ops.nn.linear import (
     bias_add_inplace,
     slice_rows_range_ptr,
     split_qkv_batch,
-)
-
-# Normalization layers
-from pygpukit.ops.nn.norm import (
-    layernorm,
-    rmsnorm,
 )
 
 # Llama4 specific operations
@@ -53,17 +54,16 @@ from pygpukit.ops.nn.llama4 import (
     sdpa_irope,
 )
 
+# Normalization layers
+from pygpukit.ops.nn.norm import (
+    layernorm,
+    rmsnorm,
+)
+
 # Recurrent operations
 from pygpukit.ops.nn.recurrent import (
     lstm_bidirectional,
     lstm_forward,
-)
-
-# Fused operations
-from pygpukit.ops.nn.fused import (
-    geglu,
-    rmsnorm_residual,
-    swiglu,
 )
 
 # RoPE operations

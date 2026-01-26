@@ -189,7 +189,269 @@ Replace WMMA with Blackwell-native wgmma instructions:
 - Benchmark: `examples/benchmark_fa3_tma.py`
 - NCU batch: `run_ncu_tma.bat`
 
+## Bottleneck Analysis (2026-01-16)
+
+### NCU Profiling Attempt
+NCU requires administrator privileges on Windows. Analysis performed via code structure review.
+
+### Verdict: Type A (Compute Inefficiency) is Dominant
+
+**Primary Bottleneck: WMMA API on SM120**
+- WMMA 16×16×16 designed for Volta/Ampere
+- SM120 has wgmma with 64×64×16+ tiles
+- Blackwell tensor cores significantly underutilized by WMMA
+- All implementations (FA2, FA3, TMA) show ~0.7 TFLOPS → common bottleneck
+
+**Secondary Issues:**
+- 4 producer warps idle during compute (33% waste)
+- 5-6 __syncthreads() per KV tile iteration
+- Small TILE_Q=32 limits parallelism
+
+### Recommendation
+**Proceed with wgmma refactor** (expected 5-10x improvement)
+
+### Implementation Plan for wgmma
+1. Replace WMMA with `wgmma.mma_async` PTX inline assembly
+2. Larger tile sizes (64×128 or 64×64 per warp group)
+3. Async warpgroup execution pattern
+4. Reduce producer warps to 2 (increase consumers to 10)
+
+## Optimization Analysis (2026-01-17)
+
+### 1. NSYS Barrier Stall Analysis
+- **Sync overhead: ~0.2%** (NOT the bottleneck)
+- Kernel stats: ~1.09ms average, 23 invocations
+- CUDA API: 46.7% sync, 24.7% H2D, 22.3% D2H
+- GPU metrics require admin on Blackwell (RTX 5090)
+
+### 2. Swizzle Optimization Analysis
+- All SMEM buffers have 256-byte stride = 64 banks (wraps every row)
+- Potential 2-way bank conflicts for BF16
+- No explicit swizzle implemented
+- WMMA may hide latency through hardware scheduling
+- **Recommendation**: Swizzle could help but uncertain ROI at 64.6 TFLOPS
+
+### 3. Warp Ratio Tuning Results
+
+| Version | Producer | Consumer | Total | Avg TFLOPS | Peak TFLOPS |
+|---------|----------|----------|-------|------------|-------------|
+| V0 | 4 | 8 | 12 | 62.81 | 64.58 |
+| V3 | 2 | 10 | 12 | 62.69 | 64.58 |
+| V4 | 4 | 12 | 16 | 63.49 | 64.56 |
+| V5 | 2 | 14 | 16 | 63.15 | 64.60 |
+| **V6** | **4** | **16** | **20** | **63.57** | **64.60** |
+
+**Key Findings:**
+- All versions hit same ~64.6 TFLOPS ceiling → **common bottleneck**
+- V6 (4+16 warps) has best average TFLOPS
+- 4 producers better than 2 (more TMA issuing warps helps)
+- More consumer warps marginally helps
+- **Ceiling is NOT warp-ratio dependent**
+
+### Bottleneck Conclusion
+Performance ceiling (~64.6 TFLOPS) is constrained by:
+1. **WMMA instruction throughput** - WMMA 16×16×16 underutilizes SM120 tensor cores
+2. **6 syncs per KV tile** - Required for correctness (see sync analysis)
+3. Potential solution: **wgmma upgrade** for larger tiles and async execution
+
+## wgmma Investigation (2026-01-17)
+
+### Critical Finding: SM120 Has NO wgmma
+
+**Architecture Comparison:**
+| Feature | SM90 (Hopper) | SM100 (Blackwell DC) | SM120 (Blackwell GeForce) |
+|---------|---------------|----------------------|---------------------------|
+| wgmma.mma_async | YES | NO | **NO** |
+| tcgen05.mma + TMEM | NO | YES | NO |
+| mma.sync.aligned | YES | YES | YES |
+| Block-scaled MMA | NO | YES | YES |
+
+**SM120 Available Instructions:**
+- `mma.sync.aligned.m16n8k16` for BF16 (current WMMA)
+- `mma.sync.aligned.block_scale.m64n64k32.f32.e4m3.e4m3` for FP8
+- `mma.sync.aligned.block_scale.m64n64k64.f32.nvf4.nvf4` for NVFP4
+
+**Conclusion:** BF16 at 64.6 TFLOPS is the **architectural ceiling** for SM120.
+Only FP8/NVFP4 can achieve larger tile sizes (64×64 vs 16×8).
+
+## FP8 Attention Re-evaluation (2026-01-17)
+
+### Test Summary
+Comprehensive CPU simulation of FP8 E4M3 attention with various scaling strategies.
+
+### Key Findings
+
+**1. Per-element FP8 Quantization Error:**
+- Mean relative error: ~2.3% per element
+- Max relative error: ~6% per element
+- This is acceptable for individual values
+
+**2. Matmul Accumulation Error (Q@K^T):**
+- **20-45% relative error** even with optimal scaling
+- Error compounds over head_dim=128 accumulations
+- Scaling (absmax, per-row, per-head) provides minimal improvement
+
+**3. Softmax Sensitivity:**
+- Softmax is NOT the problem
+- Score errors of 0.1 cause only ~0.0003 probability error
+- Almost no error amplification from softmax
+
+**4. Full Attention Results:**
+| Strategy | Relative Error |
+|----------|---------------|
+| Naive FP8 | 25-35% |
+| Scaled FP8 | 24-32% |
+| Per-head scaled | 27-28% |
+
+**5. Input Value Distribution:**
+- Real attention inputs use <1% of FP8 dynamic range
+- Even scaling to 100 doesn't help
+- Best scale factor found: 5.0 with 24.75% error
+
+### Root Cause Analysis
+FP8 E4M3 has only 3 mantissa bits:
+- ~12.5% relative precision per element
+- Matmul over N=128 elements accumulates correlated rounding errors
+- Result: 20-35% error is **fundamental limitation**, not implementation issue
+
+### Conclusion (Scoped to Test Conditions)
+
+**テスト条件での結論:**
+- FP8（per-head / 単一スケール）で Q@K^T を FP8 演算 → **20-45% 誤差で不適**
+- BF16 FA3 TMA (SM120) で **~65 TFLOPS が現実的な生産目標**
+
+**一般化してはいけない点:**
+- FP8 の量子化そのもの（要素単体 ~2.3%）は許容域
+- Q@K^T が壊れる理由 = スケール粒度が粗すぎる
+- Block-scaled FP8 (MXFP8等) なら再評価余地あり
+
+**Q@K^T が特に壊れやすい理由:**
+- Softmax前のlogitは、小さな相対誤差でも「順位（どこが最大か）」が崩れる
+- その後のsoftmaxで「注意の向きが別方向」になりやすい
+- GEMMとしての誤差ではなく、attention semantics の破壊
+
+### FP8 の実用パス
+
+**Path A: KV cache FP8 (推奨・低コスト)**
+- Q@K^T はBF16のまま（精度問題を踏まない）
+- KV cache のみ FP8 で格納 → dequant → BF16 GEMM
+- 帯域削減の旨み（特に長文で効く）
+- 実装: 「dequant → BF16 GEMM」なら現実的
+
+**Path B: Block-scaled FP8 (中〜高コスト)**
+- per-head ではなく per-(head, token_block) 粒度
+- CUTLASS の blockscaled MMA パスを利用
+- MXFP8 等の規格に準拠
+- 工数: 中〜高
+
+### Recommendation
+1. **BF16 FA3 TMA (SM120) ~65 TFLOPS** を生産目標として確定
+2. FP8 は「危険な主役」ではなく「脇役の帯域削減」から入る
+3. 次の一手: **KV cache FP8** で帯域メリットだけ取る
+
+## FP8 Selective Quantization 発見 (2026-01-17)
+
+### 決定的実験結果
+
+| Quantization | Relative Error |
+|--------------|----------------|
+| Q=FP8, K=FP32, V=FP32 | **0.30%** |
+| Q=FP32, K=FP8, V=FP32 | **0.22%** |
+| Q=FP32, K=FP32, V=FP8 | **32.98%** |
+| Q=FP8, K=FP8, V=FP32 | **0.40%** |
+| Q=FP32, K=FP8, V=FP8 | **32.97%** |
+| Q=FP8, K=FP8, V=FP8 | **32.89%** |
+
+### Key Insight
+
+**エラーの99%は V の量子化から来ている**
+
+理由:
+- Q @ K^T → softmax で正規化 → 小さな誤差は吸収される
+- P @ V → V の量子化誤差がそのまま出力に反映
+
+### 実用的結論
+
+1. **Q, K は FP8 で安全** (~0.3-0.4% error)
+2. **V は BF16 のままにする**
+3. 帯域削減 (Q, K の 50%) + 精度維持の両立が可能
+
+### 推奨実装パス
+
+```
+Q: FP8 storage → dequant → BF16 GEMM
+K: FP8 storage (KV cache) → dequant → BF16 GEMM
+V: BF16 storage (KV cache) → BF16 GEMM
+```
+
+帯域削減: Q=50%, K=50%, V=0% → 全体で ~33% 削減
+
+## GPU 検証結果 (2026-01-17)
+
+### CPU vs GPU 比較
+
+| 条件 | CPU (FP32 Sim) | GPU (BF16 FA3) |
+|------|----------------|----------------|
+| Q,K=FP8, V=BF16 | **0.4%** | **21-49%** |
+| Q,K=BF16, V=FP8 | 33% | **131%** |
+| All=FP8 | 33% | 131% |
+
+### 発見
+**CPU シミュレーションは楽観的すぎた**
+
+原因:
+1. CPU: FP32 中間精度で計算
+2. GPU: BF16 GEMM + BF16 中間値
+
+FP8 量子化誤差 + BF16 丸め誤差が複合して大きくなる
+
+### 結論の修正
+- **FP8/NVFP4 Q,K は BF16 FA3 では実用不可** (21-49% error)
+- CPU simulation の「Q,K は安全」は **BF16 環境では成立しない**
+- native FP8 block-scale MMA (FP32 accumulator) でないと精度が出ない
+
+## FP8 Block-Scale PoC Results (2026-01-17)
+
+### Key Finding: Q@K^T Score Error != Attention Output Error
+
+| Measurement | FP8 Q,K Error |
+|-------------|---------------|
+| Q@K^T scores (raw) | ~29% (high, small values near zero) |
+| Attention output (after softmax) | **0.25%** (softmax normalizes error) |
+
+### Selective Quantization Results (CPU FP32 Accum)
+
+| Strategy | Error |
+|----------|-------|
+| Q=FP8 only | 0.18% |
+| K=FP8 only | 0.19% |
+| **Q,K=FP8** | **0.25%** |
+| V=FP8 | 18.54% |
+| All=FP8 | 18.54% |
+
+### Root Cause of GPU vs CPU Discrepancy
+
+| Path | Accumulator | Q,K=FP8 Error |
+|------|-------------|---------------|
+| CPU simulation | FP32 | 0.25% |
+| GPU dequant-to-BF16 | BF16 | 21-49% |
+| Native block_scale MMA | FP32 | Expected ~0.25% |
+
+**The difference is accumulator precision, NOT quantization itself!**
+
+### Recommended SM120 FA4 Implementation
+
+1. **Phase 2: FP8 Q@K^T**
+   - mma.sync.aligned.block_scale.m64n64k32.f32.e4m3.e4m3
+   - Q, K = FP8 E4M3 (block-scaled, 32 elements per scale)
+   - Accumulator = FP32
+   - **VIABLE** (0.25% error expected)
+
+2. **P@V remains BF16 WMMA**
+   - V quantization error not absorbed by softmax
+   - V=FP8 gives ~18% error (unacceptable)
+
 ## Commit History
 - `dcd1f8e` - feat(attention): integrate TMA FA3 into SDPA dispatch
 - `adee44b` - wip(fa3): add TMA-enabled Flash Attention 3 kernel
-- (current) - fix(fa3): __syncthreads divergence bug, kernel now stable at scale
+- `028af30` - refactor(fa3): parallelize softmax and fix consumer warp indexing

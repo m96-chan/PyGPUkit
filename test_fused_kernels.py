@@ -1,5 +1,7 @@
 """Test fused NN kernels for correctness."""
+
 import numpy as np
+
 import pygpukit as pk
 
 
@@ -33,7 +35,7 @@ def test_rmsnorm_residual():
 
     # Expected: rmsnorm(x + residual) * gamma
     z_np = x_np + residual_np
-    rms = np.sqrt((z_np ** 2).mean(axis=-1, keepdims=True) + eps)
+    rms = np.sqrt((z_np**2).mean(axis=-1, keepdims=True) + eps)
     expected = (z_np / rms) * gamma_np
 
     # GPU computation with fused kernel
@@ -130,7 +132,7 @@ def test_geglu():
     # gelu(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     c1 = 0.7978845608  # sqrt(2/pi)
     c2 = 0.044715
-    gelu_gate = gate_np * 0.5 * (1 + np.tanh(c1 * (gate_np + c2 * gate_np ** 3)))
+    gelu_gate = gate_np * 0.5 * (1 + np.tanh(c1 * (gate_np + c2 * gate_np**3)))
     expected = gelu_gate * up_np
 
     # GPU computation with fused kernel
