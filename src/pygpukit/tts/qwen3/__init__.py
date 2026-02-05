@@ -24,6 +24,11 @@ from pygpukit.tts.qwen3.model import (
     VoiceClonePromptItem,
 )
 from pygpukit.tts.qwen3.speaker_encoder import SpeakerEncoder, SpeakerEncoderConfig
+from pygpukit.tts.qwen3.speech_decoder import (
+    SpeechDecoder,
+    SpeechDecoderConfig,
+    load_speech_decoder,
+)
 from pygpukit.tts.qwen3.speech_tokenizer import (
     SpeechTokenizer,
     SpeechTokenizerConfig,
@@ -43,6 +48,10 @@ __all__ = [
     # Speech tokenizer
     "SpeechTokenizer",
     "SpeechTokenizerConfig",
+    # Speech decoder (vocoder)
+    "SpeechDecoder",
+    "SpeechDecoderConfig",
+    "load_speech_decoder",
     # Loader
     "load_qwen3_tts",
     "load_safetensors_weights",

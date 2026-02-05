@@ -6,6 +6,7 @@ Usage:
     python examples/demo_qwen3_tts.py
     python examples/demo_qwen3_tts.py --text "Hello world" --speaker vivian
     python examples/demo_qwen3_tts.py --output output.wav
+    python examples/demo_qwen3_tts.py --no-audio  # Skip audio decoding
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import numpy as np
 
 # Model path
 MODEL_PATH = Path("F:/LLM/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+SPEECH_TOKENIZER_PATH = MODEL_PATH / "speech_tokenizer"
 
 
 def load_tokenizer():
@@ -42,6 +44,18 @@ def load_model():
     print(f"  Blocks: {len(model.talker.blocks)}")
     print(f"  Hidden size: {model.config.hidden_size}")
     return model
+
+
+def load_speech_decoder():
+    """Load the speech tokenizer decoder (vocoder)."""
+    from pygpukit.tts.qwen3.speech_decoder import load_speech_decoder as _load
+
+    print("Loading speech decoder (vocoder)...")
+    start = time.time()
+    decoder = _load(SPEECH_TOKENIZER_PATH)
+    elapsed = time.time() - start
+    print(f"Speech decoder loaded in {elapsed:.2f}s")
+    return decoder
 
 
 def get_speaker_config():
@@ -144,31 +158,50 @@ def save_codes_as_debug(codes: np.ndarray, output_path: Path):
     print(f"Saved codes to {output_path.with_suffix('.npy')}")
 
 
-def codes_to_placeholder_audio(codes: np.ndarray, sample_rate: int = 24000) -> np.ndarray:
-    """Convert codes to placeholder audio (for testing without decoder).
+def decode_codes_to_audio(decoder, codes: np.ndarray) -> np.ndarray:
+    """Decode codec tokens to audio waveform using speech decoder.
 
-    This creates a simple audio signal based on the codec values.
-    Real audio requires the speech tokenizer decoder.
+    Args:
+        decoder: SpeechDecoder instance
+        codes: Codec tokens [1, seq_len] or [seq_len]
+
+    Returns:
+        Audio waveform [samples]
     """
-    # Use first codebook only
-    if codes.ndim == 2:
-        first_codes = codes[0] if codes.shape[0] < codes.shape[1] else codes[:, 0]
-    else:
-        first_codes = codes
+    # Prepare codes in expected format [num_quantizers, seq_len]
+    if codes.ndim == 1:
+        codes = codes[np.newaxis, :]
 
-    # Each code represents ~80ms of audio at 12Hz frame rate
-    samples_per_frame = sample_rate // 12
+    # Flatten and filter out special tokens (>= 2048)
+    # Special tokens: BOS=2149, EOS=2150, PAD=2148, NOTHINK=2155
+    codes_flat = codes.flatten()
+    valid_mask = codes_flat < 2048
+    valid_codes = codes_flat[valid_mask]
 
-    # Create simple sinusoidal audio based on codes
-    audio = []
-    for code in first_codes:
-        # Map code to frequency (crude approximation)
-        freq = 200 + (code % 500)  # 200-700 Hz range
-        t = np.linspace(0, samples_per_frame / sample_rate, samples_per_frame)
-        wave = 0.3 * np.sin(2 * np.pi * freq * t)
-        audio.append(wave)
+    if len(valid_codes) == 0:
+        print("  Warning: No valid codec tokens to decode")
+        return np.zeros(4800, dtype=np.float32)  # Return 200ms of silence
 
-    return np.concatenate(audio).astype(np.float32)
+    print(f"  Filtered {len(codes_flat)} tokens -> {len(valid_codes)} valid codes")
+
+    # Reshape to [num_quantizers, seq_len]
+    # Single codebook - replicate to 16 quantizers
+    valid_codes = valid_codes[np.newaxis, :]
+    codes = np.tile(valid_codes, (16, 1))
+
+    print(f"\nDecoding {codes.shape[1]} codec frames to audio...")
+    start = time.time()
+    audio = decoder.decode(codes)
+    elapsed = time.time() - start
+
+    duration = len(audio) / 24000
+    rtf = duration / elapsed
+    print(f"  Audio samples: {len(audio)}")
+    print(f"  Duration: {duration:.2f}s")
+    print(f"  Decode time: {elapsed:.3f}s")
+    print(f"  Real-time factor: {rtf:.1f}x")
+
+    return audio
 
 
 def save_audio(audio: np.ndarray, output_path: Path, sample_rate: int = 24000):
@@ -224,6 +257,11 @@ def main():
         action="store_true",
         help="List available speakers and exit",
     )
+    parser.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Skip audio decoding (only generate codec tokens)",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -242,6 +280,11 @@ def main():
     tokenizer = load_tokenizer()
     model = load_model()
 
+    # Load speech decoder if needed
+    speech_decoder = None
+    if not args.no_audio:
+        speech_decoder = load_speech_decoder()
+
     # Generate codec tokens
     codes = generate_codec_tokens(
         model,
@@ -256,17 +299,18 @@ def main():
     output_path = Path(args.output)
     save_codes_as_debug(codes, output_path)
 
-    # Create placeholder audio (real audio requires speech tokenizer decoder)
-    print("\nCreating placeholder audio...")
-    print("  Note: Real audio requires speech tokenizer decoder (not yet implemented)")
-    audio = codes_to_placeholder_audio(codes)
-    save_audio(audio, output_path)
+    # Decode to audio
+    if speech_decoder is not None:
+        audio = decode_codes_to_audio(speech_decoder, codes)
+        # Normalize audio to prevent clipping
+        audio = audio / (np.abs(audio).max() + 1e-6) * 0.9
+        save_audio(audio, output_path)
+    else:
+        print("\nSkipping audio decoding (--no-audio flag)")
 
     print("\n" + "=" * 60)
     print("Demo completed!")
     print("=" * 60)
-    print("\nTo get real audio output, the speech tokenizer decoder")
-    print("needs to convert codec tokens to waveform.")
 
 
 if __name__ == "__main__":
