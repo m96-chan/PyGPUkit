@@ -32,6 +32,41 @@ from .speaker_encoder import SpeakerEncoder, compute_mel_spectrogram
 from .speech_tokenizer import SpeechTokenizer
 
 
+class TextProjection:
+    """2-layer MLP for projecting text embeddings to talker hidden size."""
+
+    def __init__(
+        self,
+        fc1_weight: GPUArray,
+        fc1_bias: GPUArray | None,
+        fc2_weight: GPUArray,
+        fc2_bias: GPUArray | None,
+    ):
+        self.fc1_weight = fc1_weight
+        self.fc1_bias = fc1_bias
+        self.fc2_weight = fc2_weight
+        self.fc2_bias = fc2_bias
+
+    def __call__(self, hidden: np.ndarray) -> np.ndarray:
+        """Project hidden states."""
+        # FC1: [batch, text_hidden] -> [batch, intermediate]
+        fc1_np = self.fc1_weight.to_numpy()
+        out = hidden @ fc1_np.T
+        if self.fc1_bias is not None:
+            out = out + self.fc1_bias.to_numpy()
+
+        # GELU activation
+        out = out * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (out + 0.044715 * out**3)))
+
+        # FC2: [batch, intermediate] -> [batch, hidden_size]
+        fc2_np = self.fc2_weight.to_numpy()
+        out = out @ fc2_np.T
+        if self.fc2_bias is not None:
+            out = out + self.fc2_bias.to_numpy()
+
+        return out
+
+
 @dataclass
 class Qwen3TTSConfig:
     """Configuration for Qwen3-TTS model."""
@@ -188,7 +223,7 @@ class TalkerModel:
         final_norm: Norm,
         codec_head: GPUArray,
         code_predictor: CodePredictor | None = None,
-        text_projection: GPUArray | None = None,
+        text_projection: TextProjection | None = None,
     ):
         self.config = config
         self.embed_tokens = embed_tokens
@@ -240,10 +275,9 @@ class TalkerModel:
         embed_np = self.embed_tokens.to_numpy()
         hidden = embed_np[input_ids]
 
-        # Text projection if available
+        # Text projection if available (2-layer MLP)
         if self.text_projection is not None:
-            proj_np = self.text_projection.to_numpy()
-            hidden = hidden @ proj_np.T
+            hidden = self.text_projection(hidden)
 
         hidden = from_numpy(hidden.astype(np.float32))
 
@@ -254,7 +288,8 @@ class TalkerModel:
             hidden, present_kv = block(
                 hidden,
                 position_ids=position_ids.tolist(),
-                past_key_value=past_kv,
+                past_kv=past_kv,
+                use_cache=past_key_values is not None,
             )
             present_key_values.append(present_kv)
 
@@ -715,6 +750,7 @@ __all__ = [
     "Qwen3TTSModel",
     "Qwen3TTSConfig",
     "TalkerModel",
+    "TextProjection",
     "CodePredictor",
     "VoiceClonePromptItem",
     "GenerationOutput",

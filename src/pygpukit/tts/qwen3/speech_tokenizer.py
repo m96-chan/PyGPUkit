@@ -304,7 +304,7 @@ class ResidualVectorQuantizer:
             Vectors [batch, seq_len, dim]
         """
         batch, num_q, seq_len = codes.shape
-        result = None
+        result: np.ndarray | None = None
 
         for i, quantizer in enumerate(self.quantizers[:num_q]):
             quantized = quantizer.decode(codes[:, i, :])
@@ -313,6 +313,8 @@ class ResidualVectorQuantizer:
             else:
                 result = result + quantized
 
+        # Should never be None if num_q > 0
+        assert result is not None, "No quantizers to decode"
         return result
 
 

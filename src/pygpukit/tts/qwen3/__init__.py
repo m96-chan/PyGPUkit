@@ -8,6 +8,13 @@ Provides:
 
 from __future__ import annotations
 
+from pygpukit.tts.qwen3.loader import (
+    build_qwen3_tts_config,
+    build_talker_model,
+    load_config,
+    load_qwen3_tts,
+    load_safetensors_weights,
+)
 from pygpukit.tts.qwen3.model import (
     CodePredictor,
     GenerationOutput,
@@ -36,4 +43,10 @@ __all__ = [
     # Speech tokenizer
     "SpeechTokenizer",
     "SpeechTokenizerConfig",
+    # Loader
+    "load_qwen3_tts",
+    "load_safetensors_weights",
+    "load_config",
+    "build_qwen3_tts_config",
+    "build_talker_model",
 ]
