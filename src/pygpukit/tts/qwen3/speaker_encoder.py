@@ -1,91 +1,42 @@
 """ECAPA-TDNN Speaker Encoder for Qwen3-TTS.
 
-Implements the Emphasized Channel Attention, Propagation and Aggregation
-Time Delay Neural Network for speaker embedding extraction.
+Extracts speaker embeddings from mel spectrograms for voice cloning.
 
-Architecture:
+Architecture (Qwen3-TTS-Base):
     Input (mel spectrogram) [batch, num_mels, time]
-        -> TDNN layer
-        -> SE-Res2Net blocks (with skip connections)
-        -> Multi-layer Feature Aggregation
-        -> Attentive Statistics Pooling
-        -> Final FC projection
-    Output (speaker embedding) [batch, embed_dim]
-
-Reference:
-    ECAPA-TDNN: Emphasized Channel Attention, Propagation and Aggregation
-    in TDNN Based Speaker Verification (https://arxiv.org/abs/2005.07143)
+        -> Initial TDNN (128 -> 512)
+        -> 3x SE-Res2Net blocks (512 channels)
+        -> Multi-layer Feature Aggregation (1536 -> 1536)
+        -> Attentive Statistics Pooling (-> 3072)
+        -> Final FC projection (3072 -> 2048)
+    Output (speaker embedding) [batch, 2048]
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from pygpukit.core.array import GPUArray
-from pygpukit.core.factory import from_numpy
 
 
 @dataclass
 class SpeakerEncoderConfig:
     """Configuration for ECAPA-TDNN Speaker Encoder."""
 
-    # Input
     num_mels: int = 128
     sample_rate: int = 24000
-
-    # TDNN channels
-    channels: Sequence[int] = (512, 512, 512, 512, 1536)
-
-    # SE-Res2Net
-    res2net_scale: int = 8
+    channels: int = 512
+    res2net_scale: int = 8  # 8 groups, 7 convs
     se_reduction: int = 128
-
-    # Output
-    embed_dim: int = 192
-
-    # Kernel sizes
-    kernel_sizes: Sequence[int] = (5, 3, 3, 3, 1)
-    dilations: Sequence[int] = (1, 2, 3, 4, 1)
+    embed_dim: int = 2048
 
 
 # =============================================================================
-# Basic Layers
+# Basic Layers (No BatchNorm in Qwen3-TTS-Base)
 # =============================================================================
-
-
-class BatchNorm1d:
-    """1D Batch Normalization."""
-
-    def __init__(
-        self,
-        weight: GPUArray,  # [channels]
-        bias: GPUArray,  # [channels]
-        running_mean: GPUArray,  # [channels]
-        running_var: GPUArray,  # [channels]
-        eps: float = 1e-5,
-    ):
-        self.weight = weight
-        self.bias = bias
-        self.running_mean = running_mean
-        self.running_var = running_var
-        self.eps = eps
-
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass (inference mode - uses running stats)."""
-        x_np = x.to_numpy()  # [batch, channels, length]
-
-        mean = self.running_mean.to_numpy().reshape(1, -1, 1)
-        var = self.running_var.to_numpy().reshape(1, -1, 1)
-        gamma = self.weight.to_numpy().reshape(1, -1, 1)
-        beta = self.bias.to_numpy().reshape(1, -1, 1)
-
-        x_norm = (x_np - mean) / np.sqrt(var + self.eps)
-        out = gamma * x_norm + beta
-
-        return from_numpy(out.astype(np.float32))
 
 
 class Conv1d:
@@ -93,120 +44,48 @@ class Conv1d:
 
     def __init__(
         self,
-        weight: GPUArray,  # [out_channels, in_channels, kernel_size]
-        bias: GPUArray | None = None,
-        stride: int = 1,
+        weight: np.ndarray,  # [out_channels, in_channels, kernel_size]
+        bias: np.ndarray | None = None,
         padding: int = 0,
-        dilation: int = 1,
-        groups: int = 1,
     ):
-        self.weight = weight
-        self.bias = bias
-        self.stride = stride
+        self.weight = weight.astype(np.float32)
+        self.bias = bias.astype(np.float32) if bias is not None else None
+        self.out_channels, self.in_channels, self.kernel_size = weight.shape
         self.padding = padding
-        self.dilation = dilation
-        self.groups = groups
 
-        self.out_channels = weight.shape[0]
-        self.in_channels = weight.shape[1] * groups
-        self.kernel_size = weight.shape[2]
-
-    def __call__(self, x: GPUArray) -> GPUArray:
+    def __call__(self, x: np.ndarray) -> np.ndarray:
         """Forward pass."""
-        batch_size = x.shape[0]
-        length = x.shape[2]
-
-        effective_kernel = self.dilation * (self.kernel_size - 1) + 1
-        out_length = (length + 2 * self.padding - effective_kernel) // self.stride + 1
-
-        x_np = x.to_numpy()
-        w_np = self.weight.to_numpy()
+        batch, in_ch, length = x.shape
 
         # Pad input
         if self.padding > 0:
-            x_np = np.pad(x_np, ((0, 0), (0, 0), (self.padding, self.padding)), mode="constant")
+            x = np.pad(x, ((0, 0), (0, 0), (self.padding, self.padding)), mode="constant")
 
-        if self.groups == 1:
-            # Standard convolution
-            col = np.zeros(
-                (batch_size, self.in_channels, self.kernel_size, out_length), dtype=np.float32
-            )
-            for i in range(self.kernel_size):
-                i_dilated = i * self.dilation
-                for j in range(out_length):
-                    j_strided = j * self.stride
-                    col[:, :, i, j] = x_np[:, :, j_strided + i_dilated]
+        out_length = x.shape[2] - self.kernel_size + 1
 
-            col = col.reshape(batch_size, -1, out_length)
-            w_reshaped = w_np.reshape(self.out_channels, -1)
-            out_np = np.einsum("bkl,ok->bol", col, w_reshaped)
-        else:
-            # Grouped convolution
-            in_channels_per_group = self.in_channels // self.groups
-            out_channels_per_group = self.out_channels // self.groups
+        # im2col convolution
+        col = np.zeros((batch, self.in_channels * self.kernel_size, out_length), dtype=np.float32)
+        for i in range(self.kernel_size):
+            col[:, i * self.in_channels : (i + 1) * self.in_channels, :] = x[:, :, i : i + out_length]
 
-            out_np = np.zeros((batch_size, self.out_channels, out_length), dtype=np.float32)
-
-            for g in range(self.groups):
-                in_start = g * in_channels_per_group
-                in_end = in_start + in_channels_per_group
-                out_start = g * out_channels_per_group
-                out_end = out_start + out_channels_per_group
-
-                x_group = x_np[:, in_start:in_end, :]
-                w_group = w_np[out_start:out_end, :, :]
-
-                col = np.zeros(
-                    (batch_size, in_channels_per_group, self.kernel_size, out_length),
-                    dtype=np.float32,
-                )
-                for i in range(self.kernel_size):
-                    i_dilated = i * self.dilation
-                    for j in range(out_length):
-                        j_strided = j * self.stride
-                        col[:, :, i, j] = x_group[:, :, j_strided + i_dilated]
-
-                col = col.reshape(batch_size, -1, out_length)
-                w_reshaped = w_group.reshape(out_channels_per_group, -1)
-                out_np[:, out_start:out_end, :] = np.einsum("bkl,ok->bol", col, w_reshaped)
+        # matmul
+        w_flat = self.weight.reshape(self.out_channels, -1)
+        out = np.einsum("oi,bil->bol", w_flat, col)
 
         if self.bias is not None:
-            bias_np = self.bias.to_numpy()
-            out_np = out_np + bias_np.reshape(1, -1, 1)
+            out = out + self.bias.reshape(1, -1, 1)
 
-        return from_numpy(out_np.astype(np.float32))
-
-
-class Linear:
-    """Linear layer."""
-
-    def __init__(self, weight: GPUArray, bias: GPUArray | None = None):
-        self.weight = weight
-        self.bias = bias
-
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass: y = xW^T + b."""
-        x_np = x.to_numpy()
-        w_np = self.weight.to_numpy()
-
-        out = x_np @ w_np.T
-
-        if self.bias is not None:
-            out = out + self.bias.to_numpy()
-
-        return from_numpy(out.astype(np.float32))
+        return out
 
 
-def relu(x: GPUArray) -> GPUArray:
+def relu(x: np.ndarray) -> np.ndarray:
     """ReLU activation."""
-    x_np = x.to_numpy()
-    return from_numpy(np.maximum(x_np, 0).astype(np.float32))
+    return np.maximum(x, 0)
 
 
-def sigmoid(x: GPUArray) -> GPUArray:
+def sigmoid(x: np.ndarray) -> np.ndarray:
     """Sigmoid activation."""
-    x_np = x.to_numpy()
-    return from_numpy((1.0 / (1.0 + np.exp(-x_np))).astype(np.float32))
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -88, 88)))
 
 
 # =============================================================================
@@ -214,214 +93,130 @@ def sigmoid(x: GPUArray) -> GPUArray:
 # =============================================================================
 
 
-class TDNNBlock:
-    """Time Delay Neural Network block.
-
-    Conv1d -> BatchNorm -> ReLU
-    """
-
-    def __init__(
-        self,
-        conv: Conv1d,
-        bn: BatchNorm1d,
-    ):
-        self.conv = conv
-        self.bn = bn
-
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass."""
-        x = self.conv(x)
-        x = self.bn(x)
-        x = relu(x)
-        return x
-
-
-class SEBlock:
-    """Squeeze-and-Excitation block for channel attention."""
-
-    def __init__(
-        self,
-        fc1: Linear,  # [reduction, channels]
-        fc2: Linear,  # [channels, reduction]
-    ):
-        self.fc1 = fc1
-        self.fc2 = fc2
-
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass: channel-wise attention."""
-        # x: [batch, channels, length]
-        x_np = x.to_numpy()
-
-        # Global average pooling
-        s = x_np.mean(axis=2)  # [batch, channels]
-        s = from_numpy(s.astype(np.float32))
-
-        # FC -> ReLU -> FC -> Sigmoid
-        s = relu(self.fc1(s))
-        s = sigmoid(self.fc2(s))
-
-        # Scale channels
-        s_np = s.to_numpy()[:, :, np.newaxis]
-        out = x_np * s_np
-
-        return from_numpy(out.astype(np.float32))
-
-
 class Res2NetBlock:
-    """Res2Net-style multi-scale feature extraction.
+    """Res2Net multi-scale feature extraction.
 
-    Splits input channels into `scale` groups, processes each group
-    with a 3x3 conv, and adds outputs hierarchically.
+    Splits into `scale` groups, processes with convs hierarchically.
     """
 
-    def __init__(
-        self,
-        convs: list[Conv1d],  # [scale-1] convolutions
-        scale: int = 8,
-    ):
-        self.convs = convs
+    def __init__(self, convs: list[Conv1d], scale: int = 8):
+        self.convs = convs  # 7 convs for scale=8
         self.scale = scale
 
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass with hierarchical residual connections."""
-        x_np = x.to_numpy()
-        batch, channels, length = x_np.shape
-        # width = channels // self.scale (implicit in split)
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        """Forward with hierarchical residual."""
+        batch, channels, length = x.shape
+        width = channels // self.scale
 
         # Split into groups
-        spx = np.split(x_np, self.scale, axis=1)
+        splits = [x[:, i * width : (i + 1) * width, :] for i in range(self.scale)]
 
         outputs = []
         sp = None
 
         for i in range(self.scale):
             if i == 0:
-                # First group: pass through
-                sp = spx[i]
+                sp = splits[i]
             elif i == 1:
-                # Second group: conv only
-                sp = self.convs[i - 1](from_numpy(spx[i].astype(np.float32))).to_numpy()
+                sp = relu(self.convs[i - 1](splits[i]))
             else:
-                # Other groups: add previous output, then conv
-                sp = spx[i] + sp
-                sp = self.convs[i - 1](from_numpy(sp.astype(np.float32))).to_numpy()
-
+                sp = relu(self.convs[i - 1](splits[i] + sp))
             outputs.append(sp)
 
-        # Concatenate all groups
-        out = np.concatenate(outputs, axis=1)
-        return from_numpy(out.astype(np.float32))
+        return np.concatenate(outputs, axis=1)
+
+
+class SEBlock:
+    """Squeeze-and-Excitation channel attention."""
+
+    def __init__(self, conv1: Conv1d, conv2: Conv1d):
+        self.conv1 = conv1
+        self.conv2 = conv2
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        """Forward: global pool -> FC -> ReLU -> FC -> Sigmoid -> scale."""
+        # Global average pooling
+        s = x.mean(axis=2, keepdims=True)  # [B, C, 1]
+
+        # FC layers (as 1x1 conv)
+        s = relu(self.conv1(s))
+        s = sigmoid(self.conv2(s))
+
+        return x * s
 
 
 class SERes2NetBlock:
     """SE-Res2Net block for ECAPA-TDNN.
 
-    TDNNBlock -> Res2Net -> Conv1d -> SE -> Residual
+    Structure: TDNN1 -> Res2Net -> TDNN2 -> SE -> Residual
     """
 
     def __init__(
         self,
-        tdnn: TDNNBlock,
+        tdnn1: Conv1d,
         res2net: Res2NetBlock,
-        conv: Conv1d,
-        bn: BatchNorm1d,
+        tdnn2: Conv1d,
         se: SEBlock,
-        shortcut: Conv1d | None = None,  # For channel mismatch
     ):
-        self.tdnn = tdnn
+        self.tdnn1 = tdnn1
         self.res2net = res2net
-        self.conv = conv
-        self.bn = bn
+        self.tdnn2 = tdnn2
         self.se = se
-        self.shortcut = shortcut
 
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass with residual connection."""
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        """Forward with residual."""
         residual = x
 
-        # TDNN
-        out = self.tdnn(x)
-
-        # Res2Net
+        out = relu(self.tdnn1(x))
         out = self.res2net(out)
-
-        # Conv + BN
-        out = self.conv(out)
-        out = self.bn(out)
-
-        # SE attention
+        out = relu(self.tdnn2(out))
         out = self.se(out)
 
-        # Residual
-        if self.shortcut is not None:
-            residual = self.shortcut(residual)
-
-        out_np = out.to_numpy() + residual.to_numpy()
-        out = relu(from_numpy(out_np.astype(np.float32)))
-
-        return out
+        return relu(out + residual)
 
 
 class AttentiveStatisticsPooling:
-    """Attentive Statistics Pooling for speaker embedding.
+    """Attentive Statistics Pooling.
 
-    Computes attention-weighted mean and standard deviation
-    across the time dimension.
+    Computes attention-weighted mean and std across time.
     """
 
-    def __init__(
-        self,
-        attention_conv: Conv1d,
-        attention_bn: BatchNorm1d,
-        attention_fc: Linear,
-    ):
-        self.attention_conv = attention_conv
-        self.attention_bn = attention_bn
-        self.attention_fc = attention_fc
+    def __init__(self, tdnn: Conv1d, conv: Conv1d):
+        self.tdnn = tdnn  # [4608, 128]
+        self.conv = conv  # [128, 1536]
 
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Forward pass: compute attention-weighted statistics.
+    def __call__(
+        self,
+        attn_input: np.ndarray,
+        stats_input: np.ndarray,
+    ) -> np.ndarray:
+        """Forward: attention weights from attn_input, stats from stats_input.
 
         Args:
-            x: Input [batch, channels, length]
+            attn_input: Features for attention computation [batch, 4608, time]
+            stats_input: Features to pool [batch, 1536, time]
 
         Returns:
-            Concatenated mean and std [batch, 2 * channels]
+            [batch, 3072] (mean + std concatenated)
         """
-        x_np = x.to_numpy()
-        batch, channels, length = x_np.shape
-
-        # Compute attention weights
-        # Conv -> Tanh -> Conv
-        attn = self.attention_conv(x)
-        attn = self.attention_bn(attn)
-        attn_np = np.tanh(attn.to_numpy())
-
-        # Global pooling for FC input
-        attn_pooled = attn_np.mean(axis=2)
-        attn_pooled = from_numpy(attn_pooled.astype(np.float32))
-        attn_weights = self.attention_fc(attn_pooled)
+        # Compute attention weights from concatenated features
+        attn = relu(self.tdnn(attn_input))  # [B, 128, T]
+        attn = self.conv(attn)  # [B, 1536, T]
 
         # Softmax over time
-        attn_weights_np = attn_weights.to_numpy()
-        attn_weights_np = attn_weights_np[:, :, np.newaxis]
-        attn_weights_np = np.broadcast_to(attn_weights_np, (batch, channels, length))
+        attn_max = attn.max(axis=2, keepdims=True)
+        attn_exp = np.exp(attn - attn_max)
+        attn_weights = attn_exp / (attn_exp.sum(axis=2, keepdims=True) + 1e-8)
 
-        # Normalize
-        attn_exp = np.exp(attn_weights_np - attn_weights_np.max(axis=2, keepdims=True))
-        attn_softmax = attn_exp / attn_exp.sum(axis=2, keepdims=True)
-
-        # Weighted mean
-        mean = (x_np * attn_softmax).sum(axis=2)
+        # Weighted mean of stats_input
+        mean = (stats_input * attn_weights).sum(axis=2)  # [B, 1536]
 
         # Weighted std
-        var = ((x_np - mean[:, :, np.newaxis]) ** 2 * attn_softmax).sum(axis=2)
+        var = ((stats_input - mean[:, :, np.newaxis]) ** 2 * attn_weights).sum(axis=2)
         std = np.sqrt(var + 1e-8)
 
-        # Concatenate mean and std
-        out = np.concatenate([mean, std], axis=1)
-
-        return from_numpy(out.astype(np.float32))
+        # Concatenate
+        return np.concatenate([mean, std], axis=1)  # [B, 3072]
 
 
 # =============================================================================
@@ -430,180 +225,93 @@ class AttentiveStatisticsPooling:
 
 
 class SpeakerEncoder:
-    """ECAPA-TDNN Speaker Encoder.
+    """ECAPA-TDNN Speaker Encoder for voice cloning.
 
     Extracts speaker embeddings from mel spectrograms.
-
-    Input: mel spectrogram [batch, num_mels, time]
-    Output: speaker embedding [batch, embed_dim]
     """
 
     def __init__(
         self,
         config: SpeakerEncoderConfig,
-        initial_tdnn: TDNNBlock,
+        initial_conv: Conv1d,
         se_res2net_blocks: list[SERes2NetBlock],
         mfa_conv: Conv1d,
         asp: AttentiveStatisticsPooling,
-        final_bn: BatchNorm1d,
-        final_fc: Linear,
+        fc: Conv1d,
     ):
         self.config = config
-        self.initial_tdnn = initial_tdnn
+        self.initial_conv = initial_conv
         self.se_res2net_blocks = se_res2net_blocks
         self.mfa_conv = mfa_conv
         self.asp = asp
-        self.final_bn = final_bn
-        self.final_fc = final_fc
+        self.fc = fc
 
-    def __call__(self, x: GPUArray) -> GPUArray:
-        """Extract speaker embedding.
+    def __call__(self, mel: np.ndarray | GPUArray) -> np.ndarray:
+        """Extract speaker embedding from mel spectrogram.
 
         Args:
-            x: Mel spectrogram [batch, num_mels, time]
+            mel: Mel spectrogram [batch, num_mels, time] or [num_mels, time]
 
         Returns:
-            Speaker embedding [batch, embed_dim]
+            Speaker embedding [batch, embed_dim] or [embed_dim]
         """
+        if isinstance(mel, GPUArray):
+            mel = mel.to_numpy()
+
+        squeeze = mel.ndim == 2
+        if squeeze:
+            mel = mel[np.newaxis, :, :]
+
+        x = mel.astype(np.float32)
+
         # Initial TDNN
-        out = self.initial_tdnn(x)
+        x = relu(self.initial_conv(x))  # [B, 512, T]
 
         # SE-Res2Net blocks with skip connections
-        outputs = [out]
+        outputs = [x]
         for block in self.se_res2net_blocks:
-            out = block(out)
-            outputs.append(out)
+            x = block(x)
+            outputs.append(x)
 
-        # Multi-layer Feature Aggregation
-        # Concatenate all outputs along channel dimension
-        mfa_input = np.concatenate([o.to_numpy() for o in outputs], axis=1)
-        mfa_input = from_numpy(mfa_input.astype(np.float32))
-        out = self.mfa_conv(mfa_input)
+        # Multi-layer Feature Aggregation (concatenate SE-Res2Net block outputs)
+        mfa_in = np.concatenate(outputs[1:], axis=1)  # [B, 1536, T] (512 * 3)
+        mfa_out = relu(self.mfa_conv(mfa_in))  # [B, 1536, T]
 
         # Attentive Statistics Pooling
-        out = self.asp(out)
+        # Attention computed from concat(mfa_in, mfa_out, mfa_out) = 4608 channels
+        # Statistics computed over mfa_out = 1536 channels
+        asp_attn_in = np.concatenate([mfa_in, mfa_out, mfa_out], axis=1)  # [B, 4608, T]
+        x = self.asp(asp_attn_in, mfa_out)  # [B, 3072]
 
-        # Final BN + FC
-        out = self.final_bn(from_numpy(out.to_numpy().reshape(out.shape[0], -1, 1)))
-        out_np = out.to_numpy().squeeze(-1)
-        out = self.final_fc(from_numpy(out_np.astype(np.float32)))
+        # Final FC (as 1x1 conv, need to add time dim)
+        x = x[:, :, np.newaxis]  # [B, 3072, 1]
+        x = self.fc(x)[:, :, 0]  # [B, 2048]
 
-        return out
+        if squeeze:
+            x = x[0]
 
-    @classmethod
-    def from_weights(
-        cls,
-        weights: dict[str, GPUArray],
-        config: SpeakerEncoderConfig | None = None,
-        prefix: str = "speaker_encoder",
-    ) -> SpeakerEncoder:
-        """Build speaker encoder from weight dictionary.
+        return x
+
+    def extract_embedding(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 24000,
+    ) -> np.ndarray:
+        """Extract speaker embedding from audio waveform.
 
         Args:
-            weights: Dictionary mapping weight names to GPUArrays
-            config: Encoder configuration (uses default if None)
-            prefix: Weight name prefix
+            audio: Audio waveform [samples] or [batch, samples]
+            sample_rate: Audio sample rate
 
         Returns:
-            SpeakerEncoder instance
+            Speaker embedding [embed_dim] or [batch, embed_dim]
         """
-        if config is None:
-            config = SpeakerEncoderConfig()
-
-        def get_weight(name: str) -> GPUArray:
-            full_name = f"{prefix}.{name}" if prefix else name
-            if full_name not in weights:
-                raise KeyError(f"Weight '{full_name}' not found")
-            return weights[full_name]
-
-        def get_weight_optional(name: str) -> GPUArray | None:
-            full_name = f"{prefix}.{name}" if prefix else name
-            return weights.get(full_name)
-
-        def build_conv(name: str, **kwargs) -> Conv1d:
-            return Conv1d(
-                weight=get_weight(f"{name}.weight"),
-                bias=get_weight_optional(f"{name}.bias"),
-                **kwargs,
-            )
-
-        def build_bn(name: str) -> BatchNorm1d:
-            return BatchNorm1d(
-                weight=get_weight(f"{name}.weight"),
-                bias=get_weight(f"{name}.bias"),
-                running_mean=get_weight(f"{name}.running_mean"),
-                running_var=get_weight(f"{name}.running_var"),
-            )
-
-        def build_linear(name: str) -> Linear:
-            return Linear(
-                weight=get_weight(f"{name}.weight"),
-                bias=get_weight_optional(f"{name}.bias"),
-            )
-
-        def build_tdnn(name: str, **kwargs) -> TDNNBlock:
-            return TDNNBlock(
-                conv=build_conv(f"{name}.conv", **kwargs),
-                bn=build_bn(f"{name}.bn"),
-            )
-
-        def build_se(name: str) -> SEBlock:
-            return SEBlock(
-                fc1=build_linear(f"{name}.fc1"),
-                fc2=build_linear(f"{name}.fc2"),
-            )
-
-        def build_res2net(name: str, scale: int) -> Res2NetBlock:
-            convs = []
-            for i in range(1, scale):
-                conv_name = f"{name}.convs.{i - 1}"
-                if f"{prefix}.{conv_name}.weight" in weights:
-                    convs.append(build_conv(conv_name, padding=1))
-            return Res2NetBlock(convs=convs, scale=scale)
-
-        def build_se_res2net(name: str, scale: int) -> SERes2NetBlock:
-            shortcut = None
-            shortcut_name = f"{name}.shortcut"
-            if f"{prefix}.{shortcut_name}.weight" in weights:
-                shortcut = build_conv(shortcut_name)
-
-            return SERes2NetBlock(
-                tdnn=build_tdnn(f"{name}.tdnn", padding=1),
-                res2net=build_res2net(f"{name}.res2net", scale),
-                conv=build_conv(f"{name}.conv"),
-                bn=build_bn(f"{name}.bn"),
-                se=build_se(f"{name}.se"),
-                shortcut=shortcut,
-            )
-
-        # Build model
-        initial_tdnn = build_tdnn("blocks.0", padding=2, dilation=1)
-
-        se_res2net_blocks = []
-        for i in range(1, len(config.channels) - 1):
-            block = build_se_res2net(f"blocks.{i}", config.res2net_scale)
-            se_res2net_blocks.append(block)
-
-        mfa_conv = build_conv("mfa")
-
-        asp = AttentiveStatisticsPooling(
-            attention_conv=build_conv("asp.attention_conv", padding=0),
-            attention_bn=build_bn("asp.attention_bn"),
-            attention_fc=build_linear("asp.attention_fc"),
+        mel = compute_mel_spectrogram(
+            audio,
+            sample_rate=sample_rate,
+            n_mels=self.config.num_mels,
         )
-
-        final_bn = build_bn("fc_bn")
-        final_fc = build_linear("fc")
-
-        return cls(
-            config=config,
-            initial_tdnn=initial_tdnn,
-            se_res2net_blocks=se_res2net_blocks,
-            mfa_conv=mfa_conv,
-            asp=asp,
-            final_bn=final_bn,
-            final_fc=final_fc,
-        )
+        return self(mel)
 
 
 # =============================================================================
@@ -619,7 +327,7 @@ def compute_mel_spectrogram(
     win_length: int = 1024,
     n_mels: int = 128,
     fmin: float = 0.0,
-    fmax: float = 12000.0,
+    fmax: float | None = None,
 ) -> np.ndarray:
     """Compute mel spectrogram from audio waveform.
 
@@ -631,16 +339,17 @@ def compute_mel_spectrogram(
         win_length: Window size
         n_mels: Number of mel bins
         fmin: Minimum frequency
-        fmax: Maximum frequency
+        fmax: Maximum frequency (default: sample_rate / 2)
 
     Returns:
         Mel spectrogram [batch, n_mels, time] or [n_mels, time]
     """
-    if audio.ndim == 1:
+    if fmax is None:
+        fmax = sample_rate / 2.0
+
+    squeeze = audio.ndim == 1
+    if squeeze:
         audio = audio[np.newaxis, :]
-        squeeze = True
-    else:
-        squeeze = False
 
     batch_size, audio_len = audio.shape
     num_frames = (audio_len - n_fft) // hop_length + 1
@@ -691,23 +400,19 @@ def _create_mel_filterbank(
 ) -> np.ndarray:
     """Create mel filterbank matrix."""
 
-    # Convert Hz to mel
     def hz_to_mel(hz):
         return 2595.0 * np.log10(1.0 + hz / 700.0)
 
     def mel_to_hz(mel):
         return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
 
-    # Mel points
     mel_min = hz_to_mel(fmin)
     mel_max = hz_to_mel(fmax)
     mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
     hz_points = mel_to_hz(mel_points)
 
-    # FFT bin indices
     bin_points = np.floor((n_fft + 1) * hz_points / sample_rate).astype(int)
 
-    # Create filterbank
     n_freq = n_fft // 2 + 1
     filterbank = np.zeros((n_mels, n_freq), dtype=np.float32)
 
@@ -716,12 +421,10 @@ def _create_mel_filterbank(
         f_center = bin_points[m + 1]
         f_right = bin_points[m + 2]
 
-        # Left slope
         for k in range(f_left, f_center):
             if f_center != f_left:
                 filterbank[m, k] = (k - f_left) / (f_center - f_left)
 
-        # Right slope
         for k in range(f_center, f_right):
             if f_right != f_center:
                 filterbank[m, k] = (f_right - k) / (f_right - f_center)
@@ -729,17 +432,115 @@ def _create_mel_filterbank(
     return filterbank
 
 
+# =============================================================================
+# Model Loading
+# =============================================================================
+
+
+def load_speaker_encoder(
+    model_path: str | Path,
+    config: SpeakerEncoderConfig | None = None,
+) -> SpeakerEncoder:
+    """Load speaker encoder from Qwen3-TTS-Base model.
+
+    Args:
+        model_path: Path to Qwen3-TTS-Base model directory
+        config: Optional config override
+
+    Returns:
+        SpeakerEncoder instance
+    """
+    import torch
+    from safetensors import safe_open
+
+    if config is None:
+        config = SpeakerEncoderConfig()
+
+    path = Path(model_path)
+    weights_path = path / "model.safetensors"
+
+    weights: dict[str, np.ndarray] = {}
+    with safe_open(str(weights_path), framework="pt") as f:
+        for key in f.keys():
+            if key.startswith("speaker_encoder."):
+                tensor = f.get_tensor(key)
+                # Remove prefix
+                name = key[len("speaker_encoder.") :]
+                if tensor.dtype == torch.bfloat16:
+                    weights[name] = tensor.float().cpu().numpy()
+                else:
+                    weights[name] = tensor.cpu().numpy()
+
+    if not weights:
+        raise ValueError(f"No speaker_encoder weights found in {weights_path}")
+
+    def get_weight(name: str) -> np.ndarray:
+        if name not in weights:
+            raise KeyError(f"Weight '{name}' not found")
+        return weights[name]
+
+    def get_bias(name: str) -> np.ndarray | None:
+        return weights.get(name)
+
+    def build_conv(prefix: str, padding: int = 0) -> Conv1d:
+        return Conv1d(
+            weight=get_weight(f"{prefix}.weight"),
+            bias=get_bias(f"{prefix}.bias"),
+            padding=padding,
+        )
+
+    def build_res2net(prefix: str) -> Res2NetBlock:
+        convs = []
+        for i in range(7):  # 7 convs for scale=8
+            conv = build_conv(f"{prefix}.blocks.{i}.conv", padding=1)
+            convs.append(conv)
+        return Res2NetBlock(convs, scale=8)
+
+    def build_se(prefix: str) -> SEBlock:
+        return SEBlock(
+            conv1=build_conv(f"{prefix}.conv1"),
+            conv2=build_conv(f"{prefix}.conv2"),
+        )
+
+    def build_se_res2net_block(prefix: str) -> SERes2NetBlock:
+        return SERes2NetBlock(
+            tdnn1=build_conv(f"{prefix}.tdnn1.conv"),
+            res2net=build_res2net(f"{prefix}.res2net_block"),
+            tdnn2=build_conv(f"{prefix}.tdnn2.conv"),
+            se=build_se(f"{prefix}.se_block"),
+        )
+
+    # Build model
+    initial_conv = build_conv("blocks.0.conv", padding=2)  # kernel=5, pad=2
+
+    se_res2net_blocks = [
+        build_se_res2net_block("blocks.1"),
+        build_se_res2net_block("blocks.2"),
+        build_se_res2net_block("blocks.3"),
+    ]
+
+    mfa_conv = build_conv("mfa.conv")
+
+    asp = AttentiveStatisticsPooling(
+        tdnn=build_conv("asp.tdnn.conv"),
+        conv=build_conv("asp.conv"),
+    )
+
+    fc = build_conv("fc")
+
+    return SpeakerEncoder(
+        config=config,
+        initial_conv=initial_conv,
+        se_res2net_blocks=se_res2net_blocks,
+        mfa_conv=mfa_conv,
+        asp=asp,
+        fc=fc,
+    )
+
+
 __all__ = [
     "SpeakerEncoder",
     "SpeakerEncoderConfig",
+    "load_speaker_encoder",
     "compute_mel_spectrogram",
-    # Layers (for potential reuse)
-    "TDNNBlock",
-    "SEBlock",
-    "Res2NetBlock",
-    "SERes2NetBlock",
-    "AttentiveStatisticsPooling",
-    "BatchNorm1d",
-    "Conv1d",
-    "Linear",
 ]

@@ -255,6 +255,7 @@ class TalkerModel:
         input_ids: np.ndarray,  # [seq_len] text token IDs
         position_ids: np.ndarray | None = None,
         past_key_values: list | None = None,
+        speaker_embedding: np.ndarray | None = None,  # [hidden_size] for voice clone
     ) -> tuple[np.ndarray, list]:
         """Forward pass through talker model.
 
@@ -262,6 +263,7 @@ class TalkerModel:
             input_ids: Text token IDs [seq_len]
             position_ids: Position IDs
             past_key_values: KV cache
+            speaker_embedding: Speaker embedding for voice cloning [hidden_size]
 
         Returns:
             (logits, present_key_values)
@@ -278,6 +280,10 @@ class TalkerModel:
         # Text projection if available (2-layer MLP)
         if self.text_projection is not None:
             hidden = self.text_projection(hidden)
+
+        # Add speaker embedding to first token (x_vector injection)
+        if speaker_embedding is not None:
+            hidden[0] = hidden[0] + speaker_embedding
 
         hidden = from_numpy(hidden.astype(np.float32))
 
@@ -311,6 +317,7 @@ class TalkerModel:
         top_k: int = 50,
         top_p: float = 1.0,
         eos_token_id: int | None = None,
+        speaker_embedding: np.ndarray | None = None,
     ) -> np.ndarray:
         """Generate codec tokens autoregressively.
 
@@ -321,6 +328,7 @@ class TalkerModel:
             top_k: Top-k sampling
             top_p: Top-p (nucleus) sampling
             eos_token_id: Stop token
+            speaker_embedding: Speaker embedding for voice cloning [hidden_size]
 
         Returns:
             Generated codec codes [num_codebooks, gen_len]
@@ -328,8 +336,8 @@ class TalkerModel:
         if eos_token_id is None:
             eos_token_id = self.config.codec_eos_token_id
 
-        # Prefill
-        logits, past_kv = self.forward(input_ids)
+        # Prefill (with speaker embedding injection)
+        logits, past_kv = self.forward(input_ids, speaker_embedding=speaker_embedding)
 
         # Sample first token
         first_logits = logits[-1]

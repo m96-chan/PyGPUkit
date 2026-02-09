@@ -18,14 +18,11 @@ from pygpukit.llm.layers import MLP, Attention, Norm, TransformerBlock
 from pygpukit.llm.layers.linear import LinearBF16
 
 from .model import (
-    CodePredictor,
     Qwen3TTSConfig,
     Qwen3TTSModel,
     TalkerModel,
     TextProjection,
 )
-from .speaker_encoder import SpeakerEncoder, SpeakerEncoderConfig
-from .speech_tokenizer import SpeechTokenizer, SpeechTokenizerConfig
 
 
 def _bf16_to_f32(tensor: np.ndarray) -> np.ndarray:
@@ -65,8 +62,8 @@ def load_safetensors_weights(
                 weights[key] = from_numpy(np_array.astype(np.float32))
 
         return weights
-    except ImportError:
-        raise ImportError("PyTorch and safetensors are required for loading weights")
+    except ImportError as err:
+        raise ImportError("PyTorch and safetensors are required for loading weights") from err
 
 
 def load_config(model_path: Path | str) -> dict[str, Any]:

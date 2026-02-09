@@ -1,6 +1,6 @@
 """Speech Tokenizer Decoder for Qwen3-TTS.
 
-Converts codec tokens to audio waveform.
+Converts codec tokens to audio waveform using PyGPUkit native ops.
 """
 
 from __future__ import annotations
@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+from pygpukit.core.array import GPUArray
+from pygpukit.core.factory import from_numpy
+from pygpukit.ops.conv import conv1d, conv_transpose1d
 
 
 @dataclass
@@ -102,7 +106,7 @@ def snake_beta(x: np.ndarray, alpha: np.ndarray, beta: np.ndarray) -> np.ndarray
 
 
 class ConvBlock:
-    """1D Convolution block using PyTorch for speed."""
+    """1D Convolution block using PyGPUkit native ops."""
 
     def __init__(self, weight: np.ndarray, bias: np.ndarray | None = None):
         """Initialize conv block.
@@ -111,15 +115,13 @@ class ConvBlock:
             weight: Conv weight [out_channels, in_channels, kernel_size]
             bias: Conv bias [out_channels]
         """
-        import torch
-
         self.out_channels, self.in_channels, self.kernel_size = weight.shape
-        self.weight_t = torch.from_numpy(weight.astype(np.float32))
-        self.bias_t = torch.from_numpy(bias.astype(np.float32)) if bias is not None else None
+        self.weight_gpu = from_numpy(weight.astype(np.float32))
+        self.bias_gpu = from_numpy(bias.astype(np.float32)) if bias is not None else None
         self.padding = self.kernel_size // 2
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        """Forward pass using PyTorch conv1d.
+    def __call__(self, x: np.ndarray | GPUArray) -> np.ndarray:
+        """Forward pass using PyGPUkit conv1d.
 
         Args:
             x: Input [batch, channels, seq_len]
@@ -127,16 +129,17 @@ class ConvBlock:
         Returns:
             Output [batch, out_channels, seq_len]
         """
-        import torch
-        import torch.nn.functional as F
+        if isinstance(x, np.ndarray):
+            x_gpu = from_numpy(x.astype(np.float32))
+        else:
+            x_gpu = x
 
-        x_t = torch.from_numpy(x.astype(np.float32))
-        out = F.conv1d(x_t, self.weight_t, self.bias_t, padding=self.padding)
-        return out.numpy()
+        out = conv1d(x_gpu, self.weight_gpu, self.bias_gpu, stride=1, padding=self.padding)
+        return out.to_numpy()
 
 
 class ConvTransposeBlock:
-    """1D Transposed Convolution for upsampling using PyTorch."""
+    """1D Transposed Convolution for upsampling using PyGPUkit."""
 
     def __init__(
         self,
@@ -151,18 +154,16 @@ class ConvTransposeBlock:
             bias: Conv bias [out_channels]
             stride: Upsampling stride
         """
-        import torch
-
         self.stride = stride
         self.in_channels, self.out_channels, self.kernel_size = weight.shape
-        self.weight_t = torch.from_numpy(weight.astype(np.float32))
-        self.bias_t = torch.from_numpy(bias.astype(np.float32)) if bias is not None else None
+        self.weight_gpu = from_numpy(weight.astype(np.float32))
+        self.bias_gpu = from_numpy(bias.astype(np.float32)) if bias is not None else None
         # Padding to maintain output_length = input_length * stride
         self.padding = (self.kernel_size - stride) // 2
         self.output_padding = (self.kernel_size - stride) % 2
 
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        """Forward pass with upsampling using PyTorch conv_transpose1d.
+    def __call__(self, x: np.ndarray | GPUArray) -> np.ndarray:
+        """Forward pass with upsampling using PyGPUkit conv_transpose1d.
 
         Args:
             x: Input [batch, in_channels, seq_len]
@@ -170,19 +171,20 @@ class ConvTransposeBlock:
         Returns:
             Output [batch, out_channels, seq_len * stride]
         """
-        import torch
-        import torch.nn.functional as F
+        if isinstance(x, np.ndarray):
+            x_gpu = from_numpy(x.astype(np.float32))
+        else:
+            x_gpu = x
 
-        x_t = torch.from_numpy(x.astype(np.float32))
-        out = F.conv_transpose1d(
-            x_t,
-            self.weight_t,
-            self.bias_t,
+        out = conv_transpose1d(
+            x_gpu,
+            self.weight_gpu,
+            self.bias_gpu,
             stride=self.stride,
             padding=self.padding,
             output_padding=self.output_padding,
         )
-        return out.numpy()
+        return out.to_numpy()
 
 
 class ResBlock:

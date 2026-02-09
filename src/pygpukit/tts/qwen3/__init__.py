@@ -23,11 +23,23 @@ from pygpukit.tts.qwen3.model import (
     TalkerModel,
     VoiceClonePromptItem,
 )
-from pygpukit.tts.qwen3.speaker_encoder import SpeakerEncoder, SpeakerEncoderConfig
+from pygpukit.tts.qwen3.speaker_encoder import (
+    SpeakerEncoder,
+    SpeakerEncoderConfig,
+    compute_mel_spectrogram,
+    load_speaker_encoder,
+)
 from pygpukit.tts.qwen3.speech_decoder import (
     SpeechDecoder,
     SpeechDecoderConfig,
     load_speech_decoder,
+)
+from pygpukit.tts.qwen3.speech_encoder import (
+    SpeechEncoder,
+    SpeechEncoderConfig,
+)
+from pygpukit.tts.qwen3.speech_encoder import (
+    load_speech_encoder as load_speech_encoder_icl,
 )
 from pygpukit.tts.qwen3.speech_tokenizer import (
     SpeechTokenizer,
@@ -45,9 +57,15 @@ __all__ = [
     # Speaker encoder
     "SpeakerEncoder",
     "SpeakerEncoderConfig",
+    "load_speaker_encoder",
+    "compute_mel_spectrogram",
     # Speech tokenizer
     "SpeechTokenizer",
     "SpeechTokenizerConfig",
+    # Speech encoder (ICL mode)
+    "SpeechEncoder",
+    "SpeechEncoderConfig",
+    "load_speech_encoder_icl",
     # Speech decoder (vocoder)
     "SpeechDecoder",
     "SpeechDecoderConfig",
