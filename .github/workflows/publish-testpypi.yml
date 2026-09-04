@@ -73,7 +73,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: "12.6.0"
           method: "network"
